@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grove</title>
+<script src="/webui.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f1ea;
+    --paper: #fffcf7;
+    --ink: #1d1a16;
+    --muted: #6f675d;
+    --line: #e3dcd1;
+    --mark: #f0e2b4;
+    --focus: #8a4e22;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.45 system-ui, sans-serif;
+  }
+  button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .wrap {
+    width: min(40rem, calc(100% - 2rem));
+    margin: 0 auto;
+    padding: 2.25rem 0 4rem;
+  }
+  header p {
+    margin: 0 0 0.85rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  header p.error { color: #8a2a1a; white-space: normal; }
+  form { margin: 0; }
+  input {
+    width: 100%;
+    font: inherit;
+    font-size: 1.15rem;
+    padding: 0.72rem 0.85rem;
+    border: 1px solid #d8d0c4;
+    border-radius: 10px;
+    background: var(--paper);
+    color: inherit;
+  }
+  input:focus {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+    border-color: transparent;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 0; }
+  .chips:empty { margin: 0; }
+  .chips:not(:empty) { margin-top: 0.7rem; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid #ddd4c8;
+    background: var(--paper);
+    border-radius: 999px;
+    padding: 0.12rem 0.45rem 0.12rem 0.7rem;
+    font-size: 0.85rem;
+  }
+  .chip button { color: var(--muted); padding: 0 0.2rem; line-height: 1; }
+  .chip.facet { padding-right: 0.7rem; color: var(--muted); }
+  .chip.facet .n { font-variant-numeric: tabular-nums; }
+  .chip.facet:hover, .chip.facet:focus-visible { color: var(--ink); border-color: #c4b8a8; }
+  .help, .count {
+    margin: 0.7rem 0 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .count { min-height: 1.2em; }
+  .err {
+    margin: 0.8rem 0 0;
+    color: #8a2a1a;
+  }
+  article { margin-top: 1.7rem; }
+  .name {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.28rem;
+    line-height: 1.3;
+  }
+  .name:hover, .passage:hover .text { background: #efe8dc; }
+  .folder, .doctitle {
+    margin: 0.15rem 0 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .passage {
+    display: block;
+    width: 100%;
+    margin-top: 0.75rem;
+  }
+  .where {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .text {
+    margin: 0.12rem 0 0;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.05rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+  }
+  mark {
+    background: var(--mark);
+    color: inherit;
+    padding: 0 0.12em;
+    border-radius: 2px;
+  }
+  .more {
+    margin-top: 0.55rem;
+    color: var(--focus);
+    font-size: 0.88rem;
+  }
+  .more:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <p id="index"></p>
+      <form id="find">
+        <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
+      </form>
+      <div class="chips" id="chips"></div>
+      <p class="help">Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix.</p>
+      <p class="count" id="count"></p>
+      <p class="err" id="err" hidden></p>
+    </header>
+    <main id="results"></main>
+  </div>
+<script>
+const q = document.getElementById("q");
+const chips = document.getElementById("chips");
+const count = document.getElementById("count");
+const err = document.getElementById("err");
+const results = document.getElementById("results");
+const indexLine = document.getElementById("index");
+let seq = 0;
+
+const extLabel = {
+  pdf: "PDFs", txt: "Text", md: "Markdown", html: "HTML", htm: "HTML",
+  docx: "Word", odt: "ODT", epub: "EPUB"
+};
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function (c) {
+    return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c];
+  });
+}
+
+function withMarks(s) {
+  return esc(s).replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
+}
+
+function baseName(path) {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+function folderOf(path) {
+  const i = path.lastIndexOf("/");
+  return i > 0 ? path.slice(0, i) : "";
+}
+
+function parseFilters(s) {
+  const found = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    const start = i;
+    let kind = "";
+    if (s.startsWith("ext:", i)) kind = "ext";
+    else if (s.startsWith("path:", i)) kind = "path";
+    if (kind) {
+      i += kind.length + 1;
+      let value = "";
+      if (s[i] === '"') {
+        i++;
+        let v = "";
+        while (i < s.length && s[i] !== '"') {
+          if (s[i] === "\\" && i + 1 < s.length) { i++; v += s[i]; }
+          else v += s[i];
+          i++;
+        }
+        value = v;
+        if (s[i] === '"') i++;
+      } else {
+        const b = i;
+        while (i < s.length && !/[\s)]/.test(s[i])) i++;
+        value = s.slice(b, i);
+      }
+      if (value) found.push({kind: kind, value: value, start: start, end: i});
+      continue;
+    }
+    if (s[i] === '"') {
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === "\\") i++;
+        i++;
+      }
+      if (s[i] === '"') i++;
+    } else if (s[i] === "(") {
+      i++;
+    } else {
+      while (i < s.length && !/[\s()]/.test(s[i])) i++;
+    }
+  }
+  return found;
+}
+
+function chipText(f) {
+  if (f.kind === "ext") {
+    const key = f.value.replace(/^\./, "").toLowerCase();
+    return extLabel[key] || f.value;
+  }
+  const trimmed = f.value.replace(/\/+$/, "");
+  const slash = trimmed.lastIndexOf("/");
+  const leaf = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return leaf || f.value;
+}
+
+function normExt(v) {
+  return String(v || "").replace(/^\./, "").toLowerCase();
+}
+
+function pathKey(v) {
+  return String(v || "").replace(/\/+$/, "").toLowerCase();
+}
+
+function facetApplied(filters, kind, value) {
+  for (let i = 0; i < filters.length; i++) {
+    const f = filters[i];
+    if (f.kind !== kind) continue;
+    if (kind === "ext" && normExt(f.value) === normExt(value)) return true;
+    if (kind === "path" && pathKey(f.value) === pathKey(value)) return true;
+  }
+  return false;
+}
+
+function quoteFilter(value) {
+  const s = String(value);
+  if (!/[\s"()]/.test(s)) return s;
+  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+function leafOf(value) {
+  const trimmed = String(value || "").replace(/\/+$/, "");
+  const slash = trimmed.lastIndexOf("/");
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+}
+
+function addFilter(kind, value) {
+  let cur = q.value;
+  const filters = parseFilters(cur);
+  if (facetApplied(filters, kind, value)) return;
+  const same = [];
+  for (let i = 0; i < filters.length; i++) {
+    if (filters[i].kind === kind) same.push(filters[i]);
+  }
+  for (let i = same.length - 1; i >= 0; i--) {
+    cur = (cur.slice(0, same[i].start) + " " + cur.slice(same[i].end)).replace(/\s+/g, " ").trim();
+  }
+  const token = kind + ":" + quoteFilter(value);
+  cur = cur.trim();
+  q.value = cur ? cur + " " + token : token;
+  q.focus();
+  runSearch();
+}
+
+function drawFacets(facets, query) {
+  const filters = parseFilters(query);
+  const types = (facets && facets.types) || [];
+  const folders = (facets && facets.folders) || [];
+  const leaves = {};
+  folders.forEach(function (f) {
+    const leaf = leafOf(f.value);
+    leaves[leaf] = (leaves[leaf] || 0) + 1;
+  });
+  function add(kind, value, label, count) {
+    if (!value || !count || facetApplied(filters, kind, value)) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip facet";
+    btn.title = kind + ":" + value;
+    const name = document.createElement("span");
+    name.textContent = label;
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = String(count);
+    const files = count === 1 ? "file" : "files";
+    btn.setAttribute("aria-label", label + ", " + count + " " + files);
+    btn.append(name, n);
+    btn.addEventListener("click", function () { addFilter(kind, value); });
+    chips.append(btn);
+  }
+  types.forEach(function (f) {
+    const key = normExt(f.value);
+    add("ext", key, extLabel[key] || f.value, f.count);
+  });
+  folders.forEach(function (f) {
+    const leaf = leafOf(f.value);
+    const label = leaves[leaf] > 1 ? String(f.value).replace(/\/+$/, "") : leaf;
+    add("path", f.value, label, f.count);
+  });
+}
+
+function drawChips(query) {
+  chips.replaceChildren();
+  parseFilters(query).forEach(function (f) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const label = document.createElement("span");
+    label.textContent = chipText(f);
+    label.title = f.kind + ":" + f.value;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.textContent = "×";
+    rm.setAttribute("aria-label", "Remove " + label.textContent);
+    rm.addEventListener("click", function () {
+      const cur = q.value;
+      q.value = (cur.slice(0, f.start) + " " + cur.slice(f.end)).replace(/\s+/g, " ").trim();
+      q.focus();
+      runSearch();
+    });
+    chip.append(label, rm);
+    chips.append(chip);
+  });
+}
+
+function showError(message) {
+  err.hidden = !message;
+  err.textContent = message || "";
+}
+
+function countLine(files, places) {
+  const fileWord = files === 1 ? "file" : "files";
+  const placeWord = places === 1 ? "place" : "places";
+  let line = files + " " + fileWord + " · " + places + " " + placeWord;
+  return line;
+}
+
+function addPassage(parent, hit, passage) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "passage";
+  const parts = [];
+  if (passage.section) {
+    parts.push(passage.section);
+  }
+  if (passage.page > 0) {
+    parts.push("p." + passage.page);
+  }
+  if (parts.length) {
+    const where = document.createElement("div");
+    where.className = "where";
+    where.textContent = parts.join(" · ");
+    btn.append(where);
+  }
+  const text = document.createElement("p");
+  text.className = "text";
+  text.innerHTML = withMarks(passage.text || "");
+  btn.append(text);
+  btn.addEventListener("click", function () {
+    openPath(hit.path, passage.offset || 0, passage.page || 0, placeNeedle(passage.text));
+  });
+  parent.append(btn);
+}
+
+function walkPassages(art, hit, passages, query) {
+  let shown = Math.min(2, passages.length);
+  let more = !!hit.more;
+  let busy = false;
+  if (shown >= passages.length && !more) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "more";
+  function label() {
+    if (more) return "Show more";
+    return "Show " + (passages.length - shown) + " more";
+  }
+  function reveal() {
+    const n = passages.length;
+    for (let i = shown; i < n; i++) addPassage(art, hit, passages[i]);
+    art.append(btn);
+    shown = n;
+  }
+  btn.textContent = label();
+  btn.addEventListener("click", async function () {
+    if (busy) return;
+    const generation = seq;
+    if (shown < passages.length) {
+      reveal();
+      if (!more) btn.remove();
+      else btn.textContent = label();
+      return;
+    }
+    if (!more) {
+      btn.remove();
+      return;
+    }
+    busy = true;
+    btn.disabled = true;
+    const last = passages[passages.length - 1];
+    try {
+      const raw = await grove_more(hit.path, last ? last.offset : 0, query);
+      if (generation !== seq) return;
+      const data = JSON.parse(raw);
+      if (data.error) {
+        showError(data.error);
+        busy = false;
+        btn.disabled = false;
+        return;
+      }
+      const next = data.passages || [];
+      for (let i = 0; i < next.length; i++) passages.push(next[i]);
+      more = !!data.more && next.length > 0;
+      reveal();
+      if (!more && shown >= passages.length) btn.remove();
+      else {
+        busy = false;
+        btn.disabled = false;
+        btn.textContent = label();
+      }
+    } catch (err) {
+      if (generation !== seq) return;
+      showError("Could not show more");
+      busy = false;
+      btn.disabled = false;
+    }
+  });
+  art.append(btn);
+}
+
+function render(hits, query) {
+  results.replaceChildren();
+  let places = 0;
+  hits.forEach(function (hit) {
+    const passages = hit.passages || [];
+    const counted = hit.nmatches;
+    places += typeof counted === "number" && counted > 0 ? counted : passages.length;
+    const art = document.createElement("article");
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "name";
+    name.textContent = baseName(hit.path || "");
+    name.addEventListener("click", function () { openPath(hit.path); });
+    art.append(name);
+    const folder = folderOf(hit.path || "");
+    if (folder) {
+      const line = document.createElement("p");
+      line.className = "folder";
+      line.textContent = folder;
+      line.title = folder;
+      art.append(line);
+    }
+    const title = (hit.title || "").trim();
+    const first = ((passages[0] && passages[0].text) || "").replace(/<<|>>/g, "");
+    const titleShown = title && title.toLowerCase() !== baseName(hit.path || "").toLowerCase() &&
+      first.toLowerCase().indexOf(title.toLowerCase()) === -1;
+    if (titleShown) {
+      const line = document.createElement("p");
+      line.className = "doctitle";
+      line.textContent = title;
+      art.append(line);
+    }
+    const shown = Math.min(2, passages.length);
+    for (let i = 0; i < shown; i++) addPassage(art, hit, passages[i]);
+    walkPassages(art, hit, passages, query);
+    results.append(art);
+  });
+  return places;
+}
+
+function placeNeedle(text) {
+  const raw = String(text || "");
+  let focus = raw.indexOf("<<");
+  if (focus < 0) focus = 0;
+  const brk = raw.lastIndexOf("\n", focus);
+  const start = brk < 0 ? 0 : brk + 1;
+  let end = raw.indexOf("\n", focus);
+  if (end < 0) end = raw.length;
+  let line = raw.slice(start, end).replace(/<<|>>/g, "").replace(/\s+/g, " ").trim();
+  if (line.length > 160) {
+    const before = raw.slice(start, focus).replace(/<<|>>/g, "").length;
+    line = line.slice(Math.max(0, before - 40), Math.max(0, before - 40) + 160).trim();
+  }
+  return line.length >= 12 ? line : "";
+}
+
+async function openPath(path, at, page, needle) {
+  showError("");
+  try {
+    const raw = arguments.length > 1
+      ? await grove_open(path, String(at), String(page || 0), needle || "")
+      : await grove_open(path);
+    const data = JSON.parse(raw);
+    if (data.error) showError(data.error);
+  } catch (e) {
+    showError("Could not open the file");
+  }
+}
+
+async function runSearch() {
+  const id = ++seq;
+  const query = q.value;
+  drawChips(query);
+  showError("");
+  if (!query.trim()) {
+    results.replaceChildren();
+    count.textContent = "";
+    return;
+  }
+  count.textContent = "Searching…";
+  let raw;
+  try {
+    raw = await grove_search(query);
+  } catch (e) {
+    if (id !== seq) return;
+    count.textContent = "";
+    showError("Search failed");
+    return;
+  }
+  if (id !== seq) return;
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    count.textContent = "";
+    showError("Search failed");
+    return;
+  }
+  if (data && data.error) {
+    results.replaceChildren();
+    count.textContent = "";
+    showError(data.error);
+    return;
+  }
+  const hits = Array.isArray(data) ? data : (data.hits || []);
+  drawFacets(data && data.facets, query);
+  const places = render(hits, query);
+  count.textContent = hits.length ? countLine(hits.length, places) : "No places";
+}
+
+document.getElementById("find").addEventListener("submit", function (e) {
+  e.preventDefault();
+  runSearch();
+});
+q.addEventListener("input", function () {
+  drawChips(q.value);
+});
+
+async function loadInfo() {
+  try {
+    const raw = await grove_info();
+    const info = JSON.parse(raw);
+    if (info.error) {
+      indexLine.textContent = info.error;
+      indexLine.classList.add("error");
+    } else {
+      const n = info.documents || 0;
+      const word = n === 1 ? "document" : "documents";
+      indexLine.textContent = info.index + " · " + n + " " + word;
+      indexLine.title = info.index || "";
+    }
+  } catch (e) {
+    indexLine.textContent = "";
+  }
+}
+
+function whenReady(fn) {
+  if (typeof grove_info === "function") fn();
+  else setTimeout(function () { whenReady(fn); }, 40);
+}
+whenReady(loadInfo);
+</script>
+</body>
+</html>

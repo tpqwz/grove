@@ -2,6 +2,7 @@
 #include "webui.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -1128,8 +1129,128 @@ static void usage(FILE *out) {
         "Note keeps text on one passage.\n"
         "\n"
         "The index directory is $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
-        "or ~/.local/share/grove.\n",
+        "or ~/.local/share/grove.\n"
+        "\n"
+        "When ui/page.html is next to this program, saving that file reloads\n"
+        "the open window. The process and the index stay. The query stays too.\n"
+        "A program that cannot see that file uses the page packed at build time.\n",
         out);
+}
+
+/* The host stays up. The page is the program, as in CToy: a save reloads it. */
+static char *live_path;
+static char *live_root;
+static char *live_name;
+static int live_page_error;
+static struct timespec live_mtim;
+static volatile int live_stop;
+static size_t live_win;
+
+static int mtim_eq(const struct timespec *a, const struct timespec *b) {
+    return a->tv_sec == b->tv_sec && a->tv_nsec == b->tv_nsec;
+}
+
+static char *absolute_file(const char *path) {
+    if (!path || access(path, R_OK) != 0) {
+        return NULL;
+    }
+    return realpath(path, NULL);
+}
+
+static char *find_live_page(void) {
+    const char *env = getenv("GROVE_PAGE");
+    if (env && *env) {
+        char *abs = absolute_file(env);
+        if (!abs) {
+            fprintf(stderr, "grove-ui: cannot read %s\n", env);
+            live_page_error = 1;
+        }
+        return abs;
+    }
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n > 0) {
+        exe[n] = 0;
+        char *slash = strrchr(exe, '/');
+        if (slash) {
+            *slash = 0;
+            char *rel = path_join(exe, "ui/page.html");
+            char *abs = absolute_file(rel);
+            free(rel);
+            if (abs) {
+                return abs;
+            }
+            rel = path_join(exe, "page.html");
+            abs = absolute_file(rel);
+            free(rel);
+            if (abs) {
+                return abs;
+            }
+        }
+    }
+    char *abs = absolute_file("ui/page.html");
+    if (abs) {
+        return abs;
+    }
+    return absolute_file("page.html");
+}
+
+static void live_clear(void) {
+    free(live_name);
+    free(live_root);
+    free(live_path);
+    live_name = NULL;
+    live_root = NULL;
+    live_path = NULL;
+}
+
+static int split_live_page(const char *abs) {
+    const char *slash = strrchr(abs, '/');
+    if (!slash || slash == abs || !slash[1]) {
+        return -1;
+    }
+    live_name = xstrdup(slash + 1);
+    live_root = xstrndup(abs, (size_t)(slash - abs));
+    if (!live_name || !live_root) {
+        free(live_name);
+        free(live_root);
+        live_name = NULL;
+        live_root = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void *live_watch(void *arg) {
+    (void)arg;
+    struct timespec pending;
+    int have_pending = 0;
+    memset(&pending, 0, sizeof pending);
+    while (!live_stop) {
+        struct stat st;
+        if (stat(live_path, &st) == 0 && st.st_size > 0 && !mtim_eq(&st.st_mtim, &live_mtim)) {
+            if (have_pending && mtim_eq(&st.st_mtim, &pending)) {
+                live_mtim = st.st_mtim;
+                have_pending = 0;
+                /* Keep the query the way CToy keeps a registered block. */
+                webui_run(live_win,
+                          "(function(){try{var q=document.getElementById('q');"
+                          "var a=document.getElementById('also');"
+                          "if(q)sessionStorage.setItem('grove.q',q.value);"
+                          "if(a)sessionStorage.setItem('grove.also',a.value);"
+                          "}catch(e){}location.reload();})()");
+                fprintf(stderr, "grove-ui: reloaded %s\n", live_path);
+                fflush(stderr);
+            } else {
+                pending = st.st_mtim;
+                have_pending = 1;
+            }
+        } else {
+            have_pending = 0;
+        }
+        usleep(100000);
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -1188,6 +1309,18 @@ int main(int argc, char **argv) {
         fprintf(stderr, "grove-ui: %s\n", open_err);
     }
 
+    live_path = find_live_page();
+    if (live_page_error) {
+        if (ix) {
+            index_close(ix);
+        }
+        free(index_dir);
+        return 1;
+    }
+    if (live_path && split_live_page(live_path) != 0) {
+        live_clear();
+    }
+
     size_t win = webui_new_window();
     webui_set_size(win, 1040, 840);
     webui_set_center(win);
@@ -1208,13 +1341,31 @@ int main(int argc, char **argv) {
         fprintf(stderr, "grove-ui: port %zu is not available\n", port);
         return 1;
     }
-    if (!webui_show(win, page_html)) {
+    if (live_root && !webui_set_root_folder(win, live_root)) {
+        fprintf(stderr, "grove-ui: could not serve %s\n", live_root);
+        live_clear();
+    }
+    if (!webui_show(win, live_name ? live_name : page_html)) {
         fprintf(stderr, "grove-ui: could not open a browser window\n");
+        live_clear();
         return 1;
     }
     const char *url = webui_get_url(win);
     fprintf(stderr, "grove-ui: %s\n", url ? url : "");
+    if (live_path) {
+        fprintf(stderr, "grove-ui: watching %s\n", live_path);
+    }
     fflush(stderr);
+
+    pthread_t watcher;
+    int watching = 0;
+    struct stat st;
+    if (!smoke && live_path && stat(live_path, &st) == 0) {
+        live_mtim = st.st_mtim;
+        live_win = win;
+        live_stop = 0;
+        watching = pthread_create(&watcher, NULL, live_watch, NULL) == 0;
+    }
 
     if (smoke) {
         char kicked[64];
@@ -1258,7 +1409,12 @@ int main(int argc, char **argv) {
     }
 
     webui_wait();
+    if (watching) {
+        live_stop = 1;
+        pthread_join(watcher, NULL);
+    }
     webui_clean();
+    live_clear();
     if (ix) {
         index_close(ix);
     }

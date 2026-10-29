@@ -996,11 +996,26 @@ function whenReady(fn) {
   if (typeof grove_info === "function") fn();
   else setTimeout(function () { whenReady(fn); }, 40);
 }
+function restoreQuery() {
+  let qv = "";
+  let av = "";
+  try {
+    qv = sessionStorage.getItem("grove.q") || "";
+    av = sessionStorage.getItem("grove.also") || "";
+  } catch (e) {
+    return;
+  }
+  if (!qv && !av) return;
+  if (qv) q.value = qv;
+  if (av) also.value = av;
+  runSearch();
+}
 whenReady(function () {
   loadInfo();
   loadSaved();
   loadNotes();
   loadAlerts();
+  restoreQuery();
 });
 </script>
 </body>

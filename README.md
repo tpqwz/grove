@@ -61,6 +61,8 @@ make ui
 
 `grove-ui` uses the same compiled-in SQLite and also links WebUI, which needs a browser at runtime. `--index DIR` selects the index, as it does for `grove`.
 
+Saving `ui/page.html` reloads the open window. The process and the index stay up, and the query in the box is kept. That is the same idea as CToy: the host stays, and the page is replaced when the file is saved. A copy of the program that cannot see `ui/page.html` uses the page packed at build time and does not watch for saves. `$GROVE_PAGE` names a different file. Changing the C sources still needs `make ui` and a new process.
+
 ## Samples
 
 `samples/books` is a small shelf of public-domain EPUBs for trying search outside the synthetic tests. `samples/SOURCES.md` lists each file, its Project Gutenberg number, and where it came from. Better Gutenberg packs those Gutenberg texts. The Loebolus PDFs checked while gathering this shelf are scanned page images; grove does not OCR, so they are not included.

@@ -755,20 +755,29 @@ function placeNeedle(text) {
   const lead = flat.length - flat.trimStart().length;
   flat = flat.trimStart();
   at = Math.max(0, Math.min(flat.length, at - lead));
-  const MIN = 80;
-  const MAX = 480;
+  // Okular keeps a line break as a newline, and find cannot cross it.
+  // A long passage never matches. A short run around the highlight does.
+  const MIN = 12;
+  const MAX = 22;
   if (flat.length < MIN) return "";
   if (flat.length <= MAX) return flat;
-  let a = Math.max(0, at - 160);
+  let a = Math.max(0, at - 4);
   let b = Math.min(flat.length, a + MAX);
-  if (b - a < MAX) a = Math.max(0, b - MAX);
   if (a > 0) {
     const spc = flat.indexOf(" ", a);
-    if (spc !== -1 && spc < a + 40 && spc < at) a = spc + 1;
+    if (spc !== -1 && spc <= a + 8 && spc < at) a = spc + 1;
   }
   if (b < flat.length) {
     const spc = flat.lastIndexOf(" ", b);
     if (spc > a + MIN) b = spc;
+  }
+  if (at < a || at >= b) {
+    a = at;
+    b = Math.min(flat.length, a + MAX);
+    if (b < flat.length) {
+      const spc = flat.lastIndexOf(" ", b);
+      if (spc > a + MIN) b = spc;
+    }
   }
   const slice = flat.slice(a, b).trim();
   return slice.length >= MIN ? slice : "";

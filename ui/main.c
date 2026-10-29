@@ -652,9 +652,10 @@ static int query_desktop(const char *mime, char *desk, size_t n) {
 }
 
 /* The passage, as one line the reader can search. Grove's own "... " and
- * " ..." are not in the file. Under 80 characters the same words often
- * occur earlier, so the search is refused and the file just opens. */
-enum { NEEDLE_MIN = 80, NEEDLE_MAX = 480 };
+ * " ..." are not in the file. Okular keeps a line break as a newline, and
+ * its find cannot cross that, so a long passage never matches. A run of
+ * about four words does. Under 12 characters the file just opens. */
+enum { NEEDLE_MIN = 12, NEEDLE_MAX = 22 };
 
 static char *clean_needle(const char *in) {
     if (!in || !in[0]) {
@@ -726,6 +727,30 @@ static int open_reader(char *const argv[]) {
     return spawn_detached(argv);
 }
 
+/* The desktop id says Okular. The package may be absent while the Flatpak
+ * is what actually opens the book. xdg-open then shows page 1, with no
+ * --find. */
+static const char *okular_bin(void) {
+    if (on_path("okular")) {
+        return "okular";
+    }
+    if (on_path("org.kde.okular")) {
+        return "org.kde.okular";
+    }
+    const char *home = getenv("HOME");
+    static char user_bin[4096];
+    if (home && home[0]) {
+        int n = snprintf(user_bin, sizeof user_bin, "%s/.local/share/flatpak/exports/bin/org.kde.okular", home);
+        if (n > 0 && (size_t)n < sizeof user_bin && access(user_bin, X_OK) == 0) {
+            return user_bin;
+        }
+    }
+    if (access("/var/lib/flatpak/exports/bin/org.kde.okular", X_OK) == 0) {
+        return "/var/lib/flatpak/exports/bin/org.kde.okular";
+    }
+    return NULL;
+}
+
 static int open_pdf(const char *path, const char *desk, int page, const char *needle) {
     char pg[32];
     snprintf(pg, sizeof pg, "%d", page);
@@ -752,9 +777,13 @@ static int open_pdf(const char *path, const char *desk, int page, const char *ne
         return -1;
     }
     if (desk_has(desk, "okular") || desk_has(desk, "Okular")) {
+        const char *bin = okular_bin();
+        if (!bin) {
+            return -1;
+        }
         char *argv[8];
         int n = 0;
-        argv[n++] = "okular";
+        argv[n++] = (char *)bin;
         if (have_page) {
             argv[n++] = "--page";
             argv[n++] = pg;
@@ -780,7 +809,11 @@ static int open_epub(const char *path, const char *desk, const char *needle) {
         return -1;
     }
     if (desk_has(desk, "okular") || desk_has(desk, "Okular")) {
-        char *argv[] = {"okular", "--find", (char *)needle, (char *)path, NULL};
+        const char *bin = okular_bin();
+        if (!bin) {
+            return -1;
+        }
+        char *argv[] = {(char *)bin, "--find", (char *)needle, (char *)path, NULL};
         return open_reader(argv);
     }
     return -1;

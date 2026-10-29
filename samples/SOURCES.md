@@ -20,6 +20,10 @@ Loebolus PDFs are public-domain Loeb volumes, but the two that were opened are s
 
 Download pages use `https://bettergutenberg.org/...` and the zip at `https://bettergutenberg.org/wp-content/uploads/2026/10/<slug>.zip`. The zip is the EPUB (`mimetype` stored first). Loebolus files, when wanted again, are `https://ryanfb.xyz/loebolus-data/L###.pdf`.
 
+The whole Better Gutenberg shelf is one zip, `https://bettergutenberg.org/wp-content/uploads/downloads/v2/better-gutenberg-complete-library.zip` (6,728 EPUBs, about 1.8GB, revision 2026-09-08). It is public-domain text and indexes as digital text. It is not stored in this repository.
+
+Delphi Classics lists a free collection at `https://www.delphiclassics.com/product-category/free-downloads/` (fifteen anthologies priced at $0). Taking one still goes through the shop cart, and that checkout asks for a human check, so those files are not in this folder. Individual sample EPUBs are linked in the open from `https://www.delphiclassics.com/parts-edition/` and `https://www.delphiclassics.com/sampleebooks/`.
+
 ```sh
 ./grove index --index samples/index samples/books
 ./grove-ui --index samples/index

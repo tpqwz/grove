@@ -10,7 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-enum { MAX_INPUT = 32u * 1024u * 1024u, MAX_TEXT = 8u * 1024u * 1024u };
+enum { MAX_INPUT = 32u * 1024u * 1024u, MAX_TEXT = 32u * 1024u * 1024u };
 
 void extract_free(Extract *x) {
     if (!x) {

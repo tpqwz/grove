@@ -457,6 +457,19 @@ int main(int argc, char **argv) {
     size_t win = webui_new_window();
     webui_set_size(win, 1040, 840);
     webui_set_center(win);
+    /* Own Firefox profile. The WebUI default name is already taken when another
+     * program is open, and Firefox will not start a second copy of it. */
+    char *ff_profile = NULL;
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        char *share = path_join(home, ".local/share/grove");
+        ff_profile = share ? path_join(share, "firefox") : NULL;
+        free(share);
+    }
+    if (ff_profile) {
+        webui_set_profile(win, "Grove", ff_profile);
+        free(ff_profile);
+    }
     if (port && !webui_set_port(win, port)) {
         fprintf(stderr, "grove-ui: port %zu is not available\n", port);
         return 1;

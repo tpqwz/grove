@@ -67,6 +67,8 @@ int utf8_encode(uint32_t cp, char out[4]) {
     return 4;
 }
 
+static uint32_t fold_greek_ext(uint32_t cp);
+
 uint32_t casefold_cp(uint32_t cp) {
     if (cp >= 'A' && cp <= 'Z') {
         return cp + 32;
@@ -95,7 +97,64 @@ uint32_t casefold_cp(uint32_t cp) {
     if (cp >= 0xff10 && cp <= 0xff19) {
         return cp - 0xff10 + '0';
     }
-    return cp;
+    return fold_greek_ext(cp);
+}
+
+/* Case only. A capital with prosgegrammeni folds to the precomposed small
+ * letter, and that letter is not split into a following iota. */
+static uint32_t fold_greek_ext(uint32_t cp) {
+    if (cp < 0x1f00 || cp > 0x1fff) {
+        return cp;
+    }
+    if ((cp >= 0x1f08 && cp <= 0x1f0f) || (cp >= 0x1f18 && cp <= 0x1f1d) ||
+        (cp >= 0x1f28 && cp <= 0x1f2f) || (cp >= 0x1f38 && cp <= 0x1f3f) ||
+        (cp >= 0x1f48 && cp <= 0x1f4d) || (cp >= 0x1f68 && cp <= 0x1f6f) ||
+        (cp >= 0x1f88 && cp <= 0x1f8f) || (cp >= 0x1f98 && cp <= 0x1f9f) ||
+        (cp >= 0x1fa8 && cp <= 0x1faf) || cp == 0x1f59 || cp == 0x1f5b || cp == 0x1f5d ||
+        cp == 0x1f5f || cp == 0x1fb8 || cp == 0x1fb9 || cp == 0x1fd8 || cp == 0x1fd9 ||
+        cp == 0x1fe8 || cp == 0x1fe9) {
+        return cp - 8;
+    }
+    switch (cp) {
+    case 0x1fba:
+        return 0x1f70;
+    case 0x1fbb:
+        return 0x1f71;
+    case 0x1fbc:
+        return 0x1fb3;
+    case 0x1fc8:
+        return 0x1f72;
+    case 0x1fc9:
+        return 0x1f73;
+    case 0x1fca:
+        return 0x1f74;
+    case 0x1fcb:
+        return 0x1f75;
+    case 0x1fcc:
+        return 0x1fc3;
+    case 0x1fda:
+        return 0x1f76;
+    case 0x1fdb:
+        return 0x1f77;
+    case 0x1fea:
+        return 0x1f7a;
+    case 0x1feb:
+        return 0x1f7b;
+    case 0x1fec:
+        return 0x1fe5;
+    case 0x1ff8:
+        return 0x1f78;
+    case 0x1ff9:
+        return 0x1f79;
+    case 0x1ffa:
+        return 0x1f7c;
+    case 0x1ffb:
+        return 0x1f7d;
+    case 0x1ffc:
+        return 0x1ff3;
+    default:
+        return cp;
+    }
 }
 
 int cp_is_cjk(uint32_t cp) {
@@ -131,6 +190,15 @@ int cp_is_letter(uint32_t cp) {
         return 1;
     }
     if (cp >= 0x400 && cp <= 0x52f) {
+        return 1;
+    }
+    /* Greek Extended, except the spacing marks (koronis, psili, dasia, oxia). */
+    if (cp >= 0x1f00 && cp <= 0x1fff) {
+        if (cp == 0x1fbd || cp == 0x1fbf || cp == 0x1fc0 || cp == 0x1fc1 ||
+            (cp >= 0x1fcd && cp <= 0x1fcf) || (cp >= 0x1fdd && cp <= 0x1fdf) ||
+            (cp >= 0x1fed && cp <= 0x1fef) || cp == 0x1ffd || cp == 0x1ffe) {
+            return 0;
+        }
         return 1;
     }
     return 0;
@@ -555,6 +623,9 @@ static int take_filter(Cur *c, ParsedQuery *out) {
     } else if (c->i + 6 <= c->n && memcmp(c->s + c->i, "title:", 6) == 0) {
         name = "title";
         namelen = 6;
+    } else if (c->i + 6 <= c->n && memcmp(c->s + c->i, "mtime:", 6) == 0) {
+        name = "mtime";
+        namelen = 6;
     } else {
         return 0;
     }
@@ -595,9 +666,37 @@ static int take_filter(Cur *c, ParsedQuery *out) {
     } else if (strcmp(name, "path") == 0) {
         free(out->path_sub);
         out->path_sub = val;
-    } else {
+    } else if (strcmp(name, "title") == 0) {
         free(out->title_sub);
         out->title_sub = val;
+    } else {
+        int year = 0;
+        int mon = 0;
+        int ok = 0;
+        if (vn == 7 && val[4] == '-') {
+            ok = 1;
+            for (int i = 0; i < 7; i++) {
+                if (i == 4) {
+                    continue;
+                }
+                if (val[i] < '0' || val[i] > '9') {
+                    ok = 0;
+                    break;
+                }
+                if (i < 4) {
+                    year = year * 10 + (val[i] - '0');
+                } else {
+                    mon = mon * 10 + (val[i] - '0');
+                }
+            }
+        }
+        free(val);
+        if (!ok || year < 1 || mon < 1 || mon > 12) {
+            err_set(c->e, "mtime: wants a month, like 2026-10");
+            return -1;
+        }
+        out->mtime_year = year;
+        out->mtime_mon = mon;
     }
     (void)vn;
     return 1;
@@ -793,7 +892,7 @@ int query_parse(const char *s, ParsedQuery *out, Err *e) {
         err_set(e, "unexpected text at the end of the query");
         return -1;
     }
-    if (!q && !out->ext && !out->path_sub && !out->title_sub) {
+    if (!q && !out->ext && !out->path_sub && !out->title_sub && !out->mtime_year) {
         err_set(e, "empty query");
         return -1;
     }
@@ -871,6 +970,7 @@ static int fold_text(const char *s, size_t n, Buf *cf, uint32_t **src_at) {
     uint32_t *map = NULL;
     size_t mapcap = 0;
     size_t i = 0;
+    int prev_letter = 0;
     while (i < n) {
         size_t src = i;
         uint32_t cp = 0;
@@ -878,6 +978,29 @@ static int fold_text(const char *s, size_t n, Buf *cf, uint32_t **src_at) {
             break;
         }
         cp = casefold_cp(cp);
+        /* An apostrophe between letters is inside the token. Drop it here so
+         * the term "dont" covers the source word "Don't", mark included. */
+        if (cp == '\'' && prev_letter) {
+            size_t j = i;
+            int drop = 0;
+            while (j < n) {
+                uint32_t next = 0;
+                if (!utf8_next(s, n, &j, &next)) {
+                    break;
+                }
+                next = casefold_cp(next);
+                if (next == '\'') {
+                    continue;
+                }
+                if (cp_is_letter(next)) {
+                    drop = 1;
+                }
+                break;
+            }
+            if (drop) {
+                continue;
+            }
+        }
         char enc[4];
         int k = utf8_encode(cp, enc);
         if (buf_append(cf, enc, (size_t)k) != 0) {
@@ -900,6 +1023,7 @@ static int fold_text(const char *s, size_t n, Buf *cf, uint32_t **src_at) {
         for (int b = 0; b < k; b++) {
             map[cf->len - (size_t)k + (size_t)b] = (uint32_t)src;
         }
+        prev_letter = cp_is_letter(cp);
     }
     *src_at = map;
     return 0;

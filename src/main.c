@@ -1,12 +1,16 @@
 #include "index.h"
 
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#define GROVE_VERSION "0.1.0-alpha"
+
 static void usage(FILE *out) {
     fputs(
-        "grove 0.1.0 — local full-text search\n"
+        "grove " GROVE_VERSION " — local full-text search\n"
         "\n"
         "usage: grove [--index DIR] [--quiet] [--help] [--version] COMMAND ...\n"
         "\n"
@@ -16,16 +20,35 @@ static void usage(FILE *out) {
         "      --rebind OLD NEW retargets a root after the tree moves.\n"
         "  search [--limit N] [--json] [--at SPEC] QUERY...\n"
         "      QUERY words are ANDed. OR and NOT are uppercase. -term excludes.\n"
-        "      \"quoted phrases\", trailing *, and ext: path: title: filters.\n"
+        "      \"quoted phrases\", trailing *, and ext: path: title: mtime: filters.\n"
         "      --at OLD=NEW rewrites a stored root in the printed paths.\n"
         "      With one root, --at NEW replaces it. Scores are a percent of the best hit.\n"
         "      Each hit prints up to 8 passages: a byte offset, a PDF page, and the extract.\n"
-        "      --json adds matchinfo and token offsets, plus type and folder\n"
-        "      file counts for every match, past --limit too.\n"
+        "      --json adds matchinfo and token offsets, plus type, folder, and\n"
+        "      month file counts for every match, past --limit too.\n"
+        "      mtime:YYYY-MM keeps files touched in that month.\n"
         "  purge\n"
         "      Drop documents whose files are gone. Missing roots are kept.\n"
         "  compact\n"
         "      Rebuild the full-text index and vacuum the database.\n"
+        "  saved\n"
+        "      List remembered queries, newest first.\n"
+        "  save QUERY...\n"
+        "      Remember a query on this index. Saving it again moves it first.\n"
+        "  forget QUERY...\n"
+        "      Drop a remembered query.\n"
+        "  notes\n"
+        "      List notes on passages. Each line is offset, path, and text.\n"
+        "  note PATH OFFSET TEXT...\n"
+        "      Keep text on that place. The same place again replaces it.\n"
+        "  forget-note PATH OFFSET\n"
+        "      Drop the note on that place.\n"
+        "  watch QUERY...\n"
+        "      Remember a query and the files that match it now.\n"
+        "  unwatch QUERY...\n"
+        "      Stop watching that query. The remembered query stays.\n"
+        "  alerts\n"
+        "      List watched queries that have new or changed files.\n"
         "  status\n"
         "  help\n"
         "\n"
@@ -298,6 +321,8 @@ static int cmd_search(Index *ix, int argc, char **argv) {
         print_facets(facets.types, facets.ntypes);
         fputs("],\"folders\":[", stdout);
         print_facets(facets.folders, facets.nfolders);
+        fputs("],\"months\":[", stdout);
+        print_facets(facets.months, facets.nmonths);
         fputs("]}}\n", stdout);
     } else {
         for (int h = 0; h < n; h++) {
@@ -329,6 +354,142 @@ static int cmd_search(Index *ix, int argc, char **argv) {
     return 0;
 }
 
+static int cmd_saved_list(Index *ix) {
+    char **queries = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_saved_list(ix, &queries, &n, &e) != 0) {
+        return fail(&e);
+    }
+    for (int i = 0; i < n; i++) {
+        printf("%s\n", queries[i]);
+    }
+    index_saved_free(queries, n);
+    return 0;
+}
+
+static int cmd_alerts(Index *ix) {
+    Alert *alerts = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_alerts_list(ix, &alerts, &n, &e) != 0) {
+        return fail(&e);
+    }
+    for (int i = 0; i < n; i++) {
+        if (alerts[i].nfiles <= 0) {
+            continue;
+        }
+        printf("%d %s\n", alerts[i].nfiles, alerts[i].query ? alerts[i].query : "");
+        for (int j = 0; j < alerts[i].nfiles; j++) {
+            printf("%s\n", alerts[i].files[j].path ? alerts[i].files[j].path : "");
+        }
+    }
+    index_alerts_free(alerts, n);
+    return 0;
+}
+
+static int cmd_watch_change(Index *ix, int drop, int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr, "grove: %s needs a query\n", drop ? "unwatch" : "watch");
+        return 1;
+    }
+    char *query = join_query(argc, argv);
+    if (!query) {
+        fprintf(stderr, "grove: out of memory\n");
+        return 1;
+    }
+    Err e;
+    err_clear(&e);
+    int rc = drop ? index_alert_unwatch(ix, query, &e) : index_alert_watch(ix, query, &e);
+    free(query);
+    return rc == 0 ? 0 : fail(&e);
+}
+
+static int cmd_saved_change(Index *ix, int drop, int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr, "grove: %s needs a query\n", drop ? "forget" : "save");
+        return 1;
+    }
+    char *query = join_query(argc, argv);
+    if (!query) {
+        fprintf(stderr, "grove: out of memory\n");
+        return 1;
+    }
+    Err e;
+    err_clear(&e);
+    int rc = drop ? index_saved_drop(ix, query, &e) : index_saved_put(ix, query, &e);
+    free(query);
+    return rc == 0 ? 0 : fail(&e);
+}
+
+static int parse_offset(const char *s, uint32_t *out) {
+    if (!s || !*s) {
+        return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (!end || *end || errno || v > UINT32_MAX) {
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static int cmd_notes(Index *ix) {
+    Note *notes = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_notes_list(ix, &notes, &n, &e) != 0) {
+        return fail(&e);
+    }
+    for (int i = 0; i < n; i++) {
+        printf("%u\t%s\t%s\n", notes[i].offset, notes[i].path, notes[i].body);
+    }
+    index_notes_free(notes, n);
+    return 0;
+}
+
+static int cmd_note_put(Index *ix, int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "grove: note needs a path, an offset, and text\n");
+        return 1;
+    }
+    uint32_t off = 0;
+    if (parse_offset(argv[1], &off) != 0) {
+        fprintf(stderr, "grove: note offset must be a byte count\n");
+        return 1;
+    }
+    char *body = join_query(argc - 2, argv + 2);
+    if (!body) {
+        fprintf(stderr, "grove: out of memory\n");
+        return 1;
+    }
+    Err e;
+    err_clear(&e);
+    int rc = index_note_put(ix, argv[0], off, body, &e);
+    free(body);
+    return rc == 0 ? 0 : fail(&e);
+}
+
+static int cmd_note_drop(Index *ix, int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "grove: forget-note needs a path and an offset\n");
+        return 1;
+    }
+    uint32_t off = 0;
+    if (parse_offset(argv[1], &off) != 0) {
+        fprintf(stderr, "grove: note offset must be a byte count\n");
+        return 1;
+    }
+    Err e;
+    err_clear(&e);
+    return index_note_drop(ix, argv[0], off, &e) == 0 ? 0 : fail(&e);
+}
+
 static int cmd_status(Index *ix) {
     Err e;
     err_clear(&e);
@@ -357,7 +518,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "--version") == 0) {
-            printf("grove 0.1.0\n");
+            printf("grove %s\n", GROVE_VERSION);
             return 0;
         }
         if (strcmp(argv[i], "--quiet") == 0) {
@@ -397,7 +558,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "grove: out of memory\n");
         return 1;
     }
-    int writable = strcmp(cmd, "search") != 0 && strcmp(cmd, "status") != 0;
+    int writable = strcmp(cmd, "search") != 0 && strcmp(cmd, "status") != 0 && strcmp(cmd, "saved") != 0 &&
+                   strcmp(cmd, "notes") != 0 && strcmp(cmd, "alerts") != 0;
     Err e;
     err_clear(&e);
     Index *ix = index_open(dir, writable, &e);
@@ -430,6 +592,24 @@ int main(int argc, char **argv) {
         }
     } else if (strcmp(cmd, "status") == 0) {
         rc = cmd_status(ix);
+    } else if (strcmp(cmd, "saved") == 0) {
+        rc = cmd_saved_list(ix);
+    } else if (strcmp(cmd, "save") == 0) {
+        rc = cmd_saved_change(ix, 0, argc - i, argv + i);
+    } else if (strcmp(cmd, "forget") == 0) {
+        rc = cmd_saved_change(ix, 1, argc - i, argv + i);
+    } else if (strcmp(cmd, "notes") == 0) {
+        rc = cmd_notes(ix);
+    } else if (strcmp(cmd, "note") == 0) {
+        rc = cmd_note_put(ix, argc - i, argv + i);
+    } else if (strcmp(cmd, "forget-note") == 0) {
+        rc = cmd_note_drop(ix, argc - i, argv + i);
+    } else if (strcmp(cmd, "alerts") == 0) {
+        rc = cmd_alerts(ix);
+    } else if (strcmp(cmd, "watch") == 0) {
+        rc = cmd_watch_change(ix, 0, argc - i, argv + i);
+    } else if (strcmp(cmd, "unwatch") == 0) {
+        rc = cmd_watch_change(ix, 1, argc - i, argv + i);
     } else {
         fprintf(stderr, "grove: unknown command %s\n", cmd);
         rc = 1;

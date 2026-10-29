@@ -247,6 +247,18 @@ static char *search_json(const char *query) {
             goto fail;
         }
     }
+    if (buf_puts(&b, "],\"months\":[") != 0) {
+        goto fail;
+    }
+    for (int t = 0; t < facets.nmonths; t++) {
+        if (t && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"value\":") != 0 || jesc(&b, facets.months[t].value) != 0 ||
+            buf_printf(&b, ",\"count\":%d}", facets.months[t].count) != 0) {
+            goto fail;
+        }
+    }
     if (buf_puts(&b, "]}}") != 0) {
         goto fail;
     }
@@ -855,6 +867,252 @@ static void on_info(webui_event_t *e) {
     reply_owned(e, json);
 }
 
+static char *saved_json(void) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    char **queries = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_saved_list(ix, &queries, &n, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not read saved searches");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"saved\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < n; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (jesc(&b, queries[i]) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    index_saved_free(queries, n);
+    return b.data;
+fail:
+    index_saved_free(queries, n);
+    buf_free(&b);
+    return NULL;
+}
+
+static void on_saved(webui_event_t *e) {
+    pthread_mutex_lock(&mu);
+    char *json = saved_json();
+    pthread_mutex_unlock(&mu);
+    reply_owned(e, json);
+}
+
+static void on_save_change(webui_event_t *e, int drop) {
+    const char *in = webui_get_string(e);
+    char *query = xstrdup(in ? in : "");
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!query) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else {
+        Err err;
+        err_clear(&err);
+        int rc = drop ? index_saved_drop(ix, query, &err) : index_saved_put(ix, query, &err);
+        json = rc == 0 ? saved_json() : json_error(err.msg[0] ? err.msg : "could not save");
+    }
+    pthread_mutex_unlock(&mu);
+    free(query);
+    reply_owned(e, json);
+}
+
+static void on_save(webui_event_t *e) {
+    on_save_change(e, 0);
+}
+
+static void on_forget(webui_event_t *e) {
+    on_save_change(e, 1);
+}
+
+static char *notes_json(void) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    Note *notes = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_notes_list(ix, &notes, &n, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not read notes");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"notes\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < n; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, notes[i].path) != 0 ||
+            buf_printf(&b, ",\"offset\":%u,\"body\":", notes[i].offset) != 0 || jesc(&b, notes[i].body) != 0 ||
+            buf_putc(&b, '}') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    index_notes_free(notes, n);
+    return b.data;
+fail:
+    index_notes_free(notes, n);
+    buf_free(&b);
+    return NULL;
+}
+
+static void on_notes(webui_event_t *e) {
+    pthread_mutex_lock(&mu);
+    char *json = notes_json();
+    pthread_mutex_unlock(&mu);
+    reply_owned(e, json);
+}
+
+static int take_offset(webui_event_t *e, int at, uint32_t *out) {
+    long long v = webui_get_int_at(e, at);
+    if (v < 0 || (unsigned long long)v > UINT32_MAX) {
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static void on_note_put(webui_event_t *e) {
+    const char *path_in = webui_get_string_at(e, 0);
+    const char *body_in = webui_get_string_at(e, 2);
+    uint32_t offset = 0;
+    int bad = take_offset(e, 1, &offset);
+    char *path = xstrdup(path_in ? path_in : "");
+    char *body = xstrdup(body_in ? body_in : "");
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!path || !body) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else if (bad) {
+        json = json_error("bad offset");
+    } else {
+        Err err;
+        err_clear(&err);
+        json = index_note_put(ix, path, offset, body, &err) == 0
+                   ? notes_json()
+                   : json_error(err.msg[0] ? err.msg : "could not keep the note");
+    }
+    pthread_mutex_unlock(&mu);
+    free(path);
+    free(body);
+    reply_owned(e, json);
+}
+
+static char *alerts_json(void) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    Alert *alerts = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_alerts_list(ix, &alerts, &n, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not read alerts");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"alerts\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < n; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"query\":") != 0 || jesc(&b, alerts[i].query) != 0 ||
+            buf_printf(&b, ",\"count\":%d}", alerts[i].nfiles) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    index_alerts_free(alerts, n);
+    return b.data;
+fail:
+    index_alerts_free(alerts, n);
+    buf_free(&b);
+    return NULL;
+}
+
+static void on_alerts(webui_event_t *e) {
+    pthread_mutex_lock(&mu);
+    char *json = alerts_json();
+    pthread_mutex_unlock(&mu);
+    reply_owned(e, json);
+}
+
+static void on_watch_change(webui_event_t *e, int drop) {
+    const char *in = webui_get_string(e);
+    char *query = xstrdup(in ? in : "");
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!query) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else {
+        Err err;
+        err_clear(&err);
+        int rc = drop ? index_alert_unwatch(ix, query, &err) : index_alert_watch(ix, query, &err);
+        json = rc == 0 ? alerts_json() : json_error(err.msg[0] ? err.msg : "could not watch");
+    }
+    pthread_mutex_unlock(&mu);
+    free(query);
+    reply_owned(e, json);
+}
+
+static void on_watch(webui_event_t *e) {
+    on_watch_change(e, 0);
+}
+
+static void on_unwatch(webui_event_t *e) {
+    on_watch_change(e, 1);
+}
+
+static void on_note_drop(webui_event_t *e) {
+    const char *path_in = webui_get_string_at(e, 0);
+    uint32_t offset = 0;
+    int bad = take_offset(e, 1, &offset);
+    char *path = xstrdup(path_in ? path_in : "");
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!path) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else if (bad) {
+        json = json_error("bad offset");
+    } else {
+        Err err;
+        err_clear(&err);
+        json = index_note_drop(ix, path, offset, &err) == 0 ? notes_json()
+                                                            : json_error(err.msg[0] ? err.msg : "could not remove the note");
+    }
+    pthread_mutex_unlock(&mu);
+    free(path);
+    reply_owned(e, json);
+}
+
 static void usage(FILE *out) {
     fputs(
         "grove-ui — search window for a grove index\n"
@@ -865,6 +1123,9 @@ static void usage(FILE *out) {
         "grove search. A click on the file name opens it with the system.\n"
         "A click on a passage opens that place when the reader can take a\n"
         "line, a PDF page, or a found line. Otherwise it opens the file.\n"
+        "Save remembers the current query on this index.\n"
+        "Watch remembers that query and the files that match it.\n"
+        "Note keeps text on one passage.\n"
         "\n"
         "The index directory is $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
         "or ~/.local/share/grove.\n",
@@ -934,6 +1195,15 @@ int main(int argc, char **argv) {
     webui_bind(win, "grove_more", on_more);
     webui_bind(win, "grove_open", on_open);
     webui_bind(win, "grove_info", on_info);
+    webui_bind(win, "grove_saved", on_saved);
+    webui_bind(win, "grove_save", on_save);
+    webui_bind(win, "grove_forget", on_forget);
+    webui_bind(win, "grove_notes", on_notes);
+    webui_bind(win, "grove_note", on_note_put);
+    webui_bind(win, "grove_forget_note", on_note_drop);
+    webui_bind(win, "grove_alerts", on_alerts);
+    webui_bind(win, "grove_watch", on_watch);
+    webui_bind(win, "grove_unwatch", on_unwatch);
     if (port && !webui_set_port(win, port)) {
         fprintf(stderr, "grove-ui: port %zu is not available\n", port);
         return 1;

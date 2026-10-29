@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* One grove.db per index directory. External-content FTS4 stores the body in
@@ -58,6 +59,7 @@ typedef struct Cand {
     char *title;
     char *ext;
     char *path;
+    int64_t mtime;
     MatchInfo mi;
 } Cand;
 
@@ -1534,12 +1536,39 @@ void facets_free(Facets *f) {
     for (int i = 0; i < f->nfolders; i++) {
         free(f->folders[i].value);
     }
+    for (int i = 0; i < f->nmonths; i++) {
+        free(f->months[i].value);
+    }
     free(f->types);
     free(f->folders);
+    free(f->months);
     memset(f, 0, sizeof *f);
 }
 
-static int doc_passes(const char *rel, const char *title, const char *ext, const ParsedQuery *pq) {
+static int same_month(int64_t sec, int year, int mon) {
+    time_t t = (time_t)sec;
+    struct tm tm;
+    if (!localtime_r(&t, &tm)) {
+        return 0;
+    }
+    return tm.tm_year + 1900 == year && tm.tm_mon + 1 == mon;
+}
+
+static char *month_key(int64_t sec) {
+    time_t t = (time_t)sec;
+    struct tm tm;
+    if (!localtime_r(&t, &tm)) {
+        return NULL;
+    }
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%04d-%02d", tm.tm_year + 1900, tm.tm_mon + 1);
+    if (n < 7 || (size_t)n >= sizeof buf) {
+        return NULL;
+    }
+    return xstrdup(buf);
+}
+
+static int doc_passes(const char *rel, const char *title, const char *ext, int64_t mtime, const ParsedQuery *pq) {
     if (pq->ext && !ascii_ieq(ext ? ext : "", pq->ext)) {
         return 0;
     }
@@ -1548,6 +1577,9 @@ static int doc_passes(const char *rel, const char *title, const char *ext, const
     }
     if (pq->title_sub &&
         !fold_contains(title ? title : "", title ? strlen(title) : 0, pq->title_sub, strlen(pq->title_sub))) {
+        return 0;
+    }
+    if (pq->mtime_year && !same_month(mtime, pq->mtime_year, pq->mtime_mon)) {
         return 0;
     }
     return 1;
@@ -1596,6 +1628,7 @@ static int take_row(sqlite3_stmt *st, int with_mi, double raw, Cand *c, Err *e) 
     c->rel = col_text(st, 2);
     c->title = col_text(st, 3);
     c->ext = col_text(st, 4);
+    c->mtime = sqlite3_column_int64(st, 5);
     c->raw = raw;
     if (!c->rel || !c->title || !c->ext) {
         cand_free(c);
@@ -1603,8 +1636,8 @@ static int take_row(sqlite3_stmt *st, int with_mi, double raw, Cand *c, Err *e) 
         return -1;
     }
     if (with_mi) {
-        const void *blob = sqlite3_column_blob(st, 5);
-        int n = sqlite3_column_bytes(st, 5);
+        const void *blob = sqlite3_column_blob(st, 6);
+        int n = sqlite3_column_bytes(st, 6);
         if (parse_matchinfo(blob, n, &c->mi) != 0) {
             cand_free(c);
             err_set(e, "matchinfo is short");
@@ -1719,9 +1752,12 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
     char **folder_keys = NULL;
     int nfolder_keys = 0;
     int folder_cap = 0;
+    char **month_keys = NULL;
+    int nmonth_keys = 0;
+    int month_cap = 0;
     int w = 0;
     for (int i = 0; i < nc; i++) {
-        if (!doc_passes(cands[i].rel, cands[i].title, cands[i].ext, pq)) {
+        if (!doc_passes(cands[i].rel, cands[i].title, cands[i].ext, cands[i].mtime, pq)) {
             cand_free(&cands[i]);
             continue;
         }
@@ -1741,6 +1777,12 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
             char *folder = NULL;
             if (parent_folder(cands[i].rel, &folder) != 0 ||
                 (folder && push_key(&folder_keys, &nfolder_keys, &folder_cap, folder) != 0)) {
+                err_set(e, "out of memory");
+                goto fail;
+            }
+            char *month = month_key(cands[i].mtime);
+            if (!month || push_key(&month_keys, &nmonth_keys, &month_cap, month) != 0) {
+                free(month);
                 err_set(e, "out of memory");
                 goto fail;
             }
@@ -1854,9 +1896,11 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
         memset(facets, 0, sizeof *facets);
         facets->nfiles = nfiles;
         if (keys_to_facets(type_keys, ntype_keys, &facets->types, &facets->ntypes) != 0 ||
-            keys_to_facets(folder_keys, nfolder_keys, &facets->folders, &facets->nfolders) != 0) {
+            keys_to_facets(folder_keys, nfolder_keys, &facets->folders, &facets->nfolders) != 0 ||
+            keys_to_facets(month_keys, nmonth_keys, &facets->months, &facets->nmonths) != 0) {
             free_key_array(type_keys, ntype_keys);
             free_key_array(folder_keys, nfolder_keys);
+            free_key_array(month_keys, nmonth_keys);
             hits_free(arr, nc);
             cands_free(cands, nc);
             err_set(e, "out of memory");
@@ -1865,6 +1909,7 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
     }
     free_key_array(type_keys, ntype_keys);
     free_key_array(folder_keys, nfolder_keys);
+    free_key_array(month_keys, nmonth_keys);
     cands_free(cands, nc);
     *hits = arr;
     *nhits = nc;
@@ -1872,6 +1917,7 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
 fail:
     free_key_array(type_keys, ntype_keys);
     free_key_array(folder_keys, nfolder_keys);
+    free_key_array(month_keys, nmonth_keys);
     cands_free(cands, nc);
     return -1;
 }
@@ -1916,18 +1962,19 @@ static int query_rows(Index *ix, const char *sql, const char *match, const char 
 }
 
 static const char *MATCH_SQL =
-    "SELECT d.docid, d.root_id, d.rel, d.title, d.ext, matchinfo(fts, 'pcnalx') "
+    "SELECT d.docid, d.root_id, d.rel, d.title, d.ext, d.mtime, matchinfo(fts, 'pcnalx') "
     "FROM fts JOIN docs d ON d.docid = fts.docid WHERE fts MATCH ?";
 static const char *MATCH_EXT_SQL =
-    "SELECT d.docid, d.root_id, d.rel, d.title, d.ext, matchinfo(fts, 'pcnalx') "
+    "SELECT d.docid, d.root_id, d.rel, d.title, d.ext, d.mtime, matchinfo(fts, 'pcnalx') "
     "FROM fts JOIN docs d ON d.docid = fts.docid WHERE fts MATCH ? AND d.ext=?";
-static const char *ALL_SQL = "SELECT docid, root_id, rel, title, ext FROM docs";
-static const char *ALL_EXT_SQL = "SELECT docid, root_id, rel, title, ext FROM docs WHERE ext=?";
+static const char *ALL_SQL = "SELECT docid, root_id, rel, title, ext, mtime FROM docs";
+static const char *ALL_EXT_SQL = "SELECT docid, root_id, rel, title, ext, mtime FROM docs WHERE ext=?";
 static const char *EXCLUDE_SQL =
-    "SELECT docid, root_id, rel, title, ext FROM docs WHERE docid NOT IN (SELECT docid FROM fts WHERE fts MATCH ?)";
+    "SELECT docid, root_id, rel, title, ext, mtime FROM docs WHERE docid NOT IN "
+    "(SELECT docid FROM fts WHERE fts MATCH ?)";
 static const char *EXCLUDE_EXT_SQL =
-    "SELECT docid, root_id, rel, title, ext FROM docs WHERE docid NOT IN (SELECT docid FROM fts WHERE fts MATCH ?) "
-    "AND ext=?";
+    "SELECT docid, root_id, rel, title, ext, mtime FROM docs WHERE docid NOT IN "
+    "(SELECT docid FROM fts WHERE fts MATCH ?) AND ext=?";
 
 static void scored_free(Scored *a, int n) {
     for (int i = 0; i < n; i++) {
@@ -2197,7 +2244,7 @@ static int collect_query(Index *ix, const Query *q, Scored **out, int *nout, Err
 
 static int cands_from_scored(Index *ix, Scored *s, int n, Cand **out, int *nout, Err *e) {
     sqlite3_stmt *st = NULL;
-    if (prep(ix, &st, "SELECT root_id, rel, title, ext FROM docs WHERE docid=?", e) != 0) {
+    if (prep(ix, &st, "SELECT root_id, rel, title, ext, mtime FROM docs WHERE docid=?", e) != 0) {
         return -1;
     }
     Cand *arr = NULL;
@@ -2225,6 +2272,7 @@ static int cands_from_scored(Index *ix, Scored *s, int n, Cand **out, int *nout,
         c.rel = col_text(st, 1);
         c.title = col_text(st, 2);
         c.ext = col_text(st, 3);
+        c.mtime = sqlite3_column_int64(st, 4);
         c.raw = s[i].score;
         c.mi = s[i].mi;
         memset(&s[i].mi, 0, sizeof s[i].mi);
@@ -2245,6 +2293,48 @@ static int cands_from_scored(Index *ix, Scored *s, int n, Cand **out, int *nout,
 static int run_finish(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, int limit, const char *at,
                       const char *match, Hit **hits, int *nhits, Facets *facets, Err *e) {
     return finish_search(ix, cands, nc, pq, limit, at, match, hits, nhits, facets, e);
+}
+
+/* Every candidate for a parsed query, before the limit trim and before bodies
+ * are read. *match is the positive MATCH text when ranking used one, and it
+ * points into *mx. */
+static int gather_cands(Index *ix, const ParsedQuery *pq, Cand **cands, int *nc, const char **match, MExpr *mx,
+                        Err *e) {
+    *cands = NULL;
+    *nc = 0;
+    *match = NULL;
+    mx->kind = MX_ERR;
+    mx->sql = NULL;
+    int rc = 0;
+    if (!pq->q) {
+        rc = query_rows(ix, pq->ext ? ALL_EXT_SQL : ALL_SQL, NULL, pq->ext, 0, 1, cands, nc, e);
+    } else {
+        *mx = emit_query(pq->q);
+        if (mx->kind == MX_ERR) {
+            err_set(e, "out of memory");
+            return -1;
+        }
+        if (mx->kind == MX_POS) {
+            *match = mx->sql;
+            rc = query_rows(ix, pq->ext ? MATCH_EXT_SQL : MATCH_SQL, mx->sql, pq->ext, 1, 0, cands, nc, e);
+        } else if (mx->kind == MX_NEG) {
+            rc = query_rows(ix, pq->ext ? EXCLUDE_EXT_SQL : EXCLUDE_SQL, mx->sql, pq->ext, 0, 0.1, cands, nc, e);
+        } else {
+            Scored *sc = NULL;
+            int ns = 0;
+            rc = collect_query(ix, pq->q, &sc, &ns, e);
+            if (rc == 0) {
+                rc = cands_from_scored(ix, sc, ns, cands, nc, e);
+            }
+            scored_free(sc, ns);
+        }
+    }
+    if (rc != 0) {
+        cands_free(*cands, *nc);
+        *cands = NULL;
+        *nc = 0;
+    }
+    return rc;
 }
 
 int index_search(Index *ix, const char *query, int limit, const char *at, Hit **hits, int *nhits, Facets *facets,
@@ -2270,36 +2360,9 @@ int index_search(Index *ix, const char *query, int limit, const char *at, Hit **
     int nc = 0;
     const char *match = NULL;
     MExpr mx = {MX_ERR, NULL};
-    int rc = 0;
-    if (!pq.q) {
-        rc = query_rows(ix, pq.ext ? ALL_EXT_SQL : ALL_SQL, NULL, pq.ext, 0, 1, &cands, &nc, e);
-    } else {
-        mx = emit_query(pq.q);
-        if (mx.kind == MX_ERR) {
-            parsed_free(&pq);
-            err_set(e, "out of memory");
-            return -1;
-        }
-        if (mx.kind == MX_POS) {
-            match = mx.sql;
-            rc = query_rows(ix, pq.ext ? MATCH_EXT_SQL : MATCH_SQL, mx.sql, pq.ext, 1, 0, &cands, &nc, e);
-        } else if (mx.kind == MX_NEG) {
-            rc = query_rows(ix, pq.ext ? EXCLUDE_EXT_SQL : EXCLUDE_SQL, mx.sql, pq.ext, 0, 0.1, &cands, &nc, e);
-        } else {
-            Scored *sc = NULL;
-            int ns = 0;
-            rc = collect_query(ix, pq.q, &sc, &ns, e);
-            if (rc == 0) {
-                rc = cands_from_scored(ix, sc, ns, &cands, &nc, e);
-            }
-            scored_free(sc, ns);
-        }
-    }
+    int rc = gather_cands(ix, &pq, &cands, &nc, &match, &mx, e);
     if (rc == 0) {
         rc = run_finish(ix, cands, nc, &pq, limit, at, match, hits, nhits, facets, e);
-        cands = NULL;
-    } else {
-        cands_free(cands, nc);
     }
     mx_free(&mx);
     parsed_free(&pq);
@@ -2322,7 +2385,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
         return -1;
     }
     sqlite3_stmt *st = NULL;
-    if (prep(ix, &st, "SELECT docid, root_id, rel, title, ext FROM docs", e) != 0) {
+    if (prep(ix, &st, "SELECT docid, root_id, rel, title, ext, mtime FROM docs", e) != 0) {
         parsed_free(&pq);
         return -1;
     }
@@ -2333,7 +2396,8 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
         const char *rel = (const char *)sqlite3_column_text(st, 2);
         const char *title = (const char *)sqlite3_column_text(st, 3);
         const char *ex = (const char *)sqlite3_column_text(st, 4);
-        if (!doc_passes(rel, title, ex, &pq)) {
+        int64_t mtime = sqlite3_column_int64(st, 5);
+        if (!doc_passes(rel, title, ex, mtime, &pq)) {
             continue;
         }
         char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
@@ -2546,4 +2610,1045 @@ void index_close(Index *ix) {
     free(ix->realdir);
     free(ix->db_path);
     free(ix);
+}
+
+/* Saved searches are not part of the fts4 format row. The table appears on the
+ * first remember, so an older grove.db does not have to be indexed again. */
+#define SAVED_KEEP 24
+#define SAVED_QUERY_MAX 400
+#define SAVED_STR(x) SAVED_STR2(x)
+#define SAVED_STR2(x) #x
+
+static int saved_exec(sqlite3 *db, const char *sql, Err *e) {
+    char *msg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &msg);
+    if (rc != SQLITE_OK) {
+        int primary = rc & 0xff;
+        if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED) {
+            err_set(e, "index is in use");
+        } else {
+            err_set(e, "%s", msg ? msg : sqlite3_errmsg(db));
+        }
+        sqlite3_free(msg);
+        return -1;
+    }
+    return 0;
+}
+
+static int saved_fail(sqlite3 *db, Err *e) {
+    int primary = sqlite3_extended_errcode(db) & 0xff;
+    if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED) {
+        err_set(e, "index is in use");
+    } else {
+        err_set(e, "sqlite: %s", sqlite3_errmsg(db));
+    }
+    return -1;
+}
+
+static char *saved_text(const char *query, int check_parse, Err *e) {
+    if (!query) {
+        query = "";
+    }
+    while (*query == ' ' || *query == '\t') {
+        query++;
+    }
+    size_t n = strlen(query);
+    while (n > 0 && (query[n - 1] == ' ' || query[n - 1] == '\t')) {
+        n--;
+    }
+    if (n == 0) {
+        err_set(e, "empty query");
+        return NULL;
+    }
+    if (n > SAVED_QUERY_MAX) {
+        err_set(e, "that search is too long");
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (query[i] == '\n' || query[i] == '\r') {
+            err_set(e, "a saved search is one line");
+            return NULL;
+        }
+    }
+    char *s = malloc(n + 1);
+    if (!s) {
+        err_set(e, "out of memory");
+        return NULL;
+    }
+    memcpy(s, query, n);
+    s[n] = 0;
+    if (check_parse) {
+        ParsedQuery pq;
+        if (query_parse(s, &pq, e) != 0) {
+            free(s);
+            return NULL;
+        }
+        parsed_free(&pq);
+    }
+    return s;
+}
+
+static int alert_table(sqlite3 *db, const char *name, int *yes, Err *e) {
+    sqlite3_stmt *st = NULL;
+    *yes = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &st, NULL) !=
+        SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) {
+        *yes = 1;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        return saved_fail(db, e);
+    }
+    return 0;
+}
+
+static int alert_forget_query(sqlite3 *db, const char *query, Err *e) {
+    int yes = 0;
+    sqlite3_stmt *st = NULL;
+    if (alert_table(db, "alert", &yes, e) != 0) {
+        return -1;
+    }
+    if (!yes) {
+        return 0;
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM alert WHERE query=?", -1, &st, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    sqlite3_bind_text(st, 1, query, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    st = NULL;
+    if (rc != SQLITE_DONE) {
+        return saved_fail(db, e);
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM alert_seen WHERE query=?", -1, &st, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    sqlite3_bind_text(st, 1, query, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        return saved_fail(db, e);
+    }
+    return 0;
+}
+
+static int alert_forget_orphans(sqlite3 *db, Err *e) {
+    int yes = 0;
+    if (alert_table(db, "alert", &yes, e) != 0) {
+        return -1;
+    }
+    if (!yes) {
+        return 0;
+    }
+    return saved_exec(db,
+                      "DELETE FROM alert WHERE query NOT IN (SELECT query FROM saved);"
+                      "DELETE FROM alert_seen WHERE query NOT IN (SELECT query FROM saved);",
+                      e);
+}
+
+static int saved_touch(Index *ix, const char *canon, int drop, Err *e) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    int rc = sqlite3_open_v2(ix->db_path, &db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !db) {
+        err_set(e, "cannot open %s: %s", ix->db_path, db ? sqlite3_errmsg(db) : "sqlite");
+        if (db) {
+            sqlite3_close(db);
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(db, 20000);
+    sqlite3_extended_result_codes(db, 1);
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        return -1;
+    }
+    began = 1;
+    if (saved_exec(db,
+                   "CREATE TABLE IF NOT EXISTS saved("
+                   " query TEXT PRIMARY KEY,"
+                   " created INTEGER NOT NULL)",
+                   e) != 0) {
+        goto fail;
+    }
+    rc = sqlite3_prepare_v2(db,
+                            drop ? "DELETE FROM saved WHERE query=?"
+                                 : "INSERT INTO saved(query, created) VALUES(?, ?)"
+                                   " ON CONFLICT(query) DO UPDATE SET created=excluded.created",
+                            -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, canon, -1, SQLITE_TRANSIENT);
+    if (!drop) {
+        int64_t now = (int64_t)time(NULL);
+        sqlite3_stmt *mx = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(created), 0) FROM saved", -1, &mx, NULL) == SQLITE_OK) {
+            if (sqlite3_step(mx) == SQLITE_ROW) {
+                int64_t m = sqlite3_column_int64(mx, 0);
+                if (m >= now) {
+                    now = m + 1;
+                }
+            }
+        }
+        sqlite3_finalize(mx);
+        sqlite3_bind_int64(st, 2, now);
+    }
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    st = NULL;
+    if (rc != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    if (!drop &&
+        saved_exec(db,
+                   "DELETE FROM saved WHERE query IN ("
+                   "SELECT query FROM saved ORDER BY created DESC, query LIMIT -1 OFFSET " SAVED_STR(SAVED_KEEP) ")",
+                   e) != 0) {
+        goto fail;
+    }
+    if (drop) {
+        if (alert_forget_query(db, canon, e) != 0) {
+            goto fail;
+        }
+    } else if (alert_forget_orphans(db, e) != 0) {
+        goto fail;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    return -1;
+}
+
+int index_saved_list(Index *ix, char ***queries, int *n, Err *e) {
+    if (queries) {
+        *queries = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!ix || !queries || !n) {
+        err_set(e, "no index");
+        return -1;
+    }
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st, "SELECT query FROM saved ORDER BY created DESC, query", e) != 0) {
+        if (e->msg[0] && strstr(e->msg, "no such table")) {
+            err_clear(e);
+            return 0;
+        }
+        return -1;
+    }
+    char **rows = NULL;
+    int nr = 0;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(st, 0);
+        char *copy = xstrdup(s ? s : "");
+        char **next = copy ? realloc(rows, (size_t)(nr + 1) * sizeof(*rows)) : NULL;
+        if (!copy || !next) {
+            free(copy);
+            sqlite3_finalize(st);
+            index_saved_free(rows, nr);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        rows = next;
+        rows[nr++] = copy;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        index_saved_free(rows, nr);
+        return db_fail(ix, e, "sqlite");
+    }
+    *queries = rows;
+    *n = nr;
+    return 0;
+}
+
+void index_saved_free(char **queries, int n) {
+    if (!queries) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(queries[i]);
+    }
+    free(queries);
+}
+
+int index_saved_put(Index *ix, const char *query, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon = saved_text(query, 1, e);
+    if (!canon) {
+        return -1;
+    }
+    int rc = saved_touch(ix, canon, 0, e);
+    free(canon);
+    return rc;
+}
+
+int index_saved_drop(Index *ix, const char *query, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon = saved_text(query, 0, e);
+    if (!canon) {
+        return -1;
+    }
+    int rc = saved_touch(ix, canon, 1, e);
+    free(canon);
+    return rc;
+}
+
+#define NOTE_KEEP 200
+#define NOTE_BODY_MAX 400
+#define NOTE_PATH_MAX 1024
+
+static char *note_line(const char *s, size_t max, const char *empty_msg, const char *long_msg, Err *e) {
+    if (!s) {
+        s = "";
+    }
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        n--;
+    }
+    if (n == 0) {
+        err_set(e, "%s", empty_msg);
+        return NULL;
+    }
+    if (n > max) {
+        err_set(e, "%s", long_msg);
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\n' || s[i] == '\r' || s[i] == '\t') {
+            err_set(e, "a note is one line");
+            return NULL;
+        }
+    }
+    char *out = malloc(n + 1);
+    if (!out) {
+        err_set(e, "out of memory");
+        return NULL;
+    }
+    memcpy(out, s, n);
+    out[n] = 0;
+    return out;
+}
+
+static int note_touch(Index *ix, const char *path, uint32_t offset, const char *body, int drop, Err *e) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    int rc = sqlite3_open_v2(ix->db_path, &db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !db) {
+        err_set(e, "cannot open %s: %s", ix->db_path, db ? sqlite3_errmsg(db) : "sqlite");
+        if (db) {
+            sqlite3_close(db);
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(db, 20000);
+    sqlite3_extended_result_codes(db, 1);
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        return -1;
+    }
+    began = 1;
+    if (saved_exec(db,
+                   "CREATE TABLE IF NOT EXISTS notes("
+                   " path TEXT NOT NULL,"
+                   " offset INTEGER NOT NULL,"
+                   " body TEXT NOT NULL,"
+                   " created INTEGER NOT NULL,"
+                   " PRIMARY KEY(path, offset))",
+                   e) != 0) {
+        goto fail;
+    }
+    if (!drop) {
+        sqlite3_stmt *cnt = NULL;
+        int have = 0;
+        int total = 0;
+        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM notes", -1, &cnt, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        if (sqlite3_step(cnt) == SQLITE_ROW) {
+            total = sqlite3_column_int(cnt, 0);
+        }
+        sqlite3_finalize(cnt);
+        cnt = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM notes WHERE path=? AND offset=?", -1, &cnt, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_bind_text(cnt, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(cnt, 2, (int64_t)offset);
+        have = sqlite3_step(cnt) == SQLITE_ROW;
+        sqlite3_finalize(cnt);
+        if (!have && total >= NOTE_KEEP) {
+            err_set(e, "too many notes");
+            goto fail;
+        }
+    }
+    rc = sqlite3_prepare_v2(db,
+                            drop ? "DELETE FROM notes WHERE path=? AND offset=?"
+                                 : "INSERT INTO notes(path, offset, body, created) VALUES(?, ?, ?, ?)"
+                                   " ON CONFLICT(path, offset) DO UPDATE SET body=excluded.body, created=excluded.created",
+                            -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, (int64_t)offset);
+    if (!drop) {
+        sqlite3_bind_text(st, 3, body, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 4, (int64_t)time(NULL));
+    }
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    st = NULL;
+    if (rc != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    return -1;
+}
+
+int index_notes_list(Index *ix, Note **notes, int *n, Err *e) {
+    if (notes) {
+        *notes = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!ix || !notes || !n) {
+        err_set(e, "no index");
+        return -1;
+    }
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st, "SELECT path, offset, body FROM notes ORDER BY path, offset", e) != 0) {
+        if (e->msg[0] && strstr(e->msg, "no such table")) {
+            err_clear(e);
+            return 0;
+        }
+        return -1;
+    }
+    Note *rows = NULL;
+    int nr = 0;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(st, 0);
+        const char *body = (const char *)sqlite3_column_text(st, 2);
+        int64_t off = sqlite3_column_int64(st, 1);
+        Note *next = realloc(rows, (size_t)(nr + 1) * sizeof(*rows));
+        char *pcopy = xstrdup(path ? path : "");
+        char *bcopy = xstrdup(body ? body : "");
+        if (!next || !pcopy || !bcopy || off < 0 || off > UINT32_MAX) {
+            free(pcopy);
+            free(bcopy);
+            sqlite3_finalize(st);
+            index_notes_free(next ? next : rows, nr);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        rows = next;
+        rows[nr].path = pcopy;
+        rows[nr].offset = (uint32_t)off;
+        rows[nr].body = bcopy;
+        nr++;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        index_notes_free(rows, nr);
+        return db_fail(ix, e, "sqlite");
+    }
+    *notes = rows;
+    *n = nr;
+    return 0;
+}
+
+void index_notes_free(Note *notes, int n) {
+    if (!notes) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(notes[i].path);
+        free(notes[i].body);
+    }
+    free(notes);
+}
+
+int index_note_put(Index *ix, const char *path, uint32_t offset, const char *body, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon_path = note_line(path, NOTE_PATH_MAX, "note needs a path", "that path is too long", e);
+    if (!canon_path) {
+        return -1;
+    }
+    char *canon_body = note_line(body, NOTE_BODY_MAX, "empty note", "that note is too long", e);
+    if (!canon_body) {
+        free(canon_path);
+        return -1;
+    }
+    int rc = note_touch(ix, canon_path, offset, canon_body, 0, e);
+    free(canon_path);
+    free(canon_body);
+    return rc;
+}
+
+int index_note_drop(Index *ix, const char *path, uint32_t offset, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon_path = note_line(path, NOTE_PATH_MAX, "note needs a path", "that path is too long", e);
+    if (!canon_path) {
+        return -1;
+    }
+    int rc = note_touch(ix, canon_path, offset, "", 1, e);
+    free(canon_path);
+    return rc;
+}
+
+static void alert_files_free(AlertFile *files, int n) {
+    if (!files) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(files[i].path);
+    }
+    free(files);
+}
+
+static int alert_file_push(AlertFile **arr, int *n, int *cap, AlertFile *src) {
+    if (*n == *cap) {
+        int nc = *cap ? *cap * 2 : 8;
+        AlertFile *p = realloc(*arr, (size_t)nc * sizeof(*p));
+        if (!p) {
+            return -1;
+        }
+        *arr = p;
+        *cap = nc;
+    }
+    (*arr)[(*n)++] = *src;
+    src->path = NULL;
+    return 0;
+}
+
+static int alert_file_cmp(const void *a, const void *b) {
+    const char *x = ((const AlertFile *)a)->path;
+    const char *y = ((const AlertFile *)b)->path;
+    return strcmp(x ? x : "", y ? y : "");
+}
+
+/* Matching files for a query, with no passage text. Paths are the stored roots. */
+static int match_files(Index *ix, const char *query, AlertFile **out, int *nout, Err *e) {
+    *out = NULL;
+    *nout = 0;
+    ParsedQuery pq;
+    if (query_parse(query, &pq, e) != 0) {
+        return -1;
+    }
+    Cand *cands = NULL;
+    int nc = 0;
+    const char *match = NULL;
+    MExpr mx = {MX_ERR, NULL};
+    if (gather_cands(ix, &pq, &cands, &nc, &match, &mx, e) != 0) {
+        mx_free(&mx);
+        parsed_free(&pq);
+        return -1;
+    }
+    (void)match;
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st, "SELECT mtime, nsec, size FROM docs WHERE docid=?", e) != 0) {
+        cands_free(cands, nc);
+        mx_free(&mx);
+        parsed_free(&pq);
+        return -1;
+    }
+    AlertFile *arr = NULL;
+    int n = 0;
+    int cap = 0;
+    int failed = 0;
+    for (int i = 0; i < nc; i++) {
+        if (!doc_passes(cands[i].rel, cands[i].title, cands[i].ext, cands[i].mtime, &pq)) {
+            continue;
+        }
+        char *path = display_path(ix, cands[i].root_id, cands[i].rel, NULL);
+        if (!path) {
+            err_set(e, "out of memory");
+            failed = 1;
+            break;
+        }
+        sqlite3_reset(st);
+        sqlite3_clear_bindings(st);
+        sqlite3_bind_int64(st, 1, cands[i].id);
+        if (sqlite3_step(st) != SQLITE_ROW) {
+            free(path);
+            err_set(e, "document disappeared");
+            failed = 1;
+            break;
+        }
+        AlertFile f;
+        memset(&f, 0, sizeof f);
+        f.path = path;
+        f.mtime = sqlite3_column_int64(st, 0);
+        f.nsec = sqlite3_column_int(st, 1);
+        f.size = sqlite3_column_int64(st, 2);
+        if (alert_file_push(&arr, &n, &cap, &f) != 0) {
+            free(f.path);
+            err_set(e, "out of memory");
+            failed = 1;
+            break;
+        }
+    }
+    sqlite3_finalize(st);
+    cands_free(cands, nc);
+    mx_free(&mx);
+    parsed_free(&pq);
+    if (failed) {
+        alert_files_free(arr, n);
+        return -1;
+    }
+    *out = arr;
+    *nout = n;
+    return 0;
+}
+
+static int alert_open(Index *ix, sqlite3 **db, Err *e) {
+    int rc = sqlite3_open_v2(ix->db_path, db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !*db) {
+        err_set(e, "cannot open %s: %s", ix->db_path, *db ? sqlite3_errmsg(*db) : "sqlite");
+        if (*db) {
+            sqlite3_close(*db);
+            *db = NULL;
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(*db, 20000);
+    sqlite3_extended_result_codes(*db, 1);
+    return 0;
+}
+
+static int alert_schema(sqlite3 *db, Err *e) {
+    if (saved_exec(db,
+                   "CREATE TABLE IF NOT EXISTS saved("
+                   " query TEXT PRIMARY KEY,"
+                   " created INTEGER NOT NULL)",
+                   e) != 0) {
+        return -1;
+    }
+    if (saved_exec(db,
+                   "CREATE TABLE IF NOT EXISTS alert("
+                   " query TEXT PRIMARY KEY,"
+                   " created INTEGER NOT NULL)",
+                   e) != 0) {
+        return -1;
+    }
+    return saved_exec(db,
+                      "CREATE TABLE IF NOT EXISTS alert_seen("
+                      " query TEXT NOT NULL,"
+                      " path TEXT NOT NULL,"
+                      " mtime INTEGER NOT NULL,"
+                      " nsec INTEGER NOT NULL,"
+                      " size INTEGER NOT NULL,"
+                      " PRIMARY KEY(query, path))",
+                      e);
+}
+
+static int alert_created(sqlite3 *db, int64_t *now, Err *e) {
+    sqlite3_stmt *mx = NULL;
+    *now = (int64_t)time(NULL);
+    if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(created), 0) FROM saved", -1, &mx, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    if (sqlite3_step(mx) == SQLITE_ROW) {
+        int64_t m = sqlite3_column_int64(mx, 0);
+        if (m >= *now) {
+            *now = m + 1;
+        }
+    }
+    sqlite3_finalize(mx);
+    return 0;
+}
+
+static int alert_store(Index *ix, const char *canon, AlertFile *files, int n, Err *e) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    if (alert_open(ix, &db, e) != 0) {
+        return -1;
+    }
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        return -1;
+    }
+    began = 1;
+    if (alert_schema(db, e) != 0) {
+        goto fail;
+    }
+    int64_t now = 0;
+    if (alert_created(db, &now, e) != 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO saved(query, created) VALUES(?, ?)"
+                           " ON CONFLICT(query) DO UPDATE SET created=excluded.created",
+                           -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, canon, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, now);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (saved_exec(db,
+                   "DELETE FROM saved WHERE query IN ("
+                   "SELECT query FROM saved ORDER BY created DESC, query LIMIT -1 OFFSET " SAVED_STR(SAVED_KEEP) ")",
+                   e) != 0) {
+        goto fail;
+    }
+    if (alert_forget_orphans(db, e) != 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM alert_seen WHERE query=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, canon, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO alert(query, created) VALUES(?, ?)"
+                           " ON CONFLICT(query) DO UPDATE SET created=excluded.created",
+                           -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, canon, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, now);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (n > 0 &&
+        sqlite3_prepare_v2(db, "INSERT INTO alert_seen(query, path, mtime, nsec, size) VALUES(?, ?, ?, ?, ?)", -1, &st,
+                           NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    for (int i = 0; i < n; i++) {
+        sqlite3_reset(st);
+        sqlite3_clear_bindings(st);
+        sqlite3_bind_text(st, 1, canon, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, files[i].path ? files[i].path : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 3, files[i].mtime);
+        sqlite3_bind_int(st, 4, files[i].nsec);
+        sqlite3_bind_int64(st, 5, files[i].size);
+        if (sqlite3_step(st) != SQLITE_DONE) {
+            saved_fail(db, e);
+            goto fail;
+        }
+    }
+    if (st) {
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    return -1;
+}
+
+int index_alert_watch(Index *ix, const char *query, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon = saved_text(query, 1, e);
+    if (!canon) {
+        return -1;
+    }
+    AlertFile *files = NULL;
+    int n = 0;
+    if (match_files(ix, canon, &files, &n, e) != 0) {
+        free(canon);
+        return -1;
+    }
+    if (n > ALERT_FILES_MAX) {
+        alert_files_free(files, n);
+        free(canon);
+        err_set(e, "too many files to watch");
+        return -1;
+    }
+    int rc = alert_store(ix, canon, files, n, e);
+    alert_files_free(files, n);
+    free(canon);
+    return rc;
+}
+
+int index_alert_unwatch(Index *ix, const char *query, Err *e) {
+    sqlite3 *db = NULL;
+    int began = 0;
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *canon = saved_text(query, 0, e);
+    if (!canon) {
+        return -1;
+    }
+    if (alert_open(ix, &db, e) != 0) {
+        free(canon);
+        return -1;
+    }
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        free(canon);
+        return -1;
+    }
+    began = 1;
+    if (alert_forget_query(db, canon, e) != 0) {
+        goto fail;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        free(canon);
+        return -1;
+    }
+    sqlite3_close(db);
+    free(canon);
+    return 0;
+fail:
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    free(canon);
+    return -1;
+}
+
+static int alert_load_seen(Index *ix, const char *query, AlertFile **out, int *nout, Err *e) {
+    sqlite3_stmt *st = NULL;
+    *out = NULL;
+    *nout = 0;
+    if (prep(ix, &st, "SELECT path, mtime, nsec, size FROM alert_seen WHERE query=? ORDER BY path", e) != 0) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, query, -1, SQLITE_TRANSIENT);
+    AlertFile *arr = NULL;
+    int n = 0;
+    int cap = 0;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(st, 0);
+        AlertFile f;
+        memset(&f, 0, sizeof f);
+        f.path = xstrdup(path ? path : "");
+        f.mtime = sqlite3_column_int64(st, 1);
+        f.nsec = sqlite3_column_int(st, 2);
+        f.size = sqlite3_column_int64(st, 3);
+        if (!f.path || alert_file_push(&arr, &n, &cap, &f) != 0) {
+            free(f.path);
+            sqlite3_finalize(st);
+            alert_files_free(arr, n);
+            err_set(e, "out of memory");
+            return -1;
+        }
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        alert_files_free(arr, n);
+        return db_fail(ix, e, "sqlite");
+    }
+    *out = arr;
+    *nout = n;
+    return 0;
+}
+
+static int alert_changed(Index *ix, const char *query, AlertFile **out, int *nout, Err *e) {
+    AlertFile *cur = NULL;
+    AlertFile *seen = NULL;
+    AlertFile *neu = NULL;
+    int nc = 0;
+    int ns = 0;
+    int nn = 0;
+    int cap = 0;
+    *out = NULL;
+    *nout = 0;
+    if (match_files(ix, query, &cur, &nc, e) != 0) {
+        return -1;
+    }
+    if (alert_load_seen(ix, query, &seen, &ns, e) != 0) {
+        alert_files_free(cur, nc);
+        return -1;
+    }
+    for (int i = 0; i < nc; i++) {
+        AlertFile key;
+        memset(&key, 0, sizeof key);
+        key.path = cur[i].path;
+        AlertFile *found = ns ? bsearch(&key, seen, (size_t)ns, sizeof(AlertFile), alert_file_cmp) : NULL;
+        if (found && found->mtime == cur[i].mtime && found->nsec == cur[i].nsec && found->size == cur[i].size) {
+            continue;
+        }
+        if (alert_file_push(&neu, &nn, &cap, &cur[i]) != 0) {
+            err_set(e, "out of memory");
+            alert_files_free(cur, nc);
+            alert_files_free(seen, ns);
+            alert_files_free(neu, nn);
+            return -1;
+        }
+    }
+    alert_files_free(cur, nc);
+    alert_files_free(seen, ns);
+    if (nn > 1) {
+        qsort(neu, (size_t)nn, sizeof(AlertFile), alert_file_cmp);
+    }
+    *out = neu;
+    *nout = nn;
+    return 0;
+}
+
+int index_alerts_list(Index *ix, Alert **alerts, int *n, Err *e) {
+    sqlite3_stmt *st = NULL;
+    char **queries = NULL;
+    int nq = 0;
+    Alert *rows = NULL;
+    if (alerts) {
+        *alerts = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!ix || !alerts || !n) {
+        err_set(e, "no index");
+        return -1;
+    }
+    if (prep(ix, &st, "SELECT query FROM alert ORDER BY created DESC, query", e) != 0) {
+        if (e->msg[0] && strstr(e->msg, "no such table")) {
+            err_clear(e);
+            return 0;
+        }
+        return -1;
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(st, 0);
+        char *copy = xstrdup(s ? s : "");
+        char **next = copy ? realloc(queries, (size_t)(nq + 1) * sizeof(*queries)) : NULL;
+        if (!copy || !next) {
+            free(copy);
+            sqlite3_finalize(st);
+            index_saved_free(queries, nq);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        queries = next;
+        queries[nq++] = copy;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        index_saved_free(queries, nq);
+        return db_fail(ix, e, "sqlite");
+    }
+    rows = calloc(nq ? (size_t)nq : 1, sizeof(Alert));
+    if (!rows) {
+        index_saved_free(queries, nq);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    for (int i = 0; i < nq; i++) {
+        rows[i].query = queries[i];
+        queries[i] = NULL;
+        if (alert_changed(ix, rows[i].query, &rows[i].files, &rows[i].nfiles, e) != 0) {
+            index_alerts_free(rows, i + 1);
+            index_saved_free(queries, nq);
+            return -1;
+        }
+    }
+    index_saved_free(queries, nq);
+    *alerts = rows;
+    *n = nq;
+    return 0;
+}
+
+void index_alerts_free(Alert *alerts, int n) {
+    if (!alerts) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(alerts[i].query);
+        alert_files_free(alerts[i].files, alerts[i].nfiles);
+    }
+    free(alerts);
 }

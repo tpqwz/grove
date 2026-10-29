@@ -44,6 +44,9 @@ typedef struct ParsedQuery {
     char *ext;
     char *path_sub;
     char *title_sub;
+    /* mtime_year is 0 when the query has no month. Otherwise both are set. */
+    int mtime_year;
+    int mtime_mon;
 } ParsedQuery;
 
 int query_parse(const char *s, ParsedQuery *out, Err *e);

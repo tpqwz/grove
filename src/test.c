@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -38,6 +39,25 @@ static void test_tokens(void) {
     CHECK(tokenize(&t, "don't", 5) == 0);
     CHECK(t.n == 1 && tok_is(&t, 0, "dont"));
     CHECK(t.toks[0].start == 0 && t.toks[0].end == 5);
+    tokens_clear(&t);
+    CHECK(casefold_cp(0x1f08) == 0x1f00);
+    CHECK(casefold_cp(0x1f00) == 0x1f00);
+    CHECK(casefold_cp(0x1fbc) == 0x1fb3);
+    CHECK(cp_is_letter(0x1f00));
+    CHECK(!cp_is_letter(0x1fbd));
+    const char *poly = "\u1F00\u03BD\u03B5\u03B2\u03AC\u03BB\u03BB\u03B5\u03C4\u03BF";
+    CHECK(tokenize(&t, poly, strlen(poly)) == 0);
+    CHECK(t.n == 1 && tok_is(&t, 0, poly));
+    CHECK(t.toks[0].start == 0 && t.toks[0].end == (uint32_t)strlen(poly));
+    tokens_clear(&t);
+    const char *arch = "\u1F08\u03C1\u03C7\u03AE";
+    const char *arch_fold = "\u1F00\u03C1\u03C7\u03AE";
+    CHECK(tokenize(&t, arch, strlen(arch)) == 0);
+    CHECK(t.n == 1 && tok_is(&t, 0, arch_fold));
+    tokens_clear(&t);
+    const char *split = "\u1F00\u1FBD\u1F00";
+    CHECK(tokenize(&t, split, strlen(split)) == 0);
+    CHECK(t.n == 2 && tok_is(&t, 0, "\u1F00") && tok_is(&t, 1, "\u1F00"));
     tokens_clear(&t);
     CHECK(tokenize(&t, "full-blown", 10) == 0);
     CHECK(t.n == 2 && tok_is(&t, 0, "full") && tok_is(&t, 1, "blown"));
@@ -78,6 +98,14 @@ static void test_query_shape(void) {
     CHECK(query_parse("port*", &pq, &e) == 0);
     CHECK(pq.q && pq.q->kind == Q_TERM && pq.q->prefix);
     parsed_free(&pq);
+    CHECK(query_parse("mtime:2026-10", &pq, &e) == 0);
+    CHECK(pq.q == NULL && pq.mtime_year == 2026 && pq.mtime_mon == 10);
+    parsed_free(&pq);
+    CHECK(query_parse("hello mtime:2026-10", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->kind == Q_TERM && pq.mtime_year == 2026 && pq.mtime_mon == 10);
+    parsed_free(&pq);
+    CHECK(query_parse("mtime:2026-13", &pq, &e) != 0);
+    CHECK(query_parse("mtime:nope", &pq, &e) != 0);
     CHECK(query_parse("東京駅", &pq, &e) == 0);
     CHECK(pq.q && pq.q->kind == Q_PHRASE && pq.q->nkids == 2);
     parsed_free(&pq);
@@ -455,6 +483,7 @@ static int test_corpus(const char *root) {
     char *idx = KEEP(path_join(root, "idx"));
     char *sub = KEEP(path_join(docs, "sub"));
     char *a = KEEP(path_join(docs, "a.txt"));
+    char *greek = KEEP(path_join(docs, "greek.txt"));
     char *b = KEEP(path_join(docs, "b.txt"));
     char *c = KEEP(path_join(sub, "c.md"));
     char *tokyo = KEEP(path_join(docs, "tokyo.txt"));
@@ -478,14 +507,16 @@ static int test_corpus(const char *root) {
     char *longp = KEEP(path_join(docs, "long.txt"));
     char *phrasep = KEEP(path_join(docs, "phrase.txt"));
     char *manyp = KEEP(path_join(docs, "many.txt"));
-    if (!docs || !idx || !sub || !ff || !ruled || !adoc || !lead || !odt || !epub || !outline || !longp || !phrasep ||
-        !manyp ||
+    if (!docs || !idx || !sub || !a || !greek || !ff || !ruled || !adoc || !lead || !odt || !epub || !outline ||
+        !longp || !phrasep || !manyp ||
         mkdir(docs, 0755) != 0 || mkdir(sub, 0755) != 0) {
         fprintf(stderr, "cannot create corpus\n");
         goto done;
     }
     const char *a_text = "Hello there. This is a full text note about portable search. Don't stop.\n";
     CHECK(write_file(a, a_text, strlen(a_text)) == 0);
+    const char *greek_text = "\u1F00\u03BD\u03B5\u03B2\u03AC\u03BB\u03BB\u03B5\u03C4\u03BF \u1F08\u03C1\u03C7\u03AE.\n";
+    CHECK(write_file(greek, greek_text, strlen(greek_text)) == 0);
     const char *b_text = "A full-blown text about something else.\n";
     CHECK(write_file(b, b_text, strlen(b_text)) == 0);
     const char *c_text = "# Gamma Note\ngamma lives here with alpha\n";
@@ -883,6 +914,28 @@ static int test_corpus(const char *root) {
 
     h = do_search(ix, "don't", NULL, &n);
     expect_hit(h, n, "/a.txt", "dont");
+    {
+        Hit *dh = find_hit(h, n, "/a.txt");
+        CHECK(dh && dh->npassages >= 1 && dh->passages[0].text && strstr(dh->passages[0].text, "<<Don't>>"));
+    }
+    CHECK(n == 1);
+    hits_free(h, n);
+    h = do_search(ix, "\u1F00\u03BD\u03B5\u03B2\u03AC\u03BB\u03BB\u03B5\u03C4\u03BF", NULL, &n);
+    expect_hit(h, n, "/greek.txt", "polytonic");
+    {
+        Hit *gh = find_hit(h, n, "/greek.txt");
+        CHECK(gh && gh->npassages >= 1 && gh->passages[0].text &&
+              strstr(gh->passages[0].text, "<<\u1F00\u03BD\u03B5\u03B2\u03AC\u03BB\u03BB\u03B5\u03C4\u03BF>>"));
+    }
+    CHECK(n == 1);
+    hits_free(h, n);
+    h = do_search(ix, "\u1F00\u03C1\u03C7\u03AE", NULL, &n);
+    expect_hit(h, n, "/greek.txt", "polytonic case");
+    {
+        Hit *gh = find_hit(h, n, "/greek.txt");
+        CHECK(gh && gh->npassages >= 1 && gh->passages[0].text &&
+              strstr(gh->passages[0].text, "<<\u1F08\u03C1\u03C7\u03AE>>"));
+    }
     CHECK(n == 1);
     hits_free(h, n);
 
@@ -908,6 +961,14 @@ static int test_corpus(const char *root) {
     h = do_search(ix, "(hello OR gamma) ext:txt", NULL, &n);
     expect_hit(h, n, "/a.txt", "paren");
     CHECK(n == 1);
+    hits_free(h, n);
+
+    h = do_search(ix, "(hello OR gamma) AND (portable)", NULL, &n);
+    expect_hit(h, n, "/a.txt", "and line");
+    expect_hit(h, n, "/page.docx", "and line");
+    expect_miss(h, n, "/c.md", "and line");
+    expect_miss(h, n, "/page.pdf", "and line");
+    CHECK(n == 2);
     hits_free(h, n);
 
     h = do_search(ix, "ext:md gamma", NULL, &n);
@@ -1387,11 +1448,510 @@ done:
     rm_rf(root);
 }
 
+static time_t local_month(int year, int mon, int day) {
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = year - 1900;
+    tm.tm_mon = mon - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = 12;
+    tm.tm_isdst = -1;
+    return mktime(&tm);
+}
+
+static int set_mtime(const char *path, time_t sec) {
+    struct timespec ts[2];
+    ts[0].tv_sec = sec;
+    ts[0].tv_nsec = 0;
+    ts[1].tv_sec = sec;
+    ts[1].tv_nsec = 0;
+    return utimensat(AT_FDCWD, path, ts, 0);
+}
+
+static void test_mtime(void) {
+    char tmpl[] = "/tmp/grove-mtime-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *docs = path_join(root, "docs");
+    char *idx = path_join(root, "idx");
+    char *oct = docs ? path_join(docs, "oct.txt") : NULL;
+    char *sep = docs ? path_join(docs, "sep.txt") : NULL;
+    Index *ix = NULL;
+    if (!docs || !idx || !oct || !sep || mkdir(docs, 0755) != 0) {
+        fprintf(stderr, "mtime corpus\n");
+        fails++;
+        goto done;
+    }
+    const char *text = "widget monthmark\n";
+    if (write_file(oct, text, strlen(text)) != 0 || write_file(sep, text, strlen(text)) != 0 ||
+        set_mtime(oct, local_month(2026, 10, 15)) != 0 || set_mtime(sep, local_month(2026, 9, 15)) != 0) {
+        fails++;
+        goto done;
+    }
+    Err e;
+    err_clear(&e);
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "mtime open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "mtime index: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    Facets fac;
+    memset(&fac, 0, sizeof fac);
+    Hit *h = NULL;
+    int n = 0;
+    CHECK(index_search(ix, "widget", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(n == 2);
+    CHECK(fac.nfiles == 2);
+    CHECK(facet_n(fac.months, fac.nmonths, "2026-10") == 1);
+    CHECK(facet_n(fac.months, fac.nmonths, "2026-09") == 1);
+    hits_free(h, n);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    n = 0;
+    CHECK(index_search(ix, "widget mtime:2026-09", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(n == 1);
+    CHECK(fac.nfiles == 1);
+    expect_hit(h, n, "/sep.txt", "september");
+    expect_miss(h, n, "/oct.txt", "september");
+    CHECK(facet_n(fac.months, fac.nmonths, "2026-09") == 1);
+    CHECK(facet_n(fac.months, fac.nmonths, "2026-10") == -1);
+    hits_free(h, n);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    n = 0;
+    CHECK(index_search(ix, "mtime:2026-10", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(n == 1);
+    CHECK(fac.nfiles == 1);
+    expect_hit(h, n, "/oct.txt", "october only");
+    expect_miss(h, n, "/sep.txt", "october only");
+    hits_free(h, n);
+    facets_free(&fac);
+    index_close(ix);
+    ix = NULL;
+done:
+    if (ix) {
+        index_close(ix);
+    }
+    free(docs);
+    free(idx);
+    free(oct);
+    free(sep);
+    rm_rf(root);
+}
+
+static int saved_has(char **q, int n, const char *s) {
+    for (int i = 0; i < n; i++) {
+        if (strcmp(q[i], s) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_saved(void) {
+    char tmpl[] = "/tmp/grove-saved-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *idx = path_join(root, "idx");
+    Index *ix = NULL;
+    char **q = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (!idx) {
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "saved open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 0);
+    CHECK(index_saved_put(ix, "  shall  ", &e) == 0);
+    CHECK(index_saved_put(ix, "shall", &e) == 0);
+    CHECK(index_saved_put(ix, "mtime:2026-13", &e) != 0);
+    CHECK(index_saved_put(ix, "", &e) != 0);
+    CHECK(index_saved_put(ix, "shall\nmore", &e) != 0);
+    index_saved_free(q, n);
+    q = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 1 && q && strcmp(q[0], "shall") == 0);
+    CHECK(index_saved_put(ix, "other", &e) == 0);
+    index_saved_free(q, n);
+    q = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 2 && strcmp(q[0], "other") == 0 && strcmp(q[1], "shall") == 0);
+    index_close(ix);
+    ix = index_open(idx, 0, &e);
+    if (!ix) {
+        fprintf(stderr, "saved reopen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_saved_put(ix, "third", &e) == 0);
+    index_saved_free(q, n);
+    q = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 3 && strcmp(q[0], "third") == 0);
+    CHECK(index_saved_drop(ix, " shall ", &e) == 0);
+    CHECK(index_saved_drop(ix, "shall", &e) == 0);
+    index_saved_free(q, n);
+    q = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 2 && !saved_has(q, n, "shall") && saved_has(q, n, "other") && saved_has(q, n, "third"));
+    for (int i = 0; i < 25; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "n%02d", i);
+        if (index_saved_put(ix, name, &e) != 0) {
+            fprintf(stderr, "saved put %s: %s\n", name, e.msg);
+            fails++;
+            goto done;
+        }
+    }
+    index_saved_free(q, n);
+    q = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &q, &n, &e) == 0);
+    CHECK(n == 24);
+    CHECK(saved_has(q, n, "n24") && saved_has(q, n, "n01"));
+    CHECK(!saved_has(q, n, "n00") && !saved_has(q, n, "other") && !saved_has(q, n, "third"));
+    CHECK(q && strcmp(q[0], "n24") == 0);
+done:
+    index_saved_free(q, n);
+    if (ix) {
+        index_close(ix);
+    }
+    free(idx);
+    rm_rf(root);
+}
+
+static void test_notes(void) {
+    char tmpl[] = "/tmp/grove-notes-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *idx = path_join(root, "idx");
+    Index *ix = NULL;
+    Note *notes = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (!idx) {
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "notes open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_notes_list(ix, &notes, &n, &e) == 0);
+    CHECK(n == 0);
+    CHECK(index_note_put(ix, "/shelf/a.txt", 40, "  margin  ", &e) == 0);
+    CHECK(index_note_put(ix, "/shelf/a.txt", 40, "", &e) != 0);
+    CHECK(index_note_put(ix, "/shelf/a.txt", 40, "two\nlines", &e) != 0);
+    CHECK(index_note_put(ix, "/shelf/a.txt", 40, "kept", &e) == 0);
+    CHECK(index_note_put(ix, "/shelf/b.txt", 8, "other", &e) == 0);
+    index_notes_free(notes, n);
+    notes = NULL;
+    n = 0;
+    CHECK(index_notes_list(ix, &notes, &n, &e) == 0);
+    CHECK(n == 2);
+    CHECK(notes && strcmp(notes[0].path, "/shelf/a.txt") == 0 && notes[0].offset == 40 && strcmp(notes[0].body, "kept") == 0);
+    CHECK(strcmp(notes[1].path, "/shelf/b.txt") == 0 && notes[1].offset == 8);
+    index_close(ix);
+    ix = index_open(idx, 0, &e);
+    if (!ix) {
+        fprintf(stderr, "notes reopen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_note_drop(ix, " /shelf/a.txt ", 40, &e) == 0);
+    index_notes_free(notes, n);
+    notes = NULL;
+    n = 0;
+    CHECK(index_notes_list(ix, &notes, &n, &e) == 0);
+    CHECK(n == 1 && notes && strcmp(notes[0].path, "/shelf/b.txt") == 0);
+done:
+    index_notes_free(notes, n);
+    if (ix) {
+        index_close(ix);
+    }
+    free(idx);
+    rm_rf(root);
+}
+
+static int alert_nfiles(Alert *a, int n, const char *query) {
+    for (int i = 0; i < n; i++) {
+        if (a[i].query && strcmp(a[i].query, query) == 0) {
+            return a[i].nfiles;
+        }
+    }
+    return -1;
+}
+
+static int alert_has_path(Alert *a, int n, const char *query, const char *suffix) {
+    size_t m = strlen(suffix);
+    for (int i = 0; i < n; i++) {
+        if (!a[i].query || strcmp(a[i].query, query) != 0) {
+            continue;
+        }
+        for (int j = 0; j < a[i].nfiles; j++) {
+            const char *p = a[i].files[j].path ? a[i].files[j].path : "";
+            size_t pn = strlen(p);
+            if (pn >= m && memcmp(p + pn - m, suffix, m) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int add_tree(Index *ix, const char *docs, Err *e) {
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    return index_add(ix, docs, &st, e);
+}
+
+static void test_alerts(void) {
+    char tmpl[] = "/tmp/grove-alerts-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *docs = path_join(root, "docs");
+    char *idx = path_join(root, "idx");
+    char *a = docs ? path_join(docs, "a.txt") : NULL;
+    char *b = docs ? path_join(docs, "b.txt") : NULL;
+    char *c = docs ? path_join(docs, "c.txt") : NULL;
+    char *d = docs ? path_join(docs, "d.txt") : NULL;
+    Index *ix = NULL;
+    Alert *al = NULL;
+    char **saved = NULL;
+    int n = 0;
+    int ns = 0;
+    Err e;
+    err_clear(&e);
+    if (!docs || !idx || !a || !b || !c || !d || mkdir(docs, 0755) != 0) {
+        fprintf(stderr, "alert corpus\n");
+        fails++;
+        goto done;
+    }
+    if (write_file(a, "alpha alertword\n", 16) != 0 || write_file(b, "beta alertword\n", 15) != 0) {
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "alert open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    if (add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "alert index: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(n == 0);
+    CHECK(index_alert_watch(ix, "", &e) != 0);
+    CHECK(index_alert_watch(ix, "alertword\nmore", &e) != 0);
+    CHECK(index_alert_watch(ix, "mtime:2026-13", &e) != 0);
+    if (index_alert_watch(ix, "  alertword  ", &e) != 0) {
+        fprintf(stderr, "watch: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &saved, &ns, &e) == 0);
+    CHECK(ns == 1 && saved && strcmp(saved[0], "alertword") == 0);
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(n == 1 && alert_nfiles(al, n, "alertword") == 0);
+    CHECK(index_alert_unwatch(ix, " alertword ", &e) == 0);
+    CHECK(index_alert_unwatch(ix, "alertword", &e) == 0);
+    index_saved_free(saved, ns);
+    saved = NULL;
+    ns = 0;
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_saved_list(ix, &saved, &ns, &e) == 0);
+    CHECK(ns == 1 && saved_has(saved, ns, "alertword"));
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(n == 0);
+    if (index_alert_watch(ix, "alertword", &e) != 0) {
+        fprintf(stderr, "rewatch: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    if (write_file(c, "gamma alertword\n", 16) != 0 || add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "alert add c: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "alertword") == 1);
+    CHECK(alert_has_path(al, n, "alertword", "/c.txt"));
+    if (write_file(a, "alpha alertword changed more\n", 29) != 0 || add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "alert change a: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "alertword") == 2);
+    CHECK(alert_has_path(al, n, "alertword", "/a.txt"));
+    CHECK(alert_has_path(al, n, "alertword", "/c.txt"));
+    CHECK(!alert_has_path(al, n, "alertword", "/b.txt"));
+    if (index_alert_watch(ix, "alertword", &e) != 0) {
+        fprintf(stderr, "seen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "alertword") == 0);
+    if (unlink(c) != 0 || add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "alert drop c: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "alertword") == 0);
+    CHECK(index_saved_drop(ix, "alertword", &e) == 0);
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    index_saved_free(saved, ns);
+    saved = NULL;
+    ns = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(n == 0);
+    CHECK(index_saved_list(ix, &saved, &ns, &e) == 0);
+    CHECK(!saved_has(saved, ns, "alertword"));
+    if (index_alert_watch(ix, "zzznomatch", &e) != 0) {
+        fprintf(stderr, "empty watch: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    if (write_file(d, "zzznomatch\n", 11) != 0 || add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "alert add d: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_close(ix);
+    ix = index_open(idx, 0, &e);
+    if (!ix) {
+        fprintf(stderr, "alert reopen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "zzznomatch") == 1);
+    CHECK(alert_has_path(al, n, "zzznomatch", "/d.txt"));
+    if (index_alert_watch(ix, "zzznomatch", &e) != 0) {
+        fprintf(stderr, "readonly seen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(alert_nfiles(al, n, "zzznomatch") == 0);
+    for (int i = 0; i < 24; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "n%02d", i);
+        if (index_saved_put(ix, name, &e) != 0) {
+            fprintf(stderr, "alert cap %s: %s\n", name, e.msg);
+            fails++;
+            goto done;
+        }
+    }
+    index_alerts_free(al, n);
+    al = NULL;
+    n = 0;
+    index_saved_free(saved, ns);
+    saved = NULL;
+    ns = 0;
+    CHECK(index_alerts_list(ix, &al, &n, &e) == 0);
+    CHECK(n == 0);
+    CHECK(index_saved_list(ix, &saved, &ns, &e) == 0);
+    CHECK(ns == 24);
+    CHECK(!saved_has(saved, ns, "zzznomatch"));
+    CHECK(saved_has(saved, ns, "n00") && saved_has(saved, ns, "n23"));
+done:
+    index_alerts_free(al, n);
+    index_saved_free(saved, ns);
+    if (ix) {
+        index_close(ix);
+    }
+    free(docs);
+    free(idx);
+    free(a);
+    free(b);
+    free(c);
+    free(d);
+    rm_rf(root);
+}
+
 int main(void) {
     test_tokens();
     test_query_shape();
     test_zip();
     test_facets();
+    test_mtime();
+    test_saved();
+    test_notes();
+    test_alerts();
     char tmpl[] = "/tmp/grove-test-XXXXXX";
     char *root = mkdtemp(tmpl);
     if (!root) {

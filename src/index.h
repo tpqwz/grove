@@ -63,7 +63,8 @@ typedef struct Hit {
 } Hit;
 
 /* One file-count bucket. A type value is the extension. A folder value is the
- * parent of the path relative to the indexed root, with a trailing slash. */
+ * parent of the path relative to the indexed root, with a trailing slash. A
+ * month value is YYYY-MM in local time. */
 typedef struct Facet {
     char *value;
     int count;
@@ -74,6 +75,8 @@ typedef struct Facets {
     int ntypes;
     Facet *folders;
     int nfolders;
+    Facet *months;
+    int nmonths;
     /* Matching files before the limit trim. */
     int nfiles;
 } Facets;
@@ -101,5 +104,52 @@ void facets_free(Facets *f);
 int index_more(Index *ix, const char *query, const char *path, uint32_t after, Passage **out, int *nout, int *more,
                Err *e);
 void hits_free(Hit *hits, int n);
+
+/* Remembered queries live in the same grove.db. The query text is the identity.
+ * List is newest first. A missing table is an empty list. Put and drop open a
+ * short write, so a read-only search connection can still remember one. At most
+ * 24 are kept. */
+int index_saved_list(Index *ix, char ***queries, int *n, Err *e);
+void index_saved_free(char **queries, int n);
+int index_saved_put(Index *ix, const char *query, Err *e);
+int index_saved_drop(Index *ix, const char *query, Err *e);
+
+/* A note is text on one place: the displayed path and the passage offset.
+ * The table appears on the first note. List is path, then offset. */
+typedef struct Note {
+    char *path;
+    uint32_t offset;
+    char *body;
+} Note;
+
+int index_notes_list(Index *ix, Note **notes, int *n, Err *e);
+void index_notes_free(Note *notes, int n);
+int index_note_put(Index *ix, const char *path, uint32_t offset, const char *body, Err *e);
+int index_note_drop(Index *ix, const char *path, uint32_t offset, Err *e);
+
+/* A watch stores the files that match a query: path, mtime, nsec, and size.
+ * The list names files that are new or changed since that snapshot. Watching
+ * again replaces it. The tables appear on the first watch. A watch is also a
+ * saved search, so at most 24 are kept. Forgetting the search drops the watch.
+ * Unwatch leaves the saved search. One snapshot holds at most ALERT_FILES_MAX. */
+#define ALERT_FILES_MAX 10000
+
+typedef struct AlertFile {
+    char *path;
+    int64_t mtime;
+    int nsec;
+    int64_t size;
+} AlertFile;
+
+typedef struct Alert {
+    char *query;
+    AlertFile *files;
+    int nfiles;
+} Alert;
+
+int index_alert_watch(Index *ix, const char *query, Err *e);
+int index_alert_unwatch(Index *ix, const char *query, Err *e);
+int index_alerts_list(Index *ix, Alert **alerts, int *n, Err *e);
+void index_alerts_free(Alert *alerts, int n);
 
 #endif

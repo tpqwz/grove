@@ -60,7 +60,7 @@ pdf = (
 open(f"{docs}/page.pdf", "w", encoding="ascii").write(pdf)
 PY
 
-test "$("$GROVE" --version)" = "grove 0.1.0"
+test "$("$GROVE" --version)" = "grove 0.1.0-alpha"
 "$GROVE" --help >/dev/null
 
 out=$("$GROVE" --index "$IDX" index "$DOCS")
@@ -271,5 +271,56 @@ if "$GROVE" --index "$IDX" search 'hello OR' 2>/dev/null; then
   echo "broken query should fail" >&2
   exit 1
 fi
+
+test -z "$("$GROVE" --index "$IDX" saved)"
+"$GROVE" --index "$IDX" save 'hello OR gamma'
+test "$("$GROVE" --index "$IDX" saved)" = "hello OR gamma"
+if "$GROVE" --index "$IDX" save 'mtime:2026-13' 2>"$TMP/saved.err"; then
+  echo "bad month should not save" >&2
+  exit 1
+fi
+grep -q 'mtime:' "$TMP/saved.err"
+json_has 'gamma' '/a.txt'
+"$GROVE" --index "$IDX" forget 'hello OR gamma'
+test -z "$("$GROVE" --index "$IDX" saved)"
+
+test -z "$("$GROVE" --index "$IDX" notes)"
+"$GROVE" --index "$IDX" note "$DOCS2/a.txt" 12 'a margin note'
+test "$("$GROVE" --index "$IDX" notes)" = "$(printf '12\t%s\ta margin note' "$DOCS2/a.txt")"
+if "$GROVE" --index "$IDX" note "$DOCS2/a.txt" 12 '   ' 2>"$TMP/note.err"; then
+  echo "empty note should fail" >&2
+  exit 1
+fi
+grep -q 'empty note' "$TMP/note.err"
+json_has 'gamma' '/a.txt'
+"$GROVE" --index "$IDX" forget-note "$DOCS2/a.txt" 12
+test -z "$("$GROVE" --index "$IDX" notes)"
+
+test -z "$("$GROVE" --index "$IDX" alerts)"
+"$GROVE" --index "$IDX" watch hello
+test "$("$GROVE" --index "$IDX" saved)" = "hello"
+test -z "$("$GROVE" --index "$IDX" alerts)"
+if "$GROVE" --index "$IDX" watch 'mtime:2026-13' 2>"$TMP/watch.err"; then
+  echo "bad month should not watch" >&2
+  exit 1
+fi
+grep -q 'mtime:' "$TMP/watch.err"
+printf '%s\n' 'fresh alert hello' >"$DOCS2/fresh.txt"
+"$GROVE" --index "$IDX" index "$DOCS2" >/dev/null
+alerts=$("$GROVE" --index "$IDX" alerts)
+first=$(printf '%s\n' "$alerts" | head -n 1)
+if [ "$first" != "1 hello" ]; then
+  printf 'alerts:\n%s\n' "$alerts" >&2
+  exit 1
+fi
+printf '%s\n' "$alerts" | grep -q '/fresh.txt'
+"$GROVE" --index "$IDX" watch hello
+test -z "$("$GROVE" --index "$IDX" alerts)"
+"$GROVE" --index "$IDX" unwatch hello
+test "$("$GROVE" --index "$IDX" saved)" = "hello"
+test -z "$("$GROVE" --index "$IDX" alerts)"
+"$GROVE" --index "$IDX" forget hello
+test -z "$("$GROVE" --index "$IDX" saved)"
+test -z "$("$GROVE" --index "$IDX" alerts)"
 
 echo "integration ok"

@@ -46,7 +46,17 @@
     white-space: nowrap;
   }
   header p.error { color: #8a2a1a; white-space: normal; }
-  form { margin: 0; }
+  form { margin: 0; position: relative; }
+  button.go {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+  }
   input {
     width: 100%;
     font: inherit;
@@ -62,6 +72,12 @@
     outline-offset: 1px;
     border-color: transparent;
   }
+  input.also {
+    margin-top: 0.45rem;
+    font-size: 1rem;
+    padding: 0.55rem 0.85rem;
+  }
+  input.also::placeholder { color: var(--muted); }
   .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 0; }
   .chips:empty { margin: 0; }
   .chips:not(:empty) { margin-top: 0.7rem; }
@@ -83,6 +99,52 @@
     margin: 0.7rem 0 0;
     color: var(--muted);
     font-size: 0.85rem;
+  }
+  .saved { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; min-height: 0; }
+  .saved:empty { margin: 0; }
+  .saved:not(:empty) { margin-top: 0.45rem; }
+  .saved .chip .q {
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 16rem;
+  }
+  button.save { color: var(--focus); font-size: 0.85rem; padding: 0.12rem 0.15rem; }
+  button.save:hover { text-decoration: underline; }
+  button.watch, button.unwatch {
+    color: var(--muted);
+    font-size: 0.85rem;
+    padding: 0.12rem 0.15rem;
+  }
+  button.watch:hover, button.unwatch:hover { color: var(--focus); }
+  .saved .chip button.new {
+    color: var(--focus);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    padding: 0 0.15rem;
+  }
+  .note-slot { min-height: 0; }
+  button.note-add {
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-top: 0.15rem;
+  }
+  button.note-add:hover { color: var(--focus); }
+  .note {
+    margin: 0.2rem 0 0;
+    font-size: 0.88rem;
+    display: flex;
+    gap: 0.45rem;
+    align-items: baseline;
+  }
+  .note span { overflow-wrap: anywhere; }
+  .note button { color: var(--muted); padding: 0 0.15rem; }
+  input.note-in {
+    width: 100%;
+    margin-top: 0.25rem;
+    font-size: 0.9rem;
+    padding: 0.35rem 0.6rem;
   }
   .count { min-height: 1.2em; }
   .err {
@@ -142,9 +204,12 @@
       <p id="index"></p>
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
+        <input id="also" class="also" type="text" placeholder="Also" aria-label="Also containing" autocomplete="off" spellcheck="false">
+        <button type="submit" class="go" tabindex="-1">Search</button>
       </form>
       <div class="chips" id="chips"></div>
       <p class="help">Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix.</p>
+      <div class="saved" id="saved"></div>
       <p class="count" id="count"></p>
       <p class="err" id="err" hidden></p>
     </header>
@@ -152,12 +217,19 @@
   </div>
 <script>
 const q = document.getElementById("q");
+const also = document.getElementById("also");
 const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
 const results = document.getElementById("results");
 const indexLine = document.getElementById("index");
+const savedRow = document.getElementById("saved");
 let seq = 0;
+let savedSeq = 0;
+let alertSeq = 0;
+let remembered = [];
+let alerts = [];
+let notes = [];
 
 const extLabel = {
   pdf: "PDFs", txt: "Text", md: "Markdown", html: "HTML", htm: "HTML",
@@ -194,6 +266,7 @@ function parseFilters(s) {
     let kind = "";
     if (s.startsWith("ext:", i)) kind = "ext";
     else if (s.startsWith("path:", i)) kind = "path";
+    else if (s.startsWith("mtime:", i)) kind = "mtime";
     if (kind) {
       i += kind.length + 1;
       let value = "";
@@ -231,11 +304,23 @@ function parseFilters(s) {
   return found;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function monthLabel(value) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(value || ""));
+  if (!m) return String(value || "");
+  const now = new Date();
+  if (Number(m[1]) === now.getFullYear() && Number(m[2]) === now.getMonth() + 1) return "This month";
+  const name = MONTHS[Number(m[2]) - 1] || m[2];
+  return name + " " + m[1];
+}
+
 function chipText(f) {
   if (f.kind === "ext") {
     const key = f.value.replace(/^\./, "").toLowerCase();
     return extLabel[key] || f.value;
   }
+  if (f.kind === "mtime") return monthLabel(f.value);
   const trimmed = f.value.replace(/\/+$/, "");
   const slash = trimmed.lastIndexOf("/");
   const leaf = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
@@ -256,6 +341,7 @@ function facetApplied(filters, kind, value) {
     if (f.kind !== kind) continue;
     if (kind === "ext" && normExt(f.value) === normExt(value)) return true;
     if (kind === "path" && pathKey(f.value) === pathKey(value)) return true;
+    if (kind === "mtime" && f.value === value) return true;
   }
   return false;
 }
@@ -272,28 +358,50 @@ function leafOf(value) {
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
-function addFilter(kind, value) {
-  let cur = q.value;
-  const filters = parseFilters(cur);
-  if (facetApplied(filters, kind, value)) return;
-  const same = [];
-  for (let i = 0; i < filters.length; i++) {
-    if (filters[i].kind === kind) same.push(filters[i]);
-  }
+function combinedQuery() {
+  const a = q.value.trim();
+  const b = also.value.trim();
+  if (!a) return b;
+  if (!b) return a;
+  return "(" + a + ") AND (" + b + ")";
+}
+
+function collectFilters() {
+  const out = [];
+  [{el: q, line: "q"}, {el: also, line: "also"}].forEach(function (row) {
+    parseFilters(row.el.value).forEach(function (f) {
+      f.line = row.line;
+      out.push(f);
+    });
+  });
+  return out;
+}
+
+function stripKind(el, kind) {
+  let cur = el.value;
+  const same = parseFilters(cur).filter(function (f) { return f.kind === kind; });
   for (let i = same.length - 1; i >= 0; i--) {
     cur = (cur.slice(0, same[i].start) + " " + cur.slice(same[i].end)).replace(/\s+/g, " ").trim();
   }
+  el.value = cur;
+}
+
+function addFilter(kind, value) {
+  if (facetApplied(collectFilters(), kind, value)) return;
+  stripKind(q, kind);
+  stripKind(also, kind);
   const token = kind + ":" + quoteFilter(value);
-  cur = cur.trim();
+  const cur = q.value.trim();
   q.value = cur ? cur + " " + token : token;
   q.focus();
   runSearch();
 }
 
-function drawFacets(facets, query) {
-  const filters = parseFilters(query);
+function drawFacets(facets) {
+  const filters = collectFilters();
   const types = (facets && facets.types) || [];
   const folders = (facets && facets.folders) || [];
+  const months = (facets && facets.months) || [];
   const leaves = {};
   folders.forEach(function (f) {
     const leaf = leafOf(f.value);
@@ -325,11 +433,14 @@ function drawFacets(facets, query) {
     const label = leaves[leaf] > 1 ? String(f.value).replace(/\/+$/, "") : leaf;
     add("path", f.value, label, f.count);
   });
+  months.forEach(function (f) {
+    add("mtime", f.value, monthLabel(f.value), f.count);
+  });
 }
 
-function drawChips(query) {
+function drawChips() {
   chips.replaceChildren();
-  parseFilters(query).forEach(function (f) {
+  collectFilters().forEach(function (f) {
     const chip = document.createElement("span");
     chip.className = "chip";
     const label = document.createElement("span");
@@ -340,9 +451,10 @@ function drawChips(query) {
     rm.textContent = "×";
     rm.setAttribute("aria-label", "Remove " + label.textContent);
     rm.addEventListener("click", function () {
-      const cur = q.value;
-      q.value = (cur.slice(0, f.start) + " " + cur.slice(f.end)).replace(/\s+/g, " ").trim();
-      q.focus();
+      const el = f.line === "also" ? also : q;
+      const cur = el.value;
+      el.value = (cur.slice(0, f.start) + " " + cur.slice(f.end)).replace(/\s+/g, " ").trim();
+      el.focus();
       runSearch();
     });
     chip.append(label, rm);
@@ -387,6 +499,121 @@ function addPassage(parent, hit, passage) {
     openPath(hit.path, passage.offset || 0, passage.page || 0, placeNeedle(passage.text));
   });
   parent.append(btn);
+  const slot = document.createElement("div");
+  slot.className = "note-slot";
+  slot.dataset.path = hit.path || "";
+  slot.dataset.offset = String(passage.offset || 0);
+  drawNote(slot, hit, passage);
+  parent.append(slot);
+}
+
+function findNote(path, offset) {
+  for (let i = 0; i < notes.length; i++) {
+    if (notes[i].path === path && notes[i].offset === offset) return notes[i];
+  }
+  return null;
+}
+
+function drawNote(slot, hit, passage) {
+  slot.replaceChildren();
+  const path = hit.path || "";
+  const offset = passage.offset || 0;
+  const existing = findNote(path, offset);
+  if (existing) {
+    const line = document.createElement("p");
+    line.className = "note";
+    const text = document.createElement("span");
+    text.textContent = existing.body;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.textContent = "×";
+    rm.setAttribute("aria-label", "Remove note");
+    rm.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      forgetNote(path, offset, slot, hit, passage);
+    });
+    line.append(text, rm);
+    slot.append(line);
+    return;
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "note-add";
+  add.textContent = "Note";
+  add.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    openNote(slot, hit, passage);
+  });
+  slot.append(add);
+}
+
+function openNote(slot, hit, passage) {
+  slot.replaceChildren();
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "note-in";
+  input.placeholder = "Note";
+  input.setAttribute("aria-label", "Note on this passage");
+  input.maxLength = 400;
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      keepNote(hit.path || "", passage.offset || 0, input.value, slot, hit, passage);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      drawNote(slot, hit, passage);
+    }
+  });
+  slot.append(input);
+  input.focus();
+}
+
+function takeNotes(raw) {
+  const data = JSON.parse(raw);
+  if (data && data.error) {
+    showError(data.error);
+    return false;
+  }
+  notes = (data && data.notes) || [];
+  return true;
+}
+
+async function loadNotes() {
+  try {
+    const raw = await grove_notes();
+    if (takeNotes(raw)) refreshNoteSlots();
+  } catch (e) {}
+}
+
+function refreshNoteSlots() {
+  const slots = document.querySelectorAll(".note-slot");
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i];
+    if (slot.querySelector("input")) continue;
+    drawNote(slot, { path: slot.dataset.path || "" }, { offset: Number(slot.dataset.offset || 0) });
+  }
+}
+
+async function keepNote(path, offset, body, slot, hit, passage) {
+  showError("");
+  try {
+    const raw = await grove_note(path, offset, body);
+    if (!takeNotes(raw)) return;
+    drawNote(slot, hit, passage);
+  } catch (e) {
+    showError("Could not keep the note");
+  }
+}
+
+async function forgetNote(path, offset, slot, hit, passage) {
+  showError("");
+  try {
+    const raw = await grove_forget_note(path, offset);
+    if (!takeNotes(raw)) return;
+    drawNote(slot, hit, passage);
+  } catch (e) {
+    showError("Could not remove the note");
+  }
 }
 
 function walkPassages(art, hit, passages, query) {
@@ -523,10 +750,182 @@ async function openPath(path, at, page, needle) {
   }
 }
 
+function alertCount(query) {
+  for (let i = 0; i < alerts.length; i++) {
+    if (alerts[i].query === query) return alerts[i].count || 0;
+  }
+  return -1;
+}
+
+function drawSaved() {
+  savedRow.replaceChildren();
+  const current = combinedQuery();
+  const watching = current && alertCount(current) >= 0;
+  if (current && remembered.indexOf(current) < 0) {
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.className = "save";
+    keep.textContent = "Save";
+    keep.setAttribute("aria-label", "Save this search");
+    keep.addEventListener("click", function () { remember(current); });
+    savedRow.append(keep);
+  }
+  if (current && !watching) {
+    const watch = document.createElement("button");
+    watch.type = "button";
+    watch.className = "watch";
+    watch.textContent = "Watch";
+    watch.setAttribute("aria-label", "Watch this search");
+    watch.addEventListener("click", function () { watchQuery(current); });
+    savedRow.append(watch);
+  }
+  if (watching) {
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "unwatch";
+    stop.textContent = "Unwatch";
+    stop.setAttribute("aria-label", "Stop watching this search");
+    stop.addEventListener("click", function () { unwatchQuery(current); });
+    savedRow.append(stop);
+  }
+  remembered.forEach(function (query) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "q";
+    label.textContent = query;
+    label.title = query;
+    label.addEventListener("click", function () {
+      q.value = query;
+      also.value = "";
+      q.focus();
+      runSearch();
+    });
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.textContent = "×";
+    rm.setAttribute("aria-label", "Forget this search");
+    rm.addEventListener("click", function () { forget(query); });
+    const n = alertCount(query);
+    if (n > 0) {
+      const neu = document.createElement("button");
+      neu.type = "button";
+      neu.className = "new";
+      neu.textContent = n + " new";
+      neu.setAttribute("aria-label", "Mark new files seen");
+      neu.addEventListener("click", function () { seenNew(query); });
+      chip.append(label, neu, rm);
+    } else {
+      chip.append(label, rm);
+    }
+    savedRow.append(chip);
+  });
+}
+
+function applySaved(raw) {
+  const data = JSON.parse(raw);
+  if (data && data.error) {
+    showError(data.error);
+    return;
+  }
+  remembered = (data && data.saved) || [];
+  drawSaved();
+}
+
+async function loadSaved() {
+  const id = ++savedSeq;
+  try {
+    const raw = await grove_saved();
+    if (id !== savedSeq) return;
+    applySaved(raw);
+  } catch (e) {}
+}
+
+async function remember(query) {
+  const id = ++savedSeq;
+  showError("");
+  try {
+    const raw = await grove_save(query);
+    if (id !== savedSeq) return;
+    applySaved(raw);
+  } catch (e) {
+    if (id === savedSeq) showError("Could not save");
+  }
+}
+
+async function forget(query) {
+  const id = ++savedSeq;
+  showError("");
+  try {
+    const raw = await grove_forget(query);
+    if (id !== savedSeq) return;
+    applySaved(raw);
+    await loadAlerts();
+  } catch (e) {
+    if (id === savedSeq) showError("Could not forget");
+  }
+}
+
+function applyAlerts(raw) {
+  const data = JSON.parse(raw);
+  if (data && data.error) {
+    showError(data.error);
+    return false;
+  }
+  alerts = (data && data.alerts) || [];
+  drawSaved();
+  return true;
+}
+
+async function loadAlerts() {
+  const id = ++alertSeq;
+  try {
+    const raw = await grove_alerts();
+    if (id !== alertSeq) return;
+    applyAlerts(raw);
+  } catch (e) {}
+}
+
+async function watchQuery(query) {
+  const id = ++alertSeq;
+  showError("");
+  try {
+    const raw = await grove_watch(query);
+    if (id !== alertSeq) return false;
+    const ok = applyAlerts(raw);
+    await loadSaved();
+    return ok;
+  } catch (e) {
+    if (id === alertSeq) showError("Could not watch");
+    return false;
+  }
+}
+
+async function unwatchQuery(query) {
+  const id = ++alertSeq;
+  showError("");
+  try {
+    const raw = await grove_unwatch(query);
+    if (id !== alertSeq) return;
+    applyAlerts(raw);
+  } catch (e) {
+    if (id === alertSeq) showError("Could not unwatch");
+  }
+}
+
+async function seenNew(query) {
+  q.value = query;
+  also.value = "";
+  q.focus();
+  if (await watchQuery(query)) runSearch();
+}
+
 async function runSearch() {
   const id = ++seq;
-  const query = q.value;
-  drawChips(query);
+  const query = combinedQuery();
+  drawChips();
+  drawSaved();
   showError("");
   if (!query.trim()) {
     results.replaceChildren();
@@ -559,7 +958,7 @@ async function runSearch() {
     return;
   }
   const hits = Array.isArray(data) ? data : (data.hits || []);
-  drawFacets(data && data.facets, query);
+  drawFacets(data && data.facets);
   const places = render(hits, query);
   count.textContent = hits.length ? countLine(hits.length, places) : "No places";
 }
@@ -568,9 +967,12 @@ document.getElementById("find").addEventListener("submit", function (e) {
   e.preventDefault();
   runSearch();
 });
-q.addEventListener("input", function () {
-  drawChips(q.value);
-});
+function onQueryInput() {
+  drawChips();
+  drawSaved();
+}
+q.addEventListener("input", onQueryInput);
+also.addEventListener("input", onQueryInput);
 
 async function loadInfo() {
   try {
@@ -594,7 +996,12 @@ function whenReady(fn) {
   if (typeof grove_info === "function") fn();
   else setTimeout(function () { whenReady(fn); }, 40);
 }
-whenReady(loadInfo);
+whenReady(function () {
+  loadInfo();
+  loadSaved();
+  loadNotes();
+  loadAlerts();
+});
 </script>
 </body>
 </html>

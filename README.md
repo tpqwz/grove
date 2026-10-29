@@ -1,6 +1,6 @@
 # grove
 
-grove is a local full-text search tool: one C binary and a directory you can copy. It indexes a folder, updates it when files change, and prints ranked hits with snippets.
+grove 0.1.0-alpha is a local full-text search tool: one C binary and a directory you can copy. This is an early alpha. It indexes a folder, updates it when files change, and prints ranked hits with snippets.
 
 The retrieval is in the style of Groonga's bigram tokenizer: words for alphabetic text, overlapping bigrams for CJK, with positions, phrases, prefixes, and BM25. grove is not a Groonga database. It does not read Groonga files, and it does not link libgroonga or Lucene.
 
@@ -44,6 +44,12 @@ grove search --at /old/notes=/new/notes portable
 
 `grove compact` rebuilds the full-text index and vacuums the database. `grove status` prints roots, document count, and the size of the stored text.
 
+`grove save` remembers a query in that index. `grove saved` lists them, newest first. `grove forget` drops one. The same list is what the window shows. An older index gains the list on the first save. It does not need to be indexed again.
+
+`grove note` keeps one line of text on a place, the path and the byte offset of a passage. `grove notes` lists them. `grove forget-note` drops one. The same notes are what the window shows under a passage.
+
+`grove watch` remembers a query and the files that match it then. `grove alerts` lists files that are new, or whose size or time changed, since that watch. Watching the same query again marks those files seen. `grove unwatch` stops the watch and leaves the saved query. `grove forget` drops both. An older index gains this on the first watch.
+
 ## Window
 
 ```sh
@@ -51,7 +57,7 @@ make ui
 ./grove-ui
 ```
 
-`grove-ui` is a second program. It opens the installed browser on this same index and the same query language. Two passages are listed under each file. Show more continues through the rest of that file. A click on the file name opens it with the system. A click on a passage opens that place when the reader can take it: a line in the text editor, a page in the PDF reader, or that line via Okular’s find for an EPUB. Another reader still opens the file. `ext:` and `path:` in the query show up as chips; removing a chip searches again. The file types and folders in the whole match sit beside those chips, each with a file count. Choosing one adds that chip. `title:` stays in the query.
+`grove-ui` is a second program. It opens the installed browser on this same index and the same query language. A second line ANDs another requirement onto the first. Two passages are listed under each file. Show more continues through the rest of that file. A click on the file name opens it with the system. A click on a passage opens that place when the reader can take it: a line in the text editor, a page in the PDF reader, or that line via Okular’s find for an EPUB. Another reader still opens the file. `ext:` and `path:` in the query show up as chips; removing a chip searches again. The file types, folders, and months in the whole match sit beside those chips, each with a file count. Choosing one adds that chip. `title:` stays in the query. Save keeps the query that is in the box. Remembered queries sit under the help line. Choosing one searches again, and × forgets it. Note, under a passage, keeps a line of text on that place. × removes it. The passage itself still opens the file. Watch, under the help line, keeps that query and the files it matches. A count on a remembered query is how many of those files are new or changed. Choosing the count marks them seen. Unwatch leaves the remembered query.
 
 `grove-ui` uses the same compiled-in SQLite and also links WebUI, which needs a browser at runtime. `--index DIR` selects the index, as it does for `grove`.
 
@@ -66,7 +72,9 @@ make ui
 
 ## Query
 
-Words in a query are combined with AND. `OR` and `NOT` are operators only in uppercase, so `or` is an ordinary word. `-term` excludes a term. Parentheses group. Quotes are a phrase: `"full text"` does not match `full-blown text`. A trailing `*` is a prefix. `ext:`, `path:`, and `title:` filter by extension, the path relative to the indexed root, and the extracted title. Filters accept quotes (`ext:".md"`, `title:"Gamma Note"`).
+An apostrophe inside a word is not a break. `Don't` is the token `dont`, and the passage marks the whole word, including the apostrophe. Precomposed letters in the Greek Extended block are letters, and capitals there match the small letter. A shelf indexed before those letters were words needs to be indexed again before they match.
+
+Words in a query are combined with AND. `OR` and `NOT` are operators only in uppercase, so `or` is an ordinary word. `-term` excludes a term. Parentheses group. Quotes are a phrase: `"full text"` does not match `full-blown text`. A trailing `*` is a prefix. `ext:`, `path:`, and `title:` filter by extension, the path relative to the indexed root, and the extracted title. `mtime:2026-10` keeps files last touched in that month. The window lists those months with the type chips. The current month is labeled This month. Filters accept quotes (`ext:".md"`, `title:"Gamma Note"`).
 
 ```sh
 grove search 'text -blown'

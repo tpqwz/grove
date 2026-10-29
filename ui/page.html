@@ -725,16 +725,53 @@ function placeNeedle(text) {
   const raw = String(text || "");
   let focus = raw.indexOf("<<");
   if (focus < 0) focus = 0;
-  const brk = raw.lastIndexOf("\n", focus);
-  const start = brk < 0 ? 0 : brk + 1;
-  let end = raw.indexOf("\n", focus);
-  if (end < 0) end = raw.length;
-  let line = raw.slice(start, end).replace(/<<|>>/g, "").replace(/\s+/g, " ").trim();
-  if (line.length > 160) {
-    const before = raw.slice(start, focus).replace(/<<|>>/g, "").length;
-    line = line.slice(Math.max(0, before - 40), Math.max(0, before - 40) + 160).trim();
+  let body = raw;
+  let cut = 0;
+  if (body.startsWith("... ")) {
+    body = body.slice(4);
+    cut = 4;
   }
-  return line.length >= 12 ? line : "";
+  if (body.endsWith(" ...")) body = body.slice(0, -4);
+  focus = Math.max(0, Math.min(body.length, focus - cut));
+  let flat = "";
+  let at = 0;
+  let sp = true;
+  for (let i = 0; i < body.length; i++) {
+    if (i === focus) at = flat.length;
+    const ch = body[i];
+    if (ch === "<" && body[i + 1] === "<") { i++; continue; }
+    if (ch === ">" && body[i + 1] === ">") { i++; continue; }
+    if (/\s/.test(ch)) {
+      if (sp) continue;
+      flat += " ";
+      sp = true;
+    } else {
+      flat += ch;
+      sp = false;
+    }
+  }
+  if (focus >= body.length) at = flat.length;
+  flat = flat.trimEnd();
+  const lead = flat.length - flat.trimStart().length;
+  flat = flat.trimStart();
+  at = Math.max(0, Math.min(flat.length, at - lead));
+  const MIN = 80;
+  const MAX = 480;
+  if (flat.length < MIN) return "";
+  if (flat.length <= MAX) return flat;
+  let a = Math.max(0, at - 160);
+  let b = Math.min(flat.length, a + MAX);
+  if (b - a < MAX) a = Math.max(0, b - MAX);
+  if (a > 0) {
+    const spc = flat.indexOf(" ", a);
+    if (spc !== -1 && spc < a + 40 && spc < at) a = spc + 1;
+  }
+  if (b < flat.length) {
+    const spc = flat.lastIndexOf(" ", b);
+    if (spc > a + MIN) b = spc;
+  }
+  const slice = flat.slice(a, b).trim();
+  return slice.length >= MIN ? slice : "";
 }
 
 async function openPath(path, at, page, needle) {

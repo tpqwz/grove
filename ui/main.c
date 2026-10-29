@@ -651,26 +651,37 @@ static int query_desktop(const char *mime, char *desk, size_t n) {
     return capture_out(argv, desk, n);
 }
 
-/* One line, capped, with the highlight marks removed. Too short a string
- * would land on the first copy in the book, so it is refused. */
+/* The passage, as one line the reader can search. Grove's own "... " and
+ * " ..." are not in the file. Under 80 characters the same words often
+ * occur earlier, so the search is refused and the file just opens. */
+enum { NEEDLE_MIN = 80, NEEDLE_MAX = 480 };
+
 static char *clean_needle(const char *in) {
-    if (!in || !in[0] || in[0] == '-') {
+    if (!in || !in[0]) {
         return NULL;
     }
     size_t n = strlen(in);
-    char *s = malloc(n + 1);
+    size_t b = 0;
+    size_t e = n;
+    if (e >= b + 4 && memcmp(in + b, "... ", 4) == 0) {
+        b += 4;
+    }
+    if (e >= b + 4 && memcmp(in + e - 4, " ...", 4) == 0) {
+        e -= 4;
+    }
+    char *s = malloc(e - b + 1);
     if (!s) {
         return NULL;
     }
     size_t w = 0;
     int sp = 1;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = b; i < e; i++) {
         unsigned char c = (unsigned char)in[i];
-        if (c == '<' && i + 1 < n && in[i + 1] == '<') {
+        if (c == '<' && i + 1 < e && in[i + 1] == '<') {
             i++;
             continue;
         }
-        if (c == '>' && i + 1 < n && in[i + 1] == '>') {
+        if (c == '>' && i + 1 < e && in[i + 1] == '>') {
             i++;
             continue;
         }
@@ -691,11 +702,17 @@ static char *clean_needle(const char *in) {
         w--;
     }
     s[w] = 0;
-    if (w > 180) {
-        w = utf8_prefix_bytes(s, w, 180);
+    if (w > NEEDLE_MAX) {
+        w = utf8_prefix_bytes(s, w, NEEDLE_MAX);
+        while (w > NEEDLE_MIN && s[w - 1] != ' ') {
+            w--;
+        }
+        while (w && s[w - 1] == ' ') {
+            w--;
+        }
         s[w] = 0;
     }
-    if (w < 12) {
+    if (!w || s[0] == '-' || w < NEEDLE_MIN) {
         free(s);
         return NULL;
     }

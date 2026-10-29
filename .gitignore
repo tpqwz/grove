@@ -4,6 +4,7 @@ grove-ui
 *.o
 *.tmp
 ui/page.h
+ui/live/
 ui/third_party/
 samples/index/
 spike/

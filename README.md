@@ -61,7 +61,7 @@ make ui
 
 `grove-ui` uses the same compiled-in SQLite and also links WebUI, which needs a browser at runtime. `--index DIR` selects the index, as it does for `grove`.
 
-Saving `ui/page.html` reloads the open window. The process and the index stay up, and the query in the box is kept. That is the same idea as CToy: the host stays, and the page is replaced when the file is saved. A copy of the program that cannot see `ui/page.html` uses the page packed at build time and does not watch for saves. `$GROVE_PAGE` names a different file. Changing the C sources still needs `make ui` and a new process.
+Saving `ui/page.html` reloads the open window. Saving `ui/main.c` rebuilds that program and swaps it in. The process and the index stay up, and the query in the box is kept. A compile error keeps the previous program and prints the compiler output. That is the same split as CToy: the host stays, and the program is replaced when a file is saved. A copy that cannot see those files uses the page packed at build time. `$GROVE_PAGE` names a different page file. Changes under `src/` or in `ui/host.c` still need `make ui` and a new process.
 
 ## Samples
 

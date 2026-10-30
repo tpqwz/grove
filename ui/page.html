@@ -33,17 +33,20 @@
     text-align: left;
   }
   .wrap {
-    width: min(40rem, calc(100% - 2rem));
+    width: min(40rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
     margin: 0 auto;
-    padding: 2.25rem 0 4rem;
+    padding: clamp(1.25rem, 4vh, 2.25rem) 0 4rem;
+  }
+  .wrap:not(.split):has(#library-view:not([hidden])) {
+    width: min(64rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
   }
   .wrap.split {
-    width: min(76rem, calc(100% - 1.5rem));
+    width: min(76rem, calc(100% - clamp(0.75rem, 2vw, 1.5rem)));
     height: 100vh;
     height: 100dvh;
     display: grid;
-    grid-template-columns: minmax(18rem, 24rem) minmax(0, 1fr);
-    column-gap: 1.75rem;
+    grid-template-columns: minmax(min(100%, 16rem), 24rem) minmax(0, 1fr);
+    column-gap: clamp(0.8rem, 2vw, 1.75rem);
     padding: 1.1rem 0 0;
     overflow: hidden;
   }
@@ -278,7 +281,7 @@
   .reader-title {
     margin: 0.85rem 0 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
-    font-size: 1.55rem;
+    font-size: clamp(1.28rem, 1.05rem + 1.4vw, 1.55rem);
     font-weight: normal;
     line-height: 1.25;
   }
@@ -326,17 +329,17 @@
   .modes button { color: var(--muted); font-size: 0.95rem; }
   .modes button.on { color: var(--ink); box-shadow: inset 0 -2px 0 var(--focus); }
   #search-view[hidden], #library-view[hidden] { display: none; }
-  .lib-add {
+  #library-view { container-type: inline-size; }
+  .lib-tools {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.45rem 0.75rem;
     align-items: center;
-    margin-top: 0.7rem;
+    gap: 0.35rem 1.1rem;
+    margin-top: 0.85rem;
   }
-  .lib-add input { flex: 1 1 12rem; font-size: 1rem; padding: 0.55rem 0.75rem; }
-  .lib-add button, .lib-actions button { color: var(--focus); font-size: 0.9rem; }
-  .lib-add button:hover, .lib-actions button:hover { text-decoration: underline; }
-  #lib-filter { margin-top: 0.7rem; font-size: 1rem; padding: 0.55rem 0.75rem; }
+  .lib-tools button { flex: 0 0 auto; color: var(--focus); font-size: 0.95rem; padding: 0.35rem 0; }
+  .lib-tools button:hover, .lib-actions button:hover { text-decoration: underline; }
+  #lib-filter { flex: 1 1 14rem; margin: 0; font-size: 1rem; padding: 0.55rem 0.75rem; }
   .lib-status { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
   .lib-root, .lib-meta, .lib-path {
     margin: 0.12rem 0 0;
@@ -357,19 +360,104 @@
   }
   .lib-title:hover { background: #efe8dc; }
   .lib-actions { display: flex; flex-wrap: wrap; gap: 0.35rem 0.85rem; align-items: baseline; margin-top: 0.15rem; }
+  .lib-actions button { color: var(--focus); font-size: 0.9rem; }
   .lib-ask { flex: 1 0 100%; margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
-  #lib-edit { margin-top: 0.9rem; }
-  #lib-edit label {
-    display: block;
-    margin: 0.65rem 0 0.2rem;
+  @container (min-width: 36rem) {
+    .lib-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      column-gap: 1.25rem;
+      align-items: start;
+    }
+    .lib-actions {
+      grid-column: 2;
+      grid-row: 1 / span 3;
+      margin-top: 0.15rem;
+      justify-content: flex-end;
+    }
+    .lib-actions:has(.lib-ask) {
+      grid-column: 1 / -1;
+      grid-row: auto;
+      justify-content: flex-start;
+    }
+  }
+  .modal[hidden] { display: none; }
+  .modal {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: clamp(0.5rem, 2vw, 1.25rem);
+    background: rgba(29, 26, 22, 0.38);
+    overscroll-behavior: contain;
+  }
+  .modal-card {
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    width: min(44rem, 100%);
+    max-height: 100%;
+    min-height: 0;
+    background: var(--paper);
+    color: var(--ink);
+    border-radius: 14px;
+    padding: clamp(0.9rem, 2.4vw, 1.35rem);
+    box-shadow: 0 18px 50px rgba(29, 26, 22, 0.18);
+  }
+  .modal-card:focus { outline: none; }
+  .modal-title {
+    margin: 0;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: clamp(1.2rem, 1rem + 1.2vw, 1.55rem);
+    font-weight: normal;
+    line-height: 1.25;
+  }
+  .modal-card .lib-path {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    overflow-wrap: anywhere;
+    margin-top: 0.35rem;
+  }
+  .modal-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem 1rem;
+    margin-top: 0.95rem;
+    overflow: auto;
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+  @container (min-width: 34rem) {
+    .modal-fields { grid-template-columns: 1fr 1fr; }
+    .modal-fields label.span { grid-column: 1 / -1; }
+  }
+  .modal-fields label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+    margin: 0;
     color: var(--muted);
     font-size: 0.78rem;
   }
-  #lib-edit input, #lib-edit textarea {
+  .modal-fields input, .modal-fields textarea {
     font-size: 1rem;
-    padding: 0.45rem 0.7rem;
+    padding: 0.5rem 0.7rem;
   }
-  #lib-edit textarea { min-height: 4.5rem; resize: vertical; }
+  .modal-fields textarea { min-height: 4.5rem; resize: vertical; }
+  .modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+  }
+  .modal-actions button { color: var(--focus); font-size: 0.95rem; }
+  .modal-actions button:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -396,21 +484,16 @@
     <main id="results"></main>
     </div>
     <div id="library-view" hidden>
-      <p class="help">Title, creator, and the other Dublin Core elements. They describe the volume. The text stays in the file.</p>
-      <form id="lib-add-form" class="lib-add">
-        <input id="lib-path" type="text" placeholder="Folder or file" aria-label="Folder or file" autocomplete="off" spellcheck="false">
-        <button type="submit">Add</button>
-        <button type="button" id="lib-folder">Folder</button>
-        <button type="button" id="lib-file">File</button>
-      </form>
-      <input id="lib-filter" type="text" placeholder="Title, creator, subject, or path" aria-label="Filter the library" autocomplete="off" spellcheck="false">
+      <p class="help">Add a folder or a file. Edit describes the volume. The text stays in the file.</p>
+      <div class="lib-tools">
+        <button type="button" id="lib-folder">Add a folder</button>
+        <button type="button" id="lib-file">Add a file</button>
+        <input id="lib-filter" type="text" placeholder="Title, creator, subject, or path" aria-label="Filter the library" autocomplete="off" spellcheck="false">
+      </div>
       <div id="lib-roots"></div>
       <p class="lib-status" id="lib-status"></p>
       <p class="count" id="lib-count"></p>
       <p class="err" id="lib-err" hidden></p>
-      <form id="lib-edit" hidden>
-        <p class="lib-path" id="lib-edit-path"></p>
-      </form>
       <div id="lib-rows"></div>
     </div>
     </div>
@@ -419,6 +502,17 @@
       <div id="panes"></div>
     </div>
   </div>
+  <form id="lib-edit" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="lib-edit-title" tabindex="-1">
+      <h2 id="lib-edit-title" class="modal-title"></h2>
+      <p class="lib-path" id="lib-edit-path"></p>
+      <div class="modal-fields" id="lib-edit-fields"></div>
+      <div class="modal-actions">
+        <button type="submit">Save</button>
+        <button type="button" id="lib-edit-cancel">Cancel</button>
+      </div>
+    </div>
+  </form>
 <script>
 const q = document.getElementById("q");
 const also = document.getElementById("also");
@@ -437,16 +531,16 @@ const modeSearch = document.getElementById("mode-search");
 const modeLibrary = document.getElementById("mode-library");
 const searchView = document.getElementById("search-view");
 const libraryView = document.getElementById("library-view");
-const libPath = document.getElementById("lib-path");
 const libFilter = document.getElementById("lib-filter");
 const libRoots = document.getElementById("lib-roots");
 const libStatus = document.getElementById("lib-status");
 const libCount = document.getElementById("lib-count");
 const libErr = document.getElementById("lib-err");
 const libEdit = document.getElementById("lib-edit");
+const libEditTitle = document.getElementById("lib-edit-title");
 const libEditPath = document.getElementById("lib-edit-path");
+const libEditFields = document.getElementById("lib-edit-fields");
 const libRows = document.getElementById("lib-rows");
-const libAddForm = document.getElementById("lib-add-form");
 let seq = 0;
 let savedSeq = 0;
 let alertSeq = 0;
@@ -1593,6 +1687,8 @@ const LIB_FIELDS = [
 ];
 let groveView = "search";
 let editing = "";
+let editingLabel = "";
+let editReturn = null;
 let shelfData = null;
 let shelfSeq = 0;
 let listSeq = 0;
@@ -1609,48 +1705,56 @@ function fieldValue(key) {
   return el ? el.value : "";
 }
 
+function fileTail(path) {
+  const value = path || "";
+  const cut = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+  return cut >= 0 ? value.slice(cut + 1) : value;
+}
+
+function editorHeading() {
+  const typed = fieldValue("title").trim();
+  libEditTitle.textContent = typed || editingLabel || "Volume";
+}
+
 function buildEditor() {
   LIB_FIELDS.forEach(function (row) {
     const label = document.createElement("label");
     label.htmlFor = "lib-f-" + row[0];
     label.textContent = row[1];
+    if (row[2]) label.className = "span";
     const input = document.createElement(row[2] ? "textarea" : "input");
     input.id = "lib-f-" + row[0];
     if (!row[2]) input.type = "text";
     input.autocomplete = "off";
     input.spellcheck = false;
-    libEdit.append(label, input);
+    if (row[0] === "title") input.addEventListener("input", editorHeading);
+    label.append(input);
+    libEditFields.append(label);
   });
-  const actions = document.createElement("div");
-  actions.className = "lib-actions";
-  const save = document.createElement("button");
-  save.type = "submit";
-  save.textContent = "Save";
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.textContent = "Cancel";
-  cancel.addEventListener("click", closeEditor);
-  actions.append(save, cancel);
-  libEdit.append(actions);
 }
 
 function closeEditor() {
   editing = "";
+  editingLabel = "";
   libEdit.hidden = true;
+  if (editReturn && editReturn.isConnected) editReturn.focus();
+  editReturn = null;
 }
 
-function openEditor(vol) {
+function openEditor(vol, opener) {
   editing = vol.path;
+  editingLabel = vol.title || fileTail(vol.path);
+  editReturn = opener || null;
   libEdit.hidden = false;
-  libEditPath.textContent = vol.path;
-  libEditPath.title = vol.path;
+  libEditPath.textContent = vol.path || "";
+  libEditPath.title = vol.path || "";
   LIB_FIELDS.forEach(function (row) {
     const el = document.getElementById("lib-f-" + row[0]);
     if (el) el.value = vol[row[0]] || "";
   });
+  editorHeading();
   const title = document.getElementById("lib-f-title");
   if (title) title.focus();
-  libEdit.scrollIntoView({ block: "nearest" });
 }
 
 function metaLine(vol) {
@@ -1726,7 +1830,7 @@ function drawLibrary(data) {
     const edit = document.createElement("button");
     edit.type = "button";
     edit.textContent = "Edit";
-    edit.addEventListener("click", function () { openEditor(vol); });
+    edit.addEventListener("click", function () { openEditor(vol, edit); });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "Remove";
@@ -1824,7 +1928,9 @@ async function ensureShelf() {
 }
 
 function setView(name) {
-  groveView = name === "library" ? "library" : "search";
+  const next = name === "library" ? "library" : "search";
+  if (next !== "library") closeEditor();
+  groveView = next;
   searchView.hidden = groveView !== "search";
   libraryView.hidden = groveView !== "library";
   modeSearch.classList.toggle("on", groveView === "search");
@@ -1838,10 +1944,7 @@ function setView(name) {
 
 async function addPath(path) {
   showLibError("");
-  if (!path) {
-    showLibError("Type a folder or a file");
-    return;
-  }
+  if (!path) return;
   try {
     const raw = await grove_add(path);
     const data = JSON.parse(raw);
@@ -1866,7 +1969,6 @@ async function pickPath(kind) {
       return;
     }
     if (!data.path) return;
-    libPath.value = data.path;
     addPath(data.path);
   } catch (e) {
     showLibError("Could not open the chooser");
@@ -1933,10 +2035,6 @@ function restoreView() {
 
 modeSearch.addEventListener("click", function () { setView("search"); });
 modeLibrary.addEventListener("click", function () { setView("library"); });
-libAddForm.addEventListener("submit", function (ev) {
-  ev.preventDefault();
-  addPath((libPath.value || "").trim());
-});
 document.getElementById("lib-folder").addEventListener("click", function () { pickPath("dir"); });
 document.getElementById("lib-file").addEventListener("click", function () { pickPath("file"); });
 libFilter.addEventListener("input", function () {
@@ -1944,6 +2042,30 @@ libFilter.addEventListener("input", function () {
   filterTimer = setTimeout(loadLibrary, 200);
 });
 libEdit.addEventListener("submit", saveRecord);
+libEdit.addEventListener("click", function (ev) {
+  if (ev.target === libEdit) closeEditor();
+});
+document.getElementById("lib-edit-cancel").addEventListener("click", closeEditor);
+document.addEventListener("keydown", function (ev) {
+  if (libEdit.hidden) return;
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    closeEditor();
+    return;
+  }
+  if (ev.key !== "Tab") return;
+  const nodes = libEdit.querySelectorAll("input, textarea, button");
+  if (!nodes.length) return;
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  if (ev.shiftKey && document.activeElement === first) {
+    ev.preventDefault();
+    last.focus();
+  } else if (!ev.shiftKey && document.activeElement === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+});
 buildEditor();
 
 function whenReady(fn) {

@@ -5,7 +5,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GROVE=$ROOT/grove
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+HTTP_PID=
+cleanup() {
+  if [ -n "${HTTP_PID}" ]; then
+    kill "$HTTP_PID" 2>/dev/null || true
+    wait "$HTTP_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 IDX=$TMP/index
 DOCS=$TMP/docs
 DOCS2=$TMP/docs2
@@ -324,5 +332,130 @@ test -z "$("$GROVE" --index "$IDX" saved)"
 test -z "$("$GROVE" --index "$IDX" alerts)"
 
 "$GROVE" help | grep -q 'ui \[--port N\]'
+"$GROVE" help | grep -q 'fetch URL'
+
+if ! command -v curl >/dev/null; then
+  echo "curl is required to fetch a page" >&2
+  exit 1
+fi
+
+PAGE=$TMP/site
+mkdir -p "$PAGE"
+printf '%s\n' '<html><head><title>Grove Fetch Title</title></head><body><p>unique fetch token xylophonequartz</p></body></html>' >"$PAGE/index.html"
+python3 - "$PAGE" "$TMP/port" <<'PY' &
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+root, portfile = sys.argv[1], sys.argv[2]
+page = open(root + "/index.html", "rb").read()
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/img":
+            body, kind = b"\x89PNG", "image/png"
+        elif path == "/empty":
+            body, kind = b"<html></html>", "text/html"
+        elif path == "/go":
+            self.send_response(302)
+            self.send_header("Location", "file:///etc/passwd")
+            self.end_headers()
+            return
+        else:
+            body, kind = page, "text/html; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        return
+
+httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(portfile, "w") as fh:
+    fh.write(str(httpd.server_address[1]))
+httpd.serve_forever()
+PY
+HTTP_PID=$!
+ready=
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if [ -s "$TMP/port" ]; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [ -z "$ready" ]; then
+  echo "page server did not start" >&2
+  exit 1
+fi
+PORT=$(cat "$TMP/port")
+URL="http://127.0.0.1:${PORT}/index.html"
+docs_of() {
+  "$GROVE" --index "$IDX" status | sed -n 's/^documents: //p'
+}
+before=$(docs_of)
+out=$("$GROVE" --index "$IDX" fetch "$URL")
+printf '%s\n' "$out" | grep -q '^indexed '
+after=$(docs_of)
+test "$after" -eq $((before + 1))
+json_has xylophonequartz '.html'
+"$GROVE" --index "$IDX" search --json -- xylophonequartz | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+hits = data["hits"]
+assert len(hits) == 1, hits
+assert hits[0]["title"] == "Grove Fetch Title", hits[0]
+'
+"$GROVE" --index "$IDX" status | grep -q 'web \[partial\]'
+python3 - "$IDX/grove.db" "$URL" <<'PY'
+import sqlite3, sys
+db, url = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+assert list(con.execute("select identifier from catalog")) == [(url,)], list(con.execute("select identifier from catalog"))
+assert list(con.execute("select url from web")) == [(url,)]
+con.execute("update catalog set identifier=?", ("Kept mark",))
+con.commit()
+PY
+"$GROVE" --index "$IDX" fetch "$URL" >/dev/null
+test "$(docs_of)" -eq "$after"
+python3 - "$IDX/grove.db" "$URL" <<'PY'
+import sqlite3, sys
+db, url = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+assert list(con.execute("select identifier from catalog")) == [("Kept mark",)]
+assert list(con.execute("select url from web")) == [(url,)]
+PY
+"$GROVE" --index "$IDX" fetch "${URL}#section" >/dev/null
+test "$(docs_of)" -eq "$after"
+if "$GROVE" --index "$IDX" fetch "http://127.0.0.1:${PORT}/empty" 2>"$TMP/fetch.err"; then
+  echo "empty page should fail" >&2
+  exit 1
+fi
+grep -q 'no text' "$TMP/fetch.err"
+if "$GROVE" --index "$IDX" fetch "http://127.0.0.1:${PORT}/img" 2>"$TMP/fetch.err"; then
+  echo "image should fail" >&2
+  exit 1
+fi
+grep -q 'not a web page' "$TMP/fetch.err"
+if "$GROVE" --index "$IDX" fetch "http://127.0.0.1:${PORT}/go" 2>"$TMP/fetch.err"; then
+  echo "file redirect should fail" >&2
+  exit 1
+fi
+if "$GROVE" --index "$IDX" fetch "file:///etc/passwd" 2>"$TMP/fetch.err"; then
+  echo "file url should fail" >&2
+  exit 1
+fi
+grep -q 'not a web page' "$TMP/fetch.err"
+if "$GROVE" --index "$IDX" fetch 2>"$TMP/fetch.err"; then
+  echo "fetch needs an address" >&2
+  exit 1
+fi
+grep -q 'address' "$TMP/fetch.err"
+test "$(docs_of)" -eq "$after"
+test -z "$("$GROVE" --quiet --index "$IDX" fetch "$URL")"
+"$GROVE" --index "$IDX" index >/dev/null
+json_has xylophonequartz '.html'
 
 echo "integration ok"

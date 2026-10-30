@@ -257,6 +257,12 @@ void library_free(Library *lib);
 /* rec->path is the volume. The other fields are copied. A title updates the
  * title search uses. The file on disk is left where it is. */
 int index_catalog_put(Index *ix, const Volume *rec, Err *e);
+/* Remembers the address of a fetched page. The identifier is set to that
+ * address when it is still empty and the address fits in the record.
+ * A saved identifier is left as it is. */
+int index_page_remember(Index *ix, const char *path, const char *url, Err *e);
+/* *url is NULL when this volume is not a fetched page. The caller frees it. */
+int index_page_url(Index *ix, const char *path, char **url, Err *e);
 /* Drops the volume from the index. The file on disk stays. */
 int index_library_drop(Index *ix, const char *path, Err *e);
 

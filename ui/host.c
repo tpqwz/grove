@@ -1,4 +1,5 @@
 #include "cli.h"
+#include "fetch.h"
 #include "index.h"
 #include "mod.h"
 #include "webui.h"
@@ -24,10 +25,11 @@ static void usage(FILE *out) {
         "\n"
         "With no command, opens a browser window on the grove index. The\n"
         "window shows Grove's icon. The query language matches grove\n"
-        "search. Library adds a folder or a file and keeps a record for\n"
-        "each volume. Narrow lists language, author, form, period, and\n"
-        "genre from that record.\n"
-        "A click on the file name opens it with the system.\n"
+        "search. Library adds a folder, a file, or a web page and keeps a\n"
+        "record for each volume. Narrow lists language, author, form,\n"
+        "period, and genre from that record.\n"
+        "A click on the file name opens it with the system. A fetched page\n"
+        "opens at its address.\n"
         "A click on a passage opens that place when the reader can take a\n"
         "line, a PDF page, or a found line. Otherwise it opens the file.\n"
         "Save remembers the current query on this index.\n"
@@ -39,6 +41,7 @@ static void usage(FILE *out) {
         "\n"
         "  grove-ui [--index DIR] status\n"
         "  grove-ui [--index DIR] index PATH...\n"
+        "  grove-ui [--index DIR] fetch URL...\n"
         "  grove-ui [--index DIR] search QUERY...\n"
         "\n"
         "grove-ui help prints the command manual.\n"
@@ -397,7 +400,18 @@ static char job_err[768];
 typedef struct JobArg {
     char *dir;
     char *path;
+    char *url;
 } JobArg;
+
+static void job_arg_free(JobArg *a) {
+    if (!a) {
+        return;
+    }
+    free(a->dir);
+    free(a->path);
+    free(a->url);
+    free(a);
+}
 
 static void *job_main(void *arg) {
     JobArg *a = arg;
@@ -408,7 +422,9 @@ static void *job_main(void *arg) {
     int rc = -1;
     Index *w = index_open(a->dir, 1, &e);
     if (w) {
-        if (a->path) {
+        if (a->url) {
+            rc = grove_fetch_into(w, a->dir, a->url, &st, &e);
+        } else if (a->path) {
             rc = index_add(w, a->path, &st, &e);
         } else {
             rc = index_shelf_build(w, &e);
@@ -421,14 +437,12 @@ static void *job_main(void *arg) {
     job_st = st;
     snprintf(job_err, sizeof job_err, "%s", rc == 0 ? "" : (e.msg[0] ? e.msg : "could not update the library"));
     pthread_mutex_unlock(&job_mu);
-    free(a->dir);
-    free(a->path);
-    free(a);
+    job_arg_free(a);
     return NULL;
 }
 
-static int job_start(const char *dir, const char *path) {
-    if (!dir || !dir[0] || (path && !path[0])) {
+static int job_start(const char *dir, const char *path, const char *url, int kind) {
+    if (!dir || !dir[0] || (path && !path[0]) || (url && !url[0]) || (path && url)) {
         return -1;
     }
     JobArg *a = calloc(1, sizeof *a);
@@ -437,22 +451,19 @@ static int job_start(const char *dir, const char *path) {
     }
     a->dir = xstrdup(dir);
     a->path = path ? xstrdup(path) : NULL;
-    if (!a->dir || (path && !a->path)) {
-        free(a->dir);
-        free(a->path);
-        free(a);
+    a->url = url ? xstrdup(url) : NULL;
+    if (!a->dir || (path && !a->path) || (url && !a->url)) {
+        job_arg_free(a);
         return -1;
     }
     pthread_mutex_lock(&job_mu);
     if (job_running) {
         pthread_mutex_unlock(&job_mu);
-        free(a->dir);
-        free(a->path);
-        free(a);
+        job_arg_free(a);
         return -1;
     }
     job_running = 1;
-    job_kind = path ? 2 : 1;
+    job_kind = kind;
     job_ok = 0;
     job_err[0] = 0;
     memset(&job_st, 0, sizeof job_st);
@@ -464,9 +475,7 @@ static int job_start(const char *dir, const char *path) {
         job_ok = 0;
         snprintf(job_err, sizeof job_err, "could not start");
         pthread_mutex_unlock(&job_mu);
-        free(a->dir);
-        free(a->path);
-        free(a);
+        job_arg_free(a);
         return -1;
     }
     pthread_detach(th);
@@ -474,11 +483,15 @@ static int job_start(const char *dir, const char *path) {
 }
 
 int grove_host_prepare(const char *index_dir) {
-    return job_start(index_dir, NULL);
+    return job_start(index_dir, NULL, NULL, 1);
 }
 
 int grove_host_import(const char *index_dir, const char *path) {
-    return job_start(index_dir, path);
+    return job_start(index_dir, path, NULL, 2);
+}
+
+int grove_host_fetch(const char *index_dir, const char *url) {
+    return job_start(index_dir, NULL, url, 3);
 }
 
 void grove_host_job(GroveJob *out) {

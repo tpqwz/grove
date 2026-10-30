@@ -7,7 +7,7 @@ LDFLAGS = -Wl,-z,relro,-z,now
 
 ROOT = ..
 CORE = $(ROOT)/src/util.c $(ROOT)/src/text.c $(ROOT)/src/zip.c $(ROOT)/src/pdf.c \
-	$(ROOT)/src/extract.c $(ROOT)/src/index.c $(ROOT)/src/fts_tok.c
+	$(ROOT)/src/extract.c $(ROOT)/src/fetch.c $(ROOT)/src/index.c $(ROOT)/src/fts_tok.c
 WEBUI = third_party/webui
 WEBUI_LIB = $(WEBUI)/dist/libwebui-2-static.a
 INCLUDES = -I$(ROOT)/src -I$(ROOT)/third_party/sqlite -I$(WEBUI)/include

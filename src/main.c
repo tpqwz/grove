@@ -1,4 +1,5 @@
 #include "cli.h"
+#include "fetch.h"
 #include "index.h"
 
 #include <errno.h>
@@ -21,6 +22,9 @@ static void usage(FILE *out) {
         "      Index each PATH. With no PATH, refresh every fully indexed root.\n"
         "      --force re-reads files even when size and mtime are unchanged.\n"
         "      --rebind OLD NEW retargets a root after the tree moves.\n"
+        "  fetch URL...\n"
+        "      Save each web page into this index and index its text.\n"
+        "      The same address again replaces that page. http and https.\n"
         "  search [--limit N] [--json] [--at SPEC] QUERY...\n"
         "      QUERY words are ANDed. OR and NOT are uppercase. -term excludes.\n"
         "      \"quoted phrases\", trailing *, and ext: path: title: mtime: filters.\n"
@@ -197,6 +201,38 @@ static int cmd_index(Index *ix, int quiet, int argc, char **argv) {
         }
     }
     if (did && !quiet) {
+        print_stats(&st);
+    }
+    return 0;
+}
+
+static int cmd_fetch(Index *ix, const char *dir, int quiet, int argc, char **argv) {
+    int i = 0;
+    for (; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        }
+        if (argv[i][0] == '-' && argv[i][1] == '-') {
+            fprintf(stderr, "grove: unknown option %s\n", argv[i]);
+            return 1;
+        }
+        break;
+    }
+    if (i >= argc) {
+        fprintf(stderr, "grove: fetch needs an address\n");
+        return 1;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    for (; i < argc; i++) {
+        Err e;
+        err_clear(&e);
+        if (grove_fetch_into(ix, dir, argv[i], &st, &e) != 0) {
+            return fail(&e);
+        }
+    }
+    if (!quiet) {
         print_stats(&st);
     }
     return 0;
@@ -513,7 +549,7 @@ static int cmd_note_drop(Index *ix, int argc, char **argv) {
 }
 
 int grove_is_command(const char *s) {
-    static const char *names[] = {"index", "search",  "purge",      "compact", "status", "saved", "save",
+    static const char *names[] = {"index", "fetch", "search",  "purge",      "compact", "status", "saved", "save",
                                   "forget", "notes",  "note",       "forget-note", "watch", "unwatch", "alerts",
                                   "help",   NULL};
     if (!s) {
@@ -663,6 +699,8 @@ int grove_cli(int argc, char **argv) {
     int rc = 0;
     if (strcmp(cmd, "index") == 0) {
         rc = cmd_index(ix, quiet, argc - i, argv + i);
+    } else if (strcmp(cmd, "fetch") == 0) {
+        rc = cmd_fetch(ix, dir, quiet, argc - i, argv + i);
     } else if (strcmp(cmd, "search") == 0) {
         rc = cmd_search(ix, argc - i, argv + i);
     } else if (strcmp(cmd, "purge") == 0) {

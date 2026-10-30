@@ -384,6 +384,29 @@ static void on_more(webui_event_t *e) {
     reply_owned(e, json);
 }
 
+static int http_address(const char *s) {
+    const char *rest = NULL;
+    if (!s || !s[0]) {
+        return 0;
+    }
+    if (starts_with(s, "https://")) {
+        rest = s + 8;
+    } else if (starts_with(s, "http://")) {
+        rest = s + 7;
+    } else {
+        return 0;
+    }
+    if (!rest[0] || strlen(s) > 2048) {
+        return 0;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7f || *p == '\\') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int spawn_open(const char *path) {
     pid_t pid = 0;
     char *argv[] = {"xdg-open", (char *)path, NULL};
@@ -403,6 +426,13 @@ static int spawn_open(const char *path) {
         return -1;
     }
     return 0;
+}
+
+static int open_saved(const char *path, const char *page_url) {
+    if (http_address(page_url)) {
+        return spawn_open(page_url);
+    }
+    return spawn_open(path);
 }
 
 /* The reader stays up. Detach so this process does not wait, and so the
@@ -877,10 +907,19 @@ static void on_open(webui_event_t *e) {
     size_t nargs = webui_get_count(e);
     const char *in = webui_get_string_at(e, 0);
     char *path = xstrdup(in ? in : "");
+    char *page_url = NULL;
     int allowed = 0;
     if (path) {
         pthread_mutex_lock(&mu);
         allowed = allow_has(path);
+        if (allowed && ix) {
+            Err ignore;
+            err_clear(&ignore);
+            if (index_page_url(ix, path, &page_url, &ignore) != 0) {
+                free(page_url);
+                page_url = NULL;
+            }
+        }
         pthread_mutex_unlock(&mu);
     }
     int placed = nargs >= 2;
@@ -917,13 +956,14 @@ static void on_open(webui_event_t *e) {
         struct stat st;
         if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
             json = json_error("that file is not there");
-        } else if ((placed ? open_place(path, has_at, at, page, needle) : spawn_open(path)) != 0) {
+        } else if ((placed ? open_place(path, has_at, at, page, needle) : open_saved(path, page_url)) != 0) {
             json = json_error("could not open the file");
         } else {
             json = xstrdup("{\"ok\":true}");
         }
     }
     free(needle);
+    free(page_url);
     free(path);
     reply_owned(e, json);
 }
@@ -1560,6 +1600,13 @@ static char *library_json(const char *filter, const char *language, const char *
         if (i && buf_putc(&b, ',') != 0) {
             goto fail;
         }
+        char *page_url = NULL;
+        if (index_page_url(ix, v->path, &page_url, &e) != 0) {
+            free(page_url);
+            library_free(&lib);
+            buf_free(&b);
+            return json_error(e.msg[0] ? e.msg : "could not read the library");
+        }
         if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, v->path) != 0 || jstr(&b, "title", v->title) != 0 ||
             jstr(&b, "ext", v->ext) != 0 ||
             buf_printf(&b, ",\"mtime\":%" PRId64 ",\"size\":%" PRId64, v->mtime, v->size) != 0 ||
@@ -1569,9 +1616,12 @@ static char *library_json(const char *filter, const char *language, const char *
             jstr(&b, "source", v->source) != 0 || jstr(&b, "description", v->description) != 0 ||
             jstr(&b, "publisher", v->publisher) != 0 || jstr(&b, "contributor", v->contributor) != 0 ||
             jstr(&b, "format", v->format) != 0 || jstr(&b, "identifier", v->identifier) != 0 ||
+            jstr(&b, "url", page_url) != 0 ||
             jstr(&b, "relation", v->relation) != 0 || jstr(&b, "rights", v->rights) != 0 || buf_putc(&b, '}') != 0) {
+            free(page_url);
             goto fail;
         }
+        free(page_url);
     }
     if (buf_puts(&b, "],\"narrow\":") != 0 || write_narrow(&b, &lib.narrow) != 0 || buf_putc(&b, '}') != 0) {
         goto fail;
@@ -1720,6 +1770,39 @@ static void on_add(webui_event_t *e) {
     reply(e, "{\"ok\":true}");
 }
 
+static int address_blank(const char *s) {
+    if (!s) {
+        return 1;
+    }
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    return *s == 0;
+}
+
+static void on_fetch(webui_event_t *e) {
+    const char *in = webui_get_string_at(e, 0);
+    if (address_blank(in)) {
+        reply(e, "{\"error\":\"type a page address\"}");
+        return;
+    }
+    if (strlen(in) > 4096) {
+        reply(e, "{\"error\":\"that address is too long\"}");
+        return;
+    }
+    if (strchr(in, '\n') || strchr(in, '\r')) {
+        reply(e, "{\"error\":\"that address is not a web page\"}");
+        return;
+    }
+    if (grove_host_fetch(index_dir, in) != 0) {
+        GroveJob job;
+        grove_host_job(&job);
+        reply(e, job.running ? "{\"error\":\"an import is already running\"}" : "{\"error\":\"could not start\"}");
+        return;
+    }
+    reply(e, "{\"ok\":true}");
+}
+
 static void on_job(webui_event_t *e) {
     reply_owned(e, job_json());
 }
@@ -1782,6 +1865,7 @@ GUARD(on_library)
 GUARD(on_catalog)
 GUARD(on_drop)
 GUARD(on_add)
+GUARD(on_fetch)
 GUARD(on_job)
 GUARD(on_pick)
 GUARD(on_shelf)
@@ -1837,6 +1921,7 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_catalog", on_catalog_guard);
     webui_bind(win, "grove_drop", on_drop_guard);
     webui_bind(win, "grove_add", on_add_guard);
+    webui_bind(win, "grove_fetch", on_fetch_guard);
     webui_bind(win, "grove_job", on_job_guard);
     webui_bind(win, "grove_pick", on_pick_guard);
     webui_bind(win, "grove_shelf", on_shelf_guard);

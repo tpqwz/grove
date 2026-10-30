@@ -1,4 +1,5 @@
 #include "extract.h"
+#include "fetch.h"
 #include "index.h"
 #include "pdf.h"
 #include "text.h"
@@ -2660,6 +2661,186 @@ done:
     rm_rf(root);
 }
 
+static void test_pages(void) {
+    Err e;
+    err_clear(&e);
+    char hex[65];
+    fetch_sha256_hex("", 0, hex);
+    CHECK(strcmp(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+    fetch_sha256_hex("abc", 3, hex);
+    CHECK(strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
+
+    char *url = NULL;
+    CHECK(fetch_normalize("  HTTPS://Example.COM:443/A#frag ", &url, &e) == 0);
+    CHECK(url && strcmp(url, "https://example.com/A") == 0);
+    free(url);
+    url = NULL;
+    CHECK(fetch_normalize("http://example.com:80/a", &url, &e) == 0);
+    CHECK(url && strcmp(url, "http://example.com/a") == 0);
+    free(url);
+    url = NULL;
+    CHECK(fetch_normalize("http://Example.com:8080/a?B=c", &url, &e) == 0);
+    CHECK(url && strcmp(url, "http://example.com:8080/a?B=c") == 0);
+    free(url);
+    url = NULL;
+    CHECK(fetch_normalize("http://[::1]/a", &url, &e) == 0);
+    CHECK(url && strcmp(url, "http://[::1]/a") == 0);
+    free(url);
+    url = NULL;
+    err_clear(&e);
+    CHECK(fetch_normalize("   ", &url, &e) != 0);
+    CHECK(strstr(e.msg, "type a page"));
+    CHECK(url == NULL);
+    err_clear(&e);
+    CHECK(fetch_normalize("file:///etc/passwd", &url, &e) != 0);
+    CHECK(fetch_normalize("http://a:b@example.com/", &url, &e) != 0);
+    CHECK(fetch_normalize("javascript:alert(1)", &url, &e) != 0);
+    CHECK(fetch_normalize("http://example.com/a\nb", &url, &e) != 0);
+    char big[2200];
+    memset(big, 'a', sizeof big - 1);
+    memcpy(big, "http://", 7);
+    big[sizeof big - 1] = 0;
+    err_clear(&e);
+    CHECK(fetch_normalize(big, &url, &e) != 0);
+    CHECK(strstr(e.msg, "too long"));
+
+    int fds[2];
+    CHECK(pipe(fds) == 0);
+    CHECK(write(fds[1], "0123456789", 10) == 10);
+    close(fds[1]);
+    unsigned char *buf = NULL;
+    size_t n = 0;
+    err_clear(&e);
+    CHECK(fetch_read_cap(fds[0], &buf, &n, 40, &e) == 0);
+    CHECK(n == 10 && buf && memcmp(buf, "0123456789", 10) == 0);
+    free(buf);
+    close(fds[0]);
+    CHECK(pipe(fds) == 0);
+    char over[41];
+    memset(over, 'a', sizeof over);
+    CHECK(write(fds[1], over, sizeof over) == (ssize_t)sizeof over);
+    close(fds[1]);
+    buf = NULL;
+    n = 0;
+    err_clear(&e);
+    CHECK(fetch_read_cap(fds[0], &buf, &n, 40, &e) != 0);
+    CHECK(buf == NULL);
+    CHECK(strstr(e.msg, "too large"));
+    close(fds[0]);
+
+    char tmpl[] = "/tmp/grove-page-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = NULL;
+    char *idx = NULL;
+    char *file = NULL;
+    char *path = NULL;
+    char *got = NULL;
+    Index *ix = NULL;
+    Library lib;
+    memset(&lib, 0, sizeof lib);
+    if (!root) {
+        fails++;
+        return;
+    }
+    docs = path_join(root, "docs");
+    idx = path_join(root, "idx");
+    file = docs ? path_join(docs, "a.html") : NULL;
+    if (!docs || !idx || !file || mkdir(docs, 0700) != 0) {
+        fails++;
+        goto done;
+    }
+    FILE *f = fopen(file, "w");
+    if (!f) {
+        fails++;
+        goto done;
+    }
+    fputs("<html><head><title>Page Title</title></head><body><p>page body token</p></body></html>\n", f);
+    fclose(f);
+    err_clear(&e);
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "page open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, file, &st, &e) != 0) {
+        fprintf(stderr, "page add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.n == 1 && lib.volumes && lib.volumes[0].path);
+    path = lib.volumes && lib.volumes[0].path ? xstrdup(lib.volumes[0].path) : NULL;
+    if (!path) {
+        fails++;
+        goto done;
+    }
+    CHECK(index_page_url(ix, path, &got, &e) == 0);
+    CHECK(got == NULL);
+    CHECK(index_page_remember(ix, path, "file:///etc/passwd", &e) != 0);
+    CHECK(index_page_remember(ix, path, "http://example.com/a", &e) == 0);
+    free(got);
+    got = NULL;
+    CHECK(index_page_url(ix, path, &got, &e) == 0);
+    CHECK(got && strcmp(got, "http://example.com/a") == 0);
+    library_free(&lib);
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.n == 1 && lib.volumes);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].title, "Page Title") == 0);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].identifier, "http://example.com/a") == 0);
+    Volume rec;
+    memset(&rec, 0, sizeof rec);
+    rec.path = lib.volumes ? lib.volumes[0].path : "";
+    rec.title = "Edited";
+    rec.creator = "";
+    rec.date = "";
+    rec.language = "";
+    rec.type = "";
+    rec.subject = "";
+    rec.coverage = "";
+    rec.source = "";
+    rec.description = "";
+    rec.publisher = "";
+    rec.contributor = "";
+    rec.format = "";
+    rec.identifier = "Kept mark";
+    rec.relation = "";
+    rec.rights = "";
+    CHECK(lib.volumes && index_catalog_put(ix, &rec, &e) == 0);
+    CHECK(index_page_remember(ix, path, "http://example.com/other", &e) == 0);
+    free(got);
+    got = NULL;
+    CHECK(index_page_url(ix, path, &got, &e) == 0);
+    CHECK(got && strcmp(got, "http://example.com/other") == 0);
+    library_free(&lib);
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].title, "Edited") == 0);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].identifier, "Kept mark") == 0);
+    const char *drop_path = lib.volumes && lib.volumes[0].path ? lib.volumes[0].path : "";
+    CHECK(index_library_drop(ix, drop_path, &e) == 0);
+    struct stat sb;
+    CHECK(stat(file, &sb) == 0);
+    free(got);
+    got = NULL;
+    CHECK(index_page_url(ix, drop_path, &got, &e) == 0);
+    CHECK(got == NULL);
+    free(got);
+    got = NULL;
+done:
+    free(got);
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    free(path);
+    free(file);
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
 int main(void) {
     test_bounds();
     test_cert();
@@ -2674,6 +2855,7 @@ int main(void) {
     test_narrow();
     test_alerts();
     test_reader();
+    test_pages();
     char tmpl[] = "/tmp/grove-test-XXXXXX";
     char *root = mkdtemp(tmpl);
     if (!root) {

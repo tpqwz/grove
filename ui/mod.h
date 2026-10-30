@@ -23,7 +23,7 @@ void grove_ui_detach(void);
 
 /* Background work stays in the host, so a rebuilt module can unload while
  * an import is still reading files. kind 0 is idle, 1 prepares the shelf
- * list, 2 adds a folder or a file. */
+ * list, 2 adds a folder or a file, 3 fetches one web page. */
 typedef struct GroveJob {
     int running;
     int kind;
@@ -37,6 +37,7 @@ typedef struct GroveJob {
 
 int grove_host_prepare(const char *index_dir);
 int grove_host_import(const char *index_dir, const char *path);
+int grove_host_fetch(const char *index_dir, const char *url);
 void grove_host_job(GroveJob *out);
 
 #endif

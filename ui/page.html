@@ -458,6 +458,15 @@
   }
   .modal-actions button { color: var(--focus); font-size: 0.95rem; }
   .modal-actions button:hover { text-decoration: underline; }
+  .page-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+    margin: 0.9rem 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+  .page-field input { font-size: 1rem; padding: 0.5rem 0.7rem; }
   .wrap:not(.split):has(#search-narrow:not([hidden])) {
     width: min(58rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
   }
@@ -561,10 +570,11 @@
       <div class="shelf">
       <aside id="lib-narrow" class="narrow-aside"></aside>
       <div class="shelf-main">
-      <p class="help">Add a folder or a file. Edit describes the volume. The text stays in the file.</p>
+      <p class="help">Add a folder, a file, or a web page. Edit describes the volume. The text stays on disk.</p>
       <div class="lib-tools">
         <button type="button" id="lib-folder">Add a folder</button>
         <button type="button" id="lib-file">Add a file</button>
+        <button type="button" id="lib-page-open">Add a page</button>
         <input id="lib-filter" type="text" placeholder="Title, creator, subject, or path" aria-label="Filter the library" autocomplete="off" spellcheck="false">
       </div>
       <div id="lib-roots"></div>
@@ -589,6 +599,19 @@
       <div class="modal-actions">
         <button type="submit">Save</button>
         <button type="button" id="lib-edit-cancel">Cancel</button>
+      </div>
+    </div>
+  </form>
+  <form id="lib-page" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="lib-page-title" tabindex="-1">
+      <h2 id="lib-page-title" class="modal-title">Add a page</h2>
+      <label class="page-field" for="lib-page-url">Address
+        <input id="lib-page-url" type="text" inputmode="url" placeholder="https://" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="err" id="lib-page-err" hidden></p>
+      <div class="modal-actions">
+        <button type="submit">Add</button>
+        <button type="button" id="lib-page-cancel">Cancel</button>
       </div>
     </div>
   </form>
@@ -624,6 +647,8 @@ const libEditTitle = document.getElementById("lib-edit-title");
 const libEditPath = document.getElementById("lib-edit-path");
 const libEditFields = document.getElementById("lib-edit-fields");
 const libRows = document.getElementById("lib-rows");
+const libPage = document.getElementById("lib-page");
+const libPageUrl = document.getElementById("lib-page-url");
 const searchNarrowOpen = document.getElementById("search-narrow-open");
 const searchNarrowEl = document.getElementById("search-narrow");
 const libNarrowOpen = document.getElementById("lib-narrow-open");
@@ -661,6 +686,18 @@ function baseName(path) {
 function folderOf(path) {
   const i = path.lastIndexOf("/");
   return i > 0 ? path.slice(0, i) : "";
+}
+
+function isFetchedPage(path) {
+  return /^[0-9a-f]{64}\.html$/i.test(baseName(path || ""));
+}
+
+function pageAddress(vol) {
+  const url = (vol && vol.url) || "";
+  if (/^https?:\/\//i.test(url) && !/[\s\\]/.test(url)) return url;
+  const id = (vol && vol.identifier) || "";
+  if (/^https?:\/\//i.test(id) && !/[\s\\]/.test(id)) return id;
+  return "";
 }
 
 function parseFilters(s) {
@@ -1370,22 +1407,23 @@ function render(hits, query) {
     places += typeof counted === "number" && counted > 0 ? counted : passages.length;
     const art = document.createElement("article");
     const name = document.createElement("button");
+    const fetched = isFetchedPage(hit.path || "");
+    const title = (hit.title || "").trim();
     name.type = "button";
     name.className = "name";
-    name.textContent = baseName(hit.path || "");
+    name.textContent = fetched && title ? title : baseName(hit.path || "");
     name.addEventListener("click", function () { openPath(hit.path); });
     art.append(name);
     const folder = folderOf(hit.path || "");
-    if (folder) {
+    if (folder && !fetched) {
       const line = document.createElement("p");
       line.className = "folder";
       line.textContent = folder;
       line.title = folder;
       art.append(line);
     }
-    const title = (hit.title || "").trim();
     const first = ((passages[0] && passages[0].text) || "").replace(/<<|>>/g, "");
-    const titleShown = title && title.toLowerCase() !== baseName(hit.path || "").toLowerCase() &&
+    const titleShown = !fetched && title && title.toLowerCase() !== baseName(hit.path || "").toLowerCase() &&
       first.toLowerCase().indexOf(title.toLowerCase()) === -1;
     if (titleShown) {
       const line = document.createElement("p");
@@ -2113,12 +2151,14 @@ function closeEditor() {
 }
 
 function openEditor(vol, opener) {
+  closePageDialog();
   closeNarrowSheet();
   editing = vol.path;
   editingLabel = vol.title || fileTail(vol.path);
   editReturn = opener || null;
   libEdit.hidden = false;
-  libEditPath.textContent = vol.path || "";
+  const address = pageAddress(vol);
+  libEditPath.textContent = address || vol.path || "";
   libEditPath.title = vol.path || "";
   LIB_FIELDS.forEach(function (row) {
     const el = document.getElementById("lib-f-" + row[0]);
@@ -2193,8 +2233,9 @@ function drawLibrary(data) {
     meta.textContent = metaLine(vol);
     const path = document.createElement("p");
     path.className = "lib-path";
-    path.textContent = vol.path || "";
-    path.title = vol.path || "";
+    const address = pageAddress(vol);
+    path.textContent = address || vol.path || "";
+    path.title = address || vol.path || "";
     const actions = document.createElement("div");
     actions.className = "lib-actions";
     const open = document.createElement("button");
@@ -2265,13 +2306,14 @@ function watchJob() {
       }
       if (job.running) {
         if (groveView === "library") {
-          libStatus.textContent = job.kind === 2 ? "Adding files…" : "Preparing the shelf… Search waits until this finishes.";
+          libStatus.textContent = job.kind === 3 ? "Fetching the page…" :
+            job.kind === 2 ? "Adding files…" : "Preparing the shelf… Search waits until this finishes.";
         }
         setTimeout(step, 400);
         return;
       }
       if (groveView === "library") {
-        libStatus.textContent = job.kind === 2 ? jobLine(job) : "";
+        libStatus.textContent = job.kind === 2 || job.kind === 3 ? jobLine(job) : "";
       }
       if (job.kind) {
         loadInfo();
@@ -2310,7 +2352,10 @@ async function ensureShelf() {
 
 function setView(name) {
   const next = name === "library" ? "library" : "search";
-  if (next !== "library") closeEditor();
+  if (next !== "library") {
+    closeEditor();
+    closePageDialog();
+  }
   closeNarrowSheet();
   groveView = next;
   searchView.hidden = groveView !== "search";
@@ -2322,6 +2367,69 @@ function setView(name) {
   try { sessionStorage.setItem("grove.view", groveView); } catch (e) {}
   if (groveView === "library") ensureShelf();
   else q.focus();
+}
+
+let pageReturn = null;
+
+function showPageError(msg) {
+  const el = document.getElementById("lib-page-err");
+  if (!el) return;
+  el.hidden = !msg;
+  el.textContent = msg || "";
+}
+
+function closePageDialog() {
+  if (!libPage || libPage.hidden) {
+    pageReturn = null;
+    return;
+  }
+  libPage.hidden = true;
+  if (pageReturn && pageReturn.isConnected) pageReturn.focus();
+  pageReturn = null;
+}
+
+function openPageDialog(opener) {
+  closeEditor();
+  closeNarrowSheet();
+  if (typeof grove_fetch !== "function") {
+    showLibError("Open the window again to add a page.");
+    return;
+  }
+  showLibError("");
+  showPageError("");
+  pageReturn = opener || null;
+  if (libPageUrl) libPageUrl.value = "";
+  libPage.hidden = false;
+  const card = libPage.querySelector(".modal-card");
+  if (card) card.focus();
+  if (libPageUrl) libPageUrl.focus();
+}
+
+async function addPage(ev) {
+  if (ev) ev.preventDefault();
+  const url = libPageUrl ? (libPageUrl.value || "").trim() : "";
+  if (!url) {
+    showPageError("type a page address");
+    return;
+  }
+  if (typeof grove_fetch !== "function") {
+    showPageError("Open the window again to add a page.");
+    return;
+  }
+  showPageError("");
+  try {
+    const raw = await grove_fetch(url);
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showPageError(data.error);
+      return;
+    }
+    closePageDialog();
+    libStatus.textContent = "Fetching the page…";
+    watchJob();
+  } catch (e) {
+    showPageError("Could not fetch that page");
+  }
 }
 
 async function addPath(path) {
@@ -2419,6 +2527,16 @@ modeSearch.addEventListener("click", function () { setView("search"); });
 modeLibrary.addEventListener("click", function () { setView("library"); });
 document.getElementById("lib-folder").addEventListener("click", function () { pickPath("dir"); });
 document.getElementById("lib-file").addEventListener("click", function () { pickPath("file"); });
+document.getElementById("lib-page-open").addEventListener("click", function (ev) {
+  openPageDialog(ev.currentTarget);
+});
+if (libPage) {
+  libPage.addEventListener("submit", addPage);
+  libPage.addEventListener("click", function (ev) {
+    if (ev.target === libPage) closePageDialog();
+  });
+}
+document.getElementById("lib-page-cancel").addEventListener("click", closePageDialog);
 libFilter.addEventListener("input", function () {
   clearTimeout(filterTimer);
   filterTimer = setTimeout(loadLibrary, 200);
@@ -2429,6 +2547,26 @@ libEdit.addEventListener("click", function (ev) {
 });
 document.getElementById("lib-edit-cancel").addEventListener("click", closeEditor);
 document.addEventListener("keydown", function (ev) {
+  if (libPage && !libPage.hidden) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closePageDialog();
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    const nodes = libPage.querySelectorAll("input, textarea, button");
+    if (!nodes.length) return;
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+    return;
+  }
   if (!libEdit.hidden) {
     if (ev.key === "Escape") {
       ev.preventDefault();

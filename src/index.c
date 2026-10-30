@@ -4180,6 +4180,12 @@ static const char *CATALOG_SQL =
     " relation TEXT NOT NULL DEFAULT '',"
     " rights TEXT NOT NULL DEFAULT '')";
 
+/* The address of a fetched page. The table appears on the first fetch. */
+static const char *PAGE_SQL =
+    "CREATE TABLE IF NOT EXISTS web("
+    " path TEXT PRIMARY KEY,"
+    " url TEXT NOT NULL)";
+
 enum {
     CF_TITLE = 0,
     CF_CREATOR,
@@ -5463,6 +5469,145 @@ fail_fields:
     return -1;
 }
 
+static int page_address_ok(const char *url) {
+    const char *rest = NULL;
+    if (!url || !url[0]) {
+        return 0;
+    }
+    if (starts_with(url, "https://")) {
+        rest = url + 8;
+    } else if (starts_with(url, "http://")) {
+        rest = url + 7;
+    } else {
+        return 0;
+    }
+    if (!rest[0] || strlen(url) > 2048) {
+        return 0;
+    }
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7f || *p == '\\') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int index_page_remember(Index *ix, const char *path, const char *url, Err *e) {
+    if (!ix || !path || !path[0] || !page_address_ok(url)) {
+        err_set(e, "that address is not a web page");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    if (write_db(ix, &db, 0, e) != 0) {
+        return -1;
+    }
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        return -1;
+    }
+    began = 1;
+    if (saved_exec(db, PAGE_SQL, e) != 0) {
+        goto fail;
+    }
+    int64_t id = 0;
+    if (doc_by_path(ix, db, path, &id, e) != 0 || id == 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO web(path, url) VALUES(?, ?)"
+                           " ON CONFLICT(path) DO UPDATE SET url=excluded.url",
+                           -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, url, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (strlen(url) <= 400) {
+        if (saved_exec(db, CATALOG_SQL, e) != 0) {
+            goto fail;
+        }
+        if (sqlite3_prepare_v2(db,
+                               "INSERT INTO catalog(path, identifier) VALUES(?, ?)"
+                               " ON CONFLICT(path) DO UPDATE SET identifier=excluded.identifier"
+                               " WHERE catalog.identifier = ''",
+                               -1, &st, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, url, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) != SQLITE_DONE) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    return -1;
+}
+
+int index_page_url(Index *ix, const char *path, char **url, Err *e) {
+    if (url) {
+        *url = NULL;
+    }
+    if (!url) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    if (!ix || !path || !path[0]) {
+        return 0;
+    }
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st, "SELECT url FROM web WHERE path=?", e) != 0) {
+        if (e->msg[0] && strstr(e->msg, "no such table")) {
+            err_clear(e);
+            return 0;
+        }
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(st, 0);
+        *url = xstrdup(s ? s : "");
+        if (!*url) {
+            sqlite3_finalize(st);
+            err_set(e, "out of memory");
+            return -1;
+        }
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        free(*url);
+        *url = NULL;
+        return db_fail(ix, e, "sqlite");
+    }
+    return 0;
+}
+
 int index_library_drop(Index *ix, const char *path, Err *e) {
     if (!ix || !path || !path[0]) {
         err_set(e, "that file is not in the library");
@@ -5516,6 +5661,28 @@ int index_library_drop(Index *ix, const char *path, Err *e) {
     st = NULL;
     if (has) {
         if (sqlite3_prepare_v2(db, "DELETE FROM catalog WHERE path=?", -1, &st, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) != SQLITE_DONE) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    has = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='web'", -1, &st, NULL) !=
+        SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    has = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    st = NULL;
+    if (has) {
+        if (sqlite3_prepare_v2(db, "DELETE FROM web WHERE path=?", -1, &st, NULL) != SQLITE_OK) {
             saved_fail(db, e);
             goto fail;
         }

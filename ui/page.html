@@ -37,6 +37,36 @@
     margin: 0 auto;
     padding: 2.25rem 0 4rem;
   }
+  .wrap.split {
+    width: min(76rem, calc(100% - 1.5rem));
+    height: 100vh;
+    height: 100dvh;
+    display: grid;
+    grid-template-columns: minmax(18rem, 24rem) minmax(0, 1fr);
+    column-gap: 1.75rem;
+    padding: 1.1rem 0 0;
+    overflow: hidden;
+  }
+  #search-col, #reader-col { min-width: 0; }
+  .wrap.split #search-col,
+  .wrap.split #reader-col {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding-bottom: 3rem;
+  }
+  #reader-col[hidden] { display: none; }
+  @media (max-width: 860px) {
+    .wrap.split {
+      height: auto;
+      overflow: visible;
+      grid-template-columns: 1fr;
+      row-gap: 1.5rem;
+      padding-bottom: 3rem;
+    }
+    .wrap.split #search-col,
+    .wrap.split #reader-col { overflow: visible; }
+  }
   header p {
     margin: 0 0 0.85rem;
     color: var(--muted);
@@ -196,11 +226,44 @@
     font-size: 0.88rem;
   }
   .more:hover { text-decoration: underline; }
-  #reader[hidden] { display: none; }
-  .reader-bar {
+  .passage.open { box-shadow: inset 2px 0 0 #c4b8a8; }
+  .passage.on { background: #efe8dc; }
+  .tabs {
     position: sticky;
     top: 0;
-    z-index: 2;
+    z-index: 4;
+    display: flex;
+    gap: 0.4rem;
+    background: var(--bg);
+    padding: 0.1rem 0 0.55rem;
+    overflow-x: auto;
+  }
+  .tabs button.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    max-width: 16rem;
+    flex: 0 0 auto;
+    border: 1px solid #ddd4c8;
+    background: transparent;
+    border-radius: 999px;
+    padding: 0.16rem 0.4rem 0.16rem 0.7rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .tabs button.tab.on { color: var(--ink); background: var(--paper); }
+  .tabs .tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tabs .tab-x { color: var(--muted); padding: 0 0.15rem; line-height: 1; }
+  .tabs button.tab.on .tab-x { color: var(--focus); }
+  .reader[hidden] { display: none; }
+  .reader-bar {
+    position: sticky;
+    top: 2.35rem;
+    z-index: 3;
     background: var(--bg);
     padding: 0.45rem 0 0.55rem;
   }
@@ -208,15 +271,15 @@
   .reader-nav button { color: var(--focus); font-size: 0.88rem; }
   .reader-nav button:hover { text-decoration: underline; }
   .reader-nav button:disabled { color: var(--line); text-decoration: none; cursor: default; }
-  #reader-where { margin: 0.35rem 0 0; }
-  #reader-title {
+  .reader-where { margin: 0.35rem 0 0; }
+  .reader-title {
     margin: 0.85rem 0 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.55rem;
     font-weight: normal;
     line-height: 1.25;
   }
-  #reader-body {
+  .reader-body {
     margin-top: 1rem;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.12rem;
@@ -241,7 +304,8 @@
 </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap" id="wrap">
+    <div id="search-col">
     <header id="search-head">
       <p id="index"></p>
       <form id="find">
@@ -256,21 +320,11 @@
       <p class="err" id="err" hidden></p>
     </header>
     <main id="results"></main>
-    <main id="reader" hidden>
-      <div class="reader-bar">
-        <p class="reader-nav">
-          <button type="button" id="reader-back">Search</button>
-          <button type="button" id="reader-prev">Earlier</button>
-          <button type="button" id="reader-next">Later</button>
-          <button type="button" id="reader-orig">Original file</button>
-        </p>
-        <p id="reader-where" class="where"></p>
-        <p class="err" id="reader-err" hidden></p>
-      </div>
-      <h1 id="reader-title"></h1>
-      <div id="reader-toc"></div>
-      <article id="reader-body"></article>
-    </main>
+    </div>
+    <div id="reader-col" hidden>
+      <div class="tabs" id="tabs"></div>
+      <div id="panes"></div>
+    </div>
   </div>
 <script>
 const q = document.getElementById("q");
@@ -279,13 +333,11 @@ const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
 const results = document.getElementById("results");
-const reader = document.getElementById("reader");
-const readerTitle = document.getElementById("reader-title");
-const readerWhere = document.getElementById("reader-where");
-const readerToc = document.getElementById("reader-toc");
-const readerBody = document.getElementById("reader-body");
-const readerPrev = document.getElementById("reader-prev");
-const readerNext = document.getElementById("reader-next");
+const wrap = document.getElementById("wrap");
+const searchCol = document.getElementById("search-col");
+const readerCol = document.getElementById("reader-col");
+const tabStrip = document.getElementById("tabs");
+const panes = document.getElementById("panes");
 const indexLine = document.getElementById("index");
 const savedRow = document.getElementById("saved");
 let seq = 0;
@@ -529,11 +581,6 @@ function drawChips() {
 function showError(message) {
   err.hidden = !message;
   err.textContent = message || "";
-  const re = document.getElementById("reader-err");
-  if (re) {
-    re.hidden = !message;
-    re.textContent = message || "";
-  }
 }
 
 function countLine(files, places) {
@@ -547,6 +594,8 @@ function addPassage(parent, hit, passage) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "passage";
+  btn.dataset.path = hit.path || "";
+  btn.dataset.offset = String(passage.offset || 0);
   const parts = [];
   if (passage.section) {
     parts.push(passage.section);
@@ -565,7 +614,7 @@ function addPassage(parent, hit, passage) {
   text.innerHTML = withMarks(passage.text || "");
   btn.append(text);
   btn.addEventListener("click", function () {
-    openRead(hit.path, passage.offset || 0, 0, markedWords(passage.text));
+    openTab(hit.path, passage.offset || 0, markedWords(passage.text));
   });
   parent.append(btn);
   const slot = document.createElement("div");
@@ -702,6 +751,7 @@ function walkPassages(art, hit, passages, query) {
     for (let i = shown; i < n; i++) addPassage(art, hit, passages[i]);
     art.append(btn);
     shown = n;
+    markOpenPassages();
   }
   btn.textContent = label();
   btn.addEventListener("click", async function () {
@@ -787,18 +837,13 @@ function render(hits, query) {
     walkPassages(art, hit, passages, query);
     results.append(art);
   });
+  markOpenPassages();
   return places;
 }
 
-let readSeq = 0;
-
-function closeReader() {
-  readSeq++;
-  readPhrase = "";
-  reader.hidden = true;
-  results.hidden = false;
-  document.getElementById("search-head").hidden = false;
-}
+let tabs = [];
+let tabIds = 0;
+let activeId = 0;
 
 function utf8Index(text, byteOff) {
   const enc = new TextEncoder();
@@ -840,7 +885,7 @@ function locatePhrase(text, focus, phrase) {
   return best;
 }
 
-function renderProse(text, span, pages) {
+function renderProse(readerBody, text, span, pages) {
   readerBody.replaceChildren();
   const markA = span ? span.a : -1;
   const markB = span ? span.b : -1;
@@ -875,7 +920,7 @@ function renderProse(text, span, pages) {
       let mark = readerBody.lastChild && readerBody.lastChild.tagName === "MARK" ? readerBody.lastChild : null;
       if (!mark) {
         mark = document.createElement("mark");
-        if (!readerBody.querySelector("mark")) mark.id = "here";
+        if (!readerBody.querySelector("mark.here")) mark.className = "here";
         readerBody.append(mark);
       }
       mark.append(document.createTextNode(slice));
@@ -884,8 +929,6 @@ function renderProse(text, span, pages) {
     }
   }
 }
-
-let readPhrase = "";
 
 function sectionAt(heads, at) {
   const stack = [];
@@ -903,22 +946,175 @@ function sectionAt(heads, at) {
   return parts.join(" · ");
 }
 
-function drawReader(data) {
-  document.getElementById("search-head").hidden = true;
-  results.hidden = true;
-  reader.hidden = false;
-  readerTitle.textContent = data.title || baseName(data.path || "");
-  readerToc.replaceChildren();
+function stemName(path) {
+  const base = baseName(path || "");
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+function tabName(tab) {
+  const book = (tab.book || "").trim() || stemName(tab.path);
+  const others = tabs.some(function (t) { return t !== tab && t.path === tab.path; });
+  if (!others) return book;
+  const head = (tab.section || "").split(" · ").filter(Boolean).pop();
+  const phrase = (tab.phrase || "").trim();
+  if (head && phrase) return head + " · " + phrase;
+  return head || phrase || book;
+}
+
+function markOpenPassages() {
+  const buttons = document.querySelectorAll(".passage");
+  buttons.forEach(function (btn) {
+    let open = false;
+    let on = false;
+    for (let i = 0; i < tabs.length; i++) {
+      if (tabs[i].path !== btn.dataset.path || String(tabs[i].anchor) !== btn.dataset.offset) continue;
+      open = true;
+      if (tabs[i].id === activeId) on = true;
+    }
+    btn.classList.toggle("open", open);
+    btn.classList.toggle("on", on);
+  });
+}
+
+function drawTabStrip() {
+  tabStrip.replaceChildren();
+  tabs.forEach(function (tab) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab" + (tab.id === activeId ? " on" : "");
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = tabName(tab);
+    btn.title = tabName(tab);
+    btn.addEventListener("click", function () { showTab(tab, false); });
+    const x = document.createElement("span");
+    x.className = "tab-x";
+    x.textContent = "×";
+    x.setAttribute("aria-label", "Close " + label.textContent);
+    x.addEventListener("click", function (e) {
+      e.stopPropagation();
+      closeTab(tab);
+    });
+    btn.append(label, x);
+    tabStrip.append(btn);
+  });
+}
+
+function setSplit(on) {
+  const y = searchCol.scrollTop;
+  wrap.classList.toggle("split", on);
+  readerCol.hidden = !on;
+  if (on) searchCol.scrollTop = y;
+}
+
+function showTab(tab, fresh) {
+  if (activeId && activeId !== tab.id) {
+    const prev = tabs.find(function (t) { return t.id === activeId; });
+    if (prev) prev.scroll = readerCol.scrollTop;
+  }
+  activeId = tab.id;
+  tabs.forEach(function (t) { t.panel.hidden = t.id !== tab.id; });
+  setSplit(true);
+  drawTabStrip();
+  markOpenPassages();
+  if (fresh) readerCol.scrollTop = 0;
+  else if (tab.pendingMark) settleMark(tab);
+  else readerCol.scrollTop = tab.scroll || 0;
+}
+
+function closeTab(tab) {
+  const i = tabs.indexOf(tab);
+  if (i < 0) return;
+  tab.seq++;
+  tab.panel.remove();
+  tabs.splice(i, 1);
+  if (activeId === tab.id) {
+    const next = tabs[i] || tabs[i - 1];
+    if (next) showTab(next, false);
+    else {
+      activeId = 0;
+      setSplit(false);
+      drawTabStrip();
+      markOpenPassages();
+    }
+  } else {
+    drawTabStrip();
+    markOpenPassages();
+  }
+}
+
+function makeTab(path, anchor, phrase) {
+  const panel = document.createElement("main");
+  panel.className = "reader";
+  panel.hidden = true;
+  const bar = document.createElement("div");
+  bar.className = "reader-bar";
+  const nav = document.createElement("p");
+  nav.className = "reader-nav";
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "reader-prev";
+  prev.textContent = "Earlier";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "reader-next";
+  next.textContent = "Later";
+  const orig = document.createElement("button");
+  orig.type = "button";
+  orig.textContent = "Original file";
+  nav.append(prev, next, orig);
+  const where = document.createElement("p");
+  where.className = "where reader-where";
+  const errLine = document.createElement("p");
+  errLine.className = "err";
+  errLine.hidden = true;
+  bar.append(nav, where, errLine);
+  const title = document.createElement("h1");
+  title.className = "reader-title";
+  title.textContent = stemName(path);
+  const toc = document.createElement("div");
+  const body = document.createElement("article");
+  body.className = "reader-body";
+  panel.append(bar, title, toc, body);
+  panes.append(panel);
+  const tab = {
+    id: ++tabIds,
+    path: path,
+    anchor: anchor,
+    phrase: phrase || "",
+    book: "",
+    section: "",
+    seq: 0,
+    scroll: 0,
+    panel: panel,
+    titleEl: title,
+    whereEl: where,
+    tocEl: toc,
+    bodyEl: body,
+    prevEl: prev,
+    nextEl: next,
+    errEl: errLine
+  };
+  orig.addEventListener("click", function () { openPath(tab.path); });
+  return tab;
+}
+
+function drawReader(tab, data) {
+  tab.book = (data.title || "").trim() || stemName(tab.path);
+  tab.titleEl.textContent = tab.book;
+  tab.tocEl.replaceChildren();
   const heads = data.heads || [];
   let section = data.section || "";
   if ((data.at || 0) >= (data.to || 0) && (data.from || 0) < (data.at || 0)) {
     const atStart = sectionAt(heads, data.from || 0);
     if (atStart) section = atStart;
   }
+  tab.section = section;
   const parts = [];
   if (section) parts.push(section);
   if (data.page > 0) parts.push("p. " + data.page);
-  readerWhere.textContent = parts.join(" · ");
+  tab.whereEl.textContent = parts.join(" · ");
   if (heads.length) {
     const details = document.createElement("details");
     details.className = "toc";
@@ -932,12 +1128,13 @@ function drawReader(data) {
       btn.className = "lv" + lv;
       btn.textContent = head.text || "";
       btn.addEventListener("click", function () {
-        openRead(data.path, head.at || 0, 0, "");
+        tab.phrase = "";
+        loadTab(tab, head.at || 0, 0);
       });
       list.append(btn);
     });
     details.append(summary, list);
-    readerToc.append(details);
+    tab.tocEl.append(details);
   }
   const text = data.text || "";
   const rel = data.at >= data.from && data.at < data.to ? data.at - data.from : -1;
@@ -945,35 +1142,64 @@ function drawReader(data) {
   const pages = (data.pages || []).map(function (p) {
     return { index: utf8Index(text, Math.max(0, (p.at || 0) - (data.from || 0))), page: p.page };
   });
-  const span = readPhrase ? locatePhrase(text, focus, readPhrase) : null;
-  renderProse(text, span, pages);
-  readerPrev.disabled = !data.from;
-  readerNext.disabled = data.to >= data.length;
-  readerPrev.onclick = function () { openRead(data.path, data.from, -1); };
-  readerNext.onclick = function () { openRead(data.path, data.to, 1); };
-  document.getElementById("reader-orig").onclick = function () { openPath(data.path); };
-  const here = document.getElementById("here");
-  if (here) here.scrollIntoView({ block: "center" });
-  else reader.scrollIntoView({ block: "start" });
+  const span = tab.phrase ? locatePhrase(text, focus, tab.phrase) : null;
+  renderProse(tab.bodyEl, text, span, pages);
+  tab.prevEl.disabled = !data.from;
+  tab.nextEl.disabled = data.to >= data.length;
+  tab.prevEl.onclick = function () { loadTab(tab, data.from, -1); };
+  tab.nextEl.onclick = function () { loadTab(tab, data.to, 1); };
+  tab.errEl.hidden = true;
+  tab.errEl.textContent = "";
+  tab.pendingMark = true;
+  drawTabStrip();
+  if (tab.id === activeId) settleMark(tab);
 }
 
-async function openRead(path, at, dir, phrase) {
-  if (arguments.length >= 4) readPhrase = phrase || "";
-  const id = ++readSeq;
-  showError("");
+function settleMark(tab) {
+  const here = tab.bodyEl.querySelector("mark.here");
+  if (here) here.scrollIntoView({ block: "center", inline: "nearest" });
+  else readerCol.scrollTop = 0;
+  tab.pendingMark = false;
+  tab.scroll = readerCol.scrollTop;
+}
+
+async function loadTab(tab, at, dir) {
+  const seq = ++tab.seq;
+  tab.errEl.hidden = true;
+  tab.errEl.textContent = "";
   try {
-    const raw = await grove_read(path, String(at || 0), String(dir || 0));
-    if (id !== readSeq) return;
+    const raw = await grove_read(tab.path, String(at || 0), String(dir || 0));
+    if (seq !== tab.seq) return;
     const data = JSON.parse(raw);
     if (data.error) {
-      showError(data.error);
+      tab.errEl.hidden = false;
+      tab.errEl.textContent = data.error;
       return;
     }
-    drawReader(data);
+    drawReader(tab, data);
   } catch (e) {
-    if (id !== readSeq) return;
-    showError("Could not open the text");
+    if (seq !== tab.seq) return;
+    tab.errEl.hidden = false;
+    tab.errEl.textContent = "Could not open the text";
   }
+}
+
+async function openTab(path, anchor, phrase) {
+  let tab = null;
+  for (let i = 0; i < tabs.length; i++) {
+    if (tabs[i].path === path && tabs[i].anchor === anchor) {
+      tab = tabs[i];
+      break;
+    }
+  }
+  if (!tab) {
+    tab = makeTab(path, anchor, phrase || "");
+    tabs.push(tab);
+  } else if (phrase) {
+    tab.phrase = phrase;
+  }
+  showTab(tab, true);
+  await loadTab(tab, anchor, 0);
 }
 
 async function openPath(path, at, page, needle) {
@@ -1161,7 +1387,6 @@ async function seenNew(query) {
 }
 
 async function runSearch() {
-  closeReader();
   const id = ++seq;
   const query = combinedQuery();
   drawChips();
@@ -1250,7 +1475,6 @@ function restoreQuery() {
   if (av) also.value = av;
   runSearch();
 }
-document.getElementById("reader-back").addEventListener("click", closeReader);
 whenReady(function () {
   loadInfo();
   loadSaved();

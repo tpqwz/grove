@@ -4,6 +4,8 @@
 #include "text.h"
 #include "zip.h"
 
+#include "sqlite3.h"
+
 #include <fcntl.h>
 #include <ftw.h>
 #include <limits.h>
@@ -2245,6 +2247,176 @@ static void test_cert(void) {
     rm_rf(dir);
 }
 
+static int plan_covers(const char *db_path, const char *sql) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return 0;
+    }
+    char *q = NULL;
+    if (sqlite3_exec(db, "SELECT 1", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return 0;
+    }
+    size_t n = strlen(sql) + 32;
+    q = malloc(n);
+    if (!q || snprintf(q, n, "EXPLAIN QUERY PLAN %s", sql) < 0) {
+        free(q);
+        sqlite3_close(db);
+        return 0;
+    }
+    int rc = sqlite3_prepare_v2(db, q, -1, &st, NULL);
+    free(q);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return 0;
+    }
+    int cover = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *detail = (const char *)sqlite3_column_text(st, 3);
+        if (detail && strstr(detail, "COVERING") && strstr(detail, "docs_shelf")) {
+            cover = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return cover;
+}
+
+static void test_library(void) {
+    char tmpl[] = "/tmp/grove-lib-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *docs = path_join(root, "docs");
+    char *idx = path_join(root, "idx");
+    char *file = docs ? path_join(docs, "a.txt") : NULL;
+    char *other = docs ? path_join(docs, "b.txt") : NULL;
+    char *db = idx ? path_join(idx, "grove.db") : NULL;
+    Index *ix = NULL;
+    Library lib;
+    memset(&lib, 0, sizeof lib);
+    Err e;
+    err_clear(&e);
+    if (!docs || !idx || !file || !other || !db || mkdir(docs, 0700) != 0) {
+        fails++;
+        goto done;
+    }
+    FILE *f = fopen(file, "w");
+    if (!f) {
+        fails++;
+        goto done;
+    }
+    fputs("alpha garden shelf\n", f);
+    fclose(f);
+    f = fopen(other, "w");
+    if (!f) {
+        fails++;
+        goto done;
+    }
+    fputs("other kelp text\n", f);
+    fclose(f);
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "library open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "library add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 2 && lib.n == 2 && lib.nroots == 1);
+    const Volume *garden = NULL;
+    for (int i = 0; i < lib.n; i++) {
+        if (lib.volumes[i].path && strstr(lib.volumes[i].path, "a.txt")) {
+            garden = &lib.volumes[i];
+        }
+    }
+    CHECK(garden && garden->creator && garden->creator[0] == 0);
+    Volume rec;
+    memset(&rec, 0, sizeof rec);
+    rec.path = garden ? garden->path : "";
+    rec.title = "Garden Notes";
+    rec.creator = "A Reader";
+    rec.date = "2026";
+    rec.language = "English";
+    rec.type = "Prose";
+    rec.subject = "Notes";
+    rec.coverage = "Imported";
+    rec.source = "A shelf";
+    rec.description = "A bed.\nAnother.";
+    rec.publisher = "";
+    rec.contributor = "";
+    rec.format = "text";
+    rec.identifier = "ISBN 000";
+    rec.relation = "";
+    rec.rights = "Kept by the reader.";
+    CHECK(garden && index_catalog_put(ix, &rec, &e) == 0);
+    rec.creator = "Line\nbreak";
+    CHECK(index_catalog_put(ix, &rec, &e) != 0);
+    char long_title[500];
+    memset(long_title, 'a', sizeof long_title - 1);
+    long_title[sizeof long_title - 1] = 0;
+    rec.creator = "A Reader";
+    rec.title = long_title;
+    CHECK(index_catalog_put(ix, &rec, &e) != 0);
+    library_free(&lib);
+    CHECK(index_library_list(ix, "reader", &lib, &e) == 0);
+    CHECK(lib.total == 1 && lib.n == 1);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].title, "Garden Notes") == 0);
+    CHECK(strcmp(lib.volumes[0].creator, "A Reader") == 0);
+    CHECK(strcmp(lib.volumes[0].identifier, "ISBN 000") == 0);
+    CHECK(strstr(lib.volumes[0].description, "Another."));
+    library_free(&lib);
+    int nh = 0;
+    Hit *hits = do_search(ix, "title:garden", NULL, &nh);
+    CHECK(nh == 1);
+    hits_free(hits, nh);
+    CHECK(index_shelf_build(ix, &e) == 0);
+    CHECK(index_shelf_ready(ix) == 1);
+    CHECK(index_shelf_build(ix, &e) == 0);
+    CHECK(plan_covers(db, "SELECT title, ext, mtime, size, root_id, rel FROM docs INDEXED BY docs_shelf ORDER BY title, rel"));
+    index_close(ix);
+    err_clear(&e);
+    ix = index_open(idx, 0, &e);
+    CHECK(ix != NULL);
+    CHECK(ix && index_shelf_ready(ix) == 1);
+    const char *drop_path = NULL;
+    CHECK(ix && index_library_list(ix, "a.txt", &lib, &e) == 0);
+    CHECK(lib.n == 1 && lib.volumes && lib.volumes[0].path);
+    CHECK(lib.volumes && strcmp(lib.volumes[0].title, "Garden Notes") == 0);
+    drop_path = lib.volumes && lib.volumes[0].path ? lib.volumes[0].path : "";
+    CHECK(ix && index_library_drop(ix, drop_path, &e) == 0);
+    struct stat sb;
+    CHECK(stat(file, &sb) == 0);
+    library_free(&lib);
+    CHECK(ix && index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 1);
+    CHECK(ix && index_library_drop(ix, file, &e) != 0);
+done:
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    free(db);
+    free(other);
+    free(file);
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
 int main(void) {
     test_bounds();
     test_cert();
@@ -2255,6 +2427,7 @@ int main(void) {
     test_mtime();
     test_saved();
     test_notes();
+    test_library();
     test_alerts();
     test_reader();
     char tmpl[] = "/tmp/grove-test-XXXXXX";

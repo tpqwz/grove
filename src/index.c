@@ -2350,6 +2350,9 @@ int index_search(Index *ix, const char *query, int limit, const char *at, Hit **
     if (limit > 1000) {
         limit = 1000;
     }
+    if (reload_roots(ix, e) != 0) {
+        return -1;
+    }
     ParsedQuery pq;
     if (query_parse(query, &pq, e) != 0) {
         return -1;
@@ -4118,4 +4121,776 @@ void index_alerts_free(Alert *alerts, int n) {
         alert_files_free(alerts[i].files, alerts[i].nfiles);
     }
     free(alerts);
+}
+
+/* docs_shelf holds the columns the shelf lists. A query that uses only those
+ * columns does not read the stored text. */
+static const char *SHELF_INDEX =
+    "CREATE INDEX IF NOT EXISTS docs_shelf ON docs(title, root_id, rel, ext, mtime, size)";
+
+static const char *CATALOG_SQL =
+    "CREATE TABLE IF NOT EXISTS catalog("
+    " path TEXT PRIMARY KEY,"
+    " title TEXT NOT NULL DEFAULT '',"
+    " creator TEXT NOT NULL DEFAULT '',"
+    " date TEXT NOT NULL DEFAULT '',"
+    " language TEXT NOT NULL DEFAULT '',"
+    " type TEXT NOT NULL DEFAULT '',"
+    " subject TEXT NOT NULL DEFAULT '',"
+    " coverage TEXT NOT NULL DEFAULT '',"
+    " source TEXT NOT NULL DEFAULT '',"
+    " description TEXT NOT NULL DEFAULT '',"
+    " publisher TEXT NOT NULL DEFAULT '',"
+    " contributor TEXT NOT NULL DEFAULT '',"
+    " format TEXT NOT NULL DEFAULT '',"
+    " identifier TEXT NOT NULL DEFAULT '',"
+    " relation TEXT NOT NULL DEFAULT '',"
+    " rights TEXT NOT NULL DEFAULT '')";
+
+enum {
+    CF_TITLE = 0,
+    CF_CREATOR,
+    CF_DATE,
+    CF_LANGUAGE,
+    CF_TYPE,
+    CF_SUBJECT,
+    CF_COVERAGE,
+    CF_SOURCE,
+    CF_DESCRIPTION,
+    CF_PUBLISHER,
+    CF_CONTRIBUTOR,
+    CF_FORMAT,
+    CF_IDENTIFIER,
+    CF_RELATION,
+    CF_RIGHTS,
+    CF_N
+};
+
+typedef struct Cat {
+    char *path;
+    char *field[CF_N];
+} Cat;
+
+static void cat_free_one(Cat *c) {
+    if (!c) {
+        return;
+    }
+    free(c->path);
+    for (int i = 0; i < CF_N; i++) {
+        free(c->field[i]);
+    }
+    memset(c, 0, sizeof *c);
+}
+
+static void cats_free(Cat *c, int n) {
+    if (!c) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        cat_free_one(&c[i]);
+    }
+    free(c);
+}
+
+static int cat_cmp(const void *a, const void *b) {
+    const Cat *x = a;
+    const Cat *y = b;
+    return strcmp(x->path ? x->path : "", y->path ? y->path : "");
+}
+
+static char *field_copy(const char *s, size_t cap, int newlines, Err *e) {
+    if (!s) {
+        s = "";
+    }
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+        s++;
+    }
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\n' || s[n - 1] == '\r')) {
+        n--;
+    }
+    if (n > cap) {
+        err_set(e, "that field is too long");
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!newlines && (s[i] == '\n' || s[i] == '\r')) {
+            err_set(e, "that field is one line");
+            return NULL;
+        }
+    }
+    char *out = malloc(n + 1);
+    if (!out) {
+        err_set(e, "out of memory");
+        return NULL;
+    }
+    memcpy(out, s, n);
+    out[n] = 0;
+    return out;
+}
+
+static const char *vol_field(const Volume *v, int i) {
+    if (!v) {
+        return "";
+    }
+    switch (i) {
+    case CF_TITLE:
+        return v->title;
+    case CF_CREATOR:
+        return v->creator;
+    case CF_DATE:
+        return v->date;
+    case CF_LANGUAGE:
+        return v->language;
+    case CF_TYPE:
+        return v->type;
+    case CF_SUBJECT:
+        return v->subject;
+    case CF_COVERAGE:
+        return v->coverage;
+    case CF_SOURCE:
+        return v->source;
+    case CF_DESCRIPTION:
+        return v->description;
+    case CF_PUBLISHER:
+        return v->publisher;
+    case CF_CONTRIBUTOR:
+        return v->contributor;
+    case CF_FORMAT:
+        return v->format;
+    case CF_IDENTIFIER:
+        return v->identifier;
+    case CF_RELATION:
+        return v->relation;
+    case CF_RIGHTS:
+        return v->rights;
+    default:
+        return "";
+    }
+}
+
+static void vol_set_field(Volume *v, int i, char *owned) {
+    char **slot = NULL;
+    switch (i) {
+    case CF_TITLE:
+        slot = &v->title;
+        break;
+    case CF_CREATOR:
+        slot = &v->creator;
+        break;
+    case CF_DATE:
+        slot = &v->date;
+        break;
+    case CF_LANGUAGE:
+        slot = &v->language;
+        break;
+    case CF_TYPE:
+        slot = &v->type;
+        break;
+    case CF_SUBJECT:
+        slot = &v->subject;
+        break;
+    case CF_COVERAGE:
+        slot = &v->coverage;
+        break;
+    case CF_SOURCE:
+        slot = &v->source;
+        break;
+    case CF_DESCRIPTION:
+        slot = &v->description;
+        break;
+    case CF_PUBLISHER:
+        slot = &v->publisher;
+        break;
+    case CF_CONTRIBUTOR:
+        slot = &v->contributor;
+        break;
+    case CF_FORMAT:
+        slot = &v->format;
+        break;
+    case CF_IDENTIFIER:
+        slot = &v->identifier;
+        break;
+    case CF_RELATION:
+        slot = &v->relation;
+        break;
+    case CF_RIGHTS:
+        slot = &v->rights;
+        break;
+    default:
+        free(owned);
+        return;
+    }
+    free(*slot);
+    *slot = owned;
+}
+
+static void volume_clear(Volume *v) {
+    if (!v) {
+        return;
+    }
+    free(v->path);
+    free(v->ext);
+    for (int i = 0; i < CF_N; i++) {
+        vol_set_field(v, i, NULL);
+    }
+    memset(v, 0, sizeof *v);
+}
+
+static void volumes_free(Volume *vols, int n) {
+    if (!vols) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        volume_clear(&vols[i]);
+    }
+    free(vols);
+}
+
+void library_free(Library *lib) {
+    if (!lib) {
+        return;
+    }
+    if (lib->volumes) {
+        for (int i = 0; i < lib->n; i++) {
+            volume_clear(&lib->volumes[i]);
+        }
+        free(lib->volumes);
+    }
+    if (lib->roots) {
+        for (int i = 0; i < lib->nroots; i++) {
+            free(lib->roots[i]);
+        }
+        free(lib->roots);
+    }
+    free(lib->root_full);
+    memset(lib, 0, sizeof *lib);
+}
+
+int index_shelf_ready(Index *ix) {
+    if (!ix) {
+        return 0;
+    }
+    sqlite3_stmt *st = NULL;
+    Err e;
+    err_clear(&e);
+    if (prep(ix, &st, "SELECT 1 FROM sqlite_master WHERE type='index' AND name='docs_shelf'", &e) != 0) {
+        return 0;
+    }
+    int yes = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return yes;
+}
+
+int index_shelf_build(Index *ix, Err *e) {
+    if (!ix || !ix->writable) {
+        err_set(e, "index is open read-only");
+        return -1;
+    }
+    if (index_shelf_ready(ix)) {
+        return 0;
+    }
+    return sql_exec(ix, SHELF_INDEX, e);
+}
+
+static int write_db(Index *ix, sqlite3 **db, int fts, Err *e) {
+    *db = NULL;
+    if (!ix || !ix->db_path) {
+        err_set(e, "no index");
+        return -1;
+    }
+    int rc = sqlite3_open_v2(ix->db_path, db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !*db) {
+        err_set(e, "cannot open %s: %s", ix->db_path, *db ? sqlite3_errmsg(*db) : "sqlite");
+        if (*db) {
+            sqlite3_close(*db);
+            *db = NULL;
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(*db, 20000);
+    sqlite3_extended_result_codes(*db, 1);
+    if (fts && grove_fts_register(*db, e) != 0) {
+        sqlite3_close(*db);
+        *db = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int doc_by_path(Index *ix, sqlite3 *db, const char *path, int64_t *id, Err *e) {
+    sqlite3_stmt *st = NULL;
+    *id = 0;
+    if (sqlite3_prepare_v2(db, "SELECT docid, root_id, rel FROM docs", -1, &st, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    int step = SQLITE_DONE;
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *rel = (const char *)sqlite3_column_text(st, 2);
+        char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
+        int eq = shown && path && strcmp(shown, path) == 0;
+        free(shown);
+        if (!eq) {
+            continue;
+        }
+        *id = sqlite3_column_int64(st, 0);
+        break;
+    }
+    sqlite3_finalize(st);
+    if (step != SQLITE_ROW && step != SQLITE_DONE) {
+        return saved_fail(db, e);
+    }
+    if (!*id) {
+        err_set(e, "that file is not in the library");
+        return -1;
+    }
+    return 0;
+}
+
+static int load_catalog(sqlite3 *db, Cat **out, int *nout, Err *e) {
+    *out = NULL;
+    *nout = 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog'", -1, &st, NULL) !=
+        SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    int yes = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    st = NULL;
+    if (!yes) {
+        return 0;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT path, title, creator, date, language, type, subject, coverage, source,"
+                           " description, publisher, contributor, format, identifier, relation, rights"
+                           " FROM catalog",
+                           -1, &st, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    Cat *arr = NULL;
+    int n = 0;
+    int cap = 0;
+    int step;
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        if (n == cap) {
+            int nc;
+            if (cap_grow(cap, 16, &nc) != 0 || grow_alloc((void **)&arr, (size_t)nc, sizeof *arr) != 0) {
+                sqlite3_finalize(st);
+                cats_free(arr, n);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            cap = nc;
+        }
+        Cat *c = &arr[n];
+        memset(c, 0, sizeof *c);
+        c->path = xstrdup((const char *)sqlite3_column_text(st, 0));
+        int ok = c->path != NULL;
+        for (int i = 0; ok && i < CF_N; i++) {
+            const char *t = (const char *)sqlite3_column_text(st, i + 1);
+            c->field[i] = xstrdup(t ? t : "");
+            if (!c->field[i]) {
+                ok = 0;
+            }
+        }
+        if (!ok) {
+            sqlite3_finalize(st);
+            cats_free(arr, n + 1);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        n++;
+    }
+    sqlite3_finalize(st);
+    if (step != SQLITE_DONE) {
+        cats_free(arr, n);
+        return saved_fail(db, e);
+    }
+    if (n > 1) {
+        qsort(arr, (size_t)n, sizeof *arr, cat_cmp);
+    }
+    *out = arr;
+    *nout = n;
+    return 0;
+}
+
+static const Cat *cat_find(Cat *arr, int n, const char *path) {
+    if (!arr || n <= 0 || !path) {
+        return NULL;
+    }
+    Cat key;
+    memset(&key, 0, sizeof key);
+    key.path = (char *)path;
+    return bsearch(&key, arr, (size_t)n, sizeof *arr, cat_cmp);
+}
+
+static int shelf_match(const char *needle, const char *path, const char *title, const char *ext, const Cat *cat) {
+    if (!needle || !needle[0]) {
+        return 1;
+    }
+    size_t nn = strlen(needle);
+    const char *bits[8];
+    int nb = 0;
+    bits[nb++] = path;
+    bits[nb++] = title;
+    bits[nb++] = ext;
+    if (cat) {
+        bits[nb++] = cat->field[CF_CREATOR];
+        bits[nb++] = cat->field[CF_SUBJECT];
+        bits[nb++] = cat->field[CF_LANGUAGE];
+        bits[nb++] = cat->field[CF_TYPE];
+        bits[nb++] = cat->field[CF_IDENTIFIER];
+    }
+    for (int i = 0; i < nb; i++) {
+        const char *s = bits[i] ? bits[i] : "";
+        if (fold_contains(s, strlen(s), needle, nn)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int volume_push(Volume *v, const char *path, const char *title, const char *ext, int64_t mtime, int64_t size,
+                       const Cat *cat) {
+    memset(v, 0, sizeof *v);
+    v->path = xstrdup(path ? path : "");
+    v->ext = xstrdup(ext ? ext : "");
+    v->mtime = mtime;
+    v->size = size;
+    const char *shown = title ? title : "";
+    if (cat && cat->field[CF_TITLE] && cat->field[CF_TITLE][0]) {
+        shown = cat->field[CF_TITLE];
+    }
+    v->title = xstrdup(shown);
+    int ok = v->path && v->ext && v->title;
+    for (int i = CF_CREATOR; ok && i < CF_N; i++) {
+        const char *s = cat && cat->field[i] ? cat->field[i] : "";
+        char *copy = xstrdup(s);
+        if (!copy) {
+            ok = 0;
+            break;
+        }
+        vol_set_field(v, i, copy);
+    }
+    if (!ok) {
+        volume_clear(v);
+        return -1;
+    }
+    return 0;
+}
+
+int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
+    memset(out, 0, sizeof *out);
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    if (reload_roots(ix, e) != 0) {
+        return -1;
+    }
+    char *needle = NULL;
+    if (filter && filter[0]) {
+        needle = field_copy(filter, 200, 0, e);
+        if (!needle) {
+            return -1;
+        }
+    }
+    Cat *cats = NULL;
+    int ncats = 0;
+    if (load_catalog(ix->db, &cats, &ncats, e) != 0) {
+        free(needle);
+        return -1;
+    }
+    sqlite3_stmt *st = NULL;
+    const char *list_sql = index_shelf_ready(ix)
+                                ? "SELECT title, ext, mtime, size, root_id, rel FROM docs INDEXED BY docs_shelf "
+                                  "ORDER BY title, rel"
+                                : "SELECT title, ext, mtime, size, root_id, rel FROM docs ORDER BY title, rel";
+    if (prep(ix, &st, list_sql, e) != 0) {
+        cats_free(cats, ncats);
+        free(needle);
+        return -1;
+    }
+    Volume *vols = NULL;
+    int n = 0;
+    int total = 0;
+    int step;
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *title = (const char *)sqlite3_column_text(st, 0);
+        const char *ext = (const char *)sqlite3_column_text(st, 1);
+        int64_t mtime = sqlite3_column_int64(st, 2);
+        int64_t size = sqlite3_column_int64(st, 3);
+        int64_t root_id = sqlite3_column_int64(st, 4);
+        const char *rel = (const char *)sqlite3_column_text(st, 5);
+        char *path = display_path(ix, root_id, rel, NULL);
+        if (!path) {
+            sqlite3_finalize(st);
+            cats_free(cats, ncats);
+            volumes_free(vols, n);
+            free(needle);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        const Cat *cat = cat_find(cats, ncats, path);
+        if (!shelf_match(needle, path, title, ext, cat)) {
+            free(path);
+            continue;
+        }
+        total++;
+        if (n >= LIBRARY_SHOW) {
+            free(path);
+            continue;
+        }
+        Volume one;
+        if (volume_push(&one, path, title, ext, mtime, size, cat) != 0) {
+            free(path);
+            sqlite3_finalize(st);
+            cats_free(cats, ncats);
+            free(needle);
+            volumes_free(vols, n);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        free(path);
+        size_t bytes = 0;
+        if (size_mul((size_t)n + 1, sizeof *vols, &bytes) != 0) {
+            volume_clear(&one);
+            sqlite3_finalize(st);
+            cats_free(cats, ncats);
+            free(needle);
+            volumes_free(vols, n);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        Volume *grown = realloc(vols, bytes);
+        if (!grown) {
+            volume_clear(&one);
+            sqlite3_finalize(st);
+            cats_free(cats, ncats);
+            free(needle);
+            volumes_free(vols, n);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        vols = grown;
+        vols[n++] = one;
+    }
+    sqlite3_finalize(st);
+    cats_free(cats, ncats);
+    free(needle);
+    if (step != SQLITE_DONE) {
+        volumes_free(vols, n);
+        return db_fail(ix, e, "library");
+    }
+    out->volumes = vols;
+    out->n = n;
+    out->total = total;
+    if (ix->nroots > 0) {
+        out->roots = calloc(ix->nroots, sizeof *out->roots);
+        out->root_full = calloc(ix->nroots, sizeof *out->root_full);
+        if (!out->roots || !out->root_full) {
+            library_free(out);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        for (uint32_t i = 0; i < ix->nroots; i++) {
+            out->roots[i] = xstrdup(ix->roots[i] ? ix->roots[i] : "");
+            if (!out->roots[i]) {
+                library_free(out);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            out->root_full[i] = ix->root_full[i];
+            out->nroots++;
+        }
+    }
+    return 0;
+}
+
+int index_catalog_put(Index *ix, const Volume *rec, Err *e) {
+    if (!ix || !rec || !rec->path || !rec->path[0]) {
+        err_set(e, "that file is not in the library");
+        return -1;
+    }
+    char *path = field_copy(rec->path, 4096, 0, e);
+    if (!path) {
+        return -1;
+    }
+    char *field[CF_N];
+    memset(field, 0, sizeof field);
+    for (int i = 0; i < CF_N; i++) {
+        int notes = i == CF_DESCRIPTION || i == CF_RIGHTS;
+        field[i] = field_copy(vol_field(rec, i), notes ? 4000 : 400, notes, e);
+        if (!field[i]) {
+            for (int j = 0; j < i; j++) {
+                free(field[j]);
+            }
+            free(path);
+            return -1;
+        }
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    if (write_db(ix, &db, 0, e) != 0) {
+        goto fail_fields;
+    }
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        goto fail_fields;
+    }
+    began = 1;
+    if (saved_exec(db, CATALOG_SQL, e) != 0) {
+        goto fail;
+    }
+    int64_t id = 0;
+    if (doc_by_path(ix, db, path, &id, e) != 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO catalog(path, title, creator, date, language, type, subject, coverage,"
+                           " source, description, publisher, contributor, format, identifier, relation, rights)"
+                           " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                           " ON CONFLICT(path) DO UPDATE SET"
+                           " title=excluded.title, creator=excluded.creator, date=excluded.date,"
+                           " language=excluded.language, type=excluded.type, subject=excluded.subject,"
+                           " coverage=excluded.coverage, source=excluded.source, description=excluded.description,"
+                           " publisher=excluded.publisher, contributor=excluded.contributor, format=excluded.format,"
+                           " identifier=excluded.identifier, relation=excluded.relation, rights=excluded.rights",
+                           -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    for (int i = 0; i < CF_N; i++) {
+        sqlite3_bind_text(st, i + 2, field[i], -1, SQLITE_TRANSIENT);
+    }
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (field[CF_TITLE][0]) {
+        if (sqlite3_prepare_v2(db, "UPDATE docs SET title=? WHERE docid=?", -1, &st, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_bind_text(st, 1, field[CF_TITLE], -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 2, id);
+        if (sqlite3_step(st) != SQLITE_DONE) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        goto fail_fields;
+    }
+    sqlite3_close(db);
+    free(path);
+    for (int i = 0; i < CF_N; i++) {
+        free(field[i]);
+    }
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+fail_fields:
+    free(path);
+    for (int i = 0; i < CF_N; i++) {
+        free(field[i]);
+    }
+    return -1;
+}
+
+int index_library_drop(Index *ix, const char *path, Err *e) {
+    if (!ix || !path || !path[0]) {
+        err_set(e, "that file is not in the library");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int began = 0;
+    if (write_db(ix, &db, 1, e) != 0) {
+        return -1;
+    }
+    if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(db);
+        return -1;
+    }
+    began = 1;
+    int64_t id = 0;
+    if (doc_by_path(ix, db, path, &id, e) != 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM fts WHERE docid=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_int64(st, 1, id);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_prepare_v2(db, "DELETE FROM docs WHERE docid=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_int64(st, 1, id);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    int has = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog'", -1, &st, NULL) !=
+        SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    has = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    st = NULL;
+    if (has) {
+        if (sqlite3_prepare_v2(db, "DELETE FROM catalog WHERE path=?", -1, &st, NULL) != SQLITE_OK) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) != SQLITE_DONE) {
+            saved_fail(db, e);
+            goto fail;
+        }
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (began) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    sqlite3_close(db);
+    return -1;
 }

@@ -87,7 +87,7 @@
     clip: rect(0, 0, 0, 0);
     border: 0;
   }
-  input {
+  input, textarea {
     width: 100%;
     font: inherit;
     font-size: 1.15rem;
@@ -97,7 +97,7 @@
     background: var(--paper);
     color: inherit;
   }
-  input:focus {
+  input:focus, textarea:focus {
     outline: 2px solid var(--focus);
     outline-offset: 1px;
     border-color: transparent;
@@ -304,13 +304,84 @@
   .toc button.lv2 { padding-left: 0.9rem; }
   .toc button.lv3 { padding-left: 1.8rem; }
   .toc button:hover { background: #efe8dc; }
+  #index {
+    margin: 0 0 0.7rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #index.error { color: #8a2a1a; white-space: normal; }
+  .modes {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    gap: 0.9rem;
+    background: var(--bg);
+    margin: 0 0 0.85rem;
+    padding: 0.1rem 0 0.45rem;
+  }
+  .modes button { color: var(--muted); font-size: 0.95rem; }
+  .modes button.on { color: var(--ink); box-shadow: inset 0 -2px 0 var(--focus); }
+  #search-view[hidden], #library-view[hidden] { display: none; }
+  .lib-add {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem 0.75rem;
+    align-items: center;
+    margin-top: 0.7rem;
+  }
+  .lib-add input { flex: 1 1 12rem; font-size: 1rem; padding: 0.55rem 0.75rem; }
+  .lib-add button, .lib-actions button { color: var(--focus); font-size: 0.9rem; }
+  .lib-add button:hover, .lib-actions button:hover { text-decoration: underline; }
+  #lib-filter { margin-top: 0.7rem; font-size: 1rem; padding: 0.55rem 0.75rem; }
+  .lib-status { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
+  .lib-root, .lib-meta, .lib-path {
+    margin: 0.12rem 0 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+  .lib-path, .lib-root {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lib-row { margin-top: 1.45rem; }
+  .lib-title {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.2rem;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+  .lib-title:hover { background: #efe8dc; }
+  .lib-actions { display: flex; flex-wrap: wrap; gap: 0.35rem 0.85rem; align-items: baseline; margin-top: 0.15rem; }
+  .lib-ask { flex: 1 0 100%; margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
+  #lib-edit { margin-top: 0.9rem; }
+  #lib-edit label {
+    display: block;
+    margin: 0.65rem 0 0.2rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+  #lib-edit input, #lib-edit textarea {
+    font-size: 1rem;
+    padding: 0.45rem 0.7rem;
+  }
+  #lib-edit textarea { min-height: 4.5rem; resize: vertical; }
 </style>
 </head>
 <body>
   <div class="wrap" id="wrap">
     <div id="search-col">
+    <p id="index"></p>
+    <div class="modes">
+      <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
+      <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
+    </div>
+    <div id="search-view">
     <header id="search-head">
-      <p id="index"></p>
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
         <input id="also" class="also" type="text" placeholder="Also" aria-label="Also containing" autocomplete="off" spellcheck="false">
@@ -323,6 +394,25 @@
       <p class="err" id="err" hidden></p>
     </header>
     <main id="results"></main>
+    </div>
+    <div id="library-view" hidden>
+      <p class="help">Title, creator, and the other Dublin Core elements. They describe the volume. The text stays in the file.</p>
+      <form id="lib-add-form" class="lib-add">
+        <input id="lib-path" type="text" placeholder="Folder or file" aria-label="Folder or file" autocomplete="off" spellcheck="false">
+        <button type="submit">Add</button>
+        <button type="button" id="lib-folder">Folder</button>
+        <button type="button" id="lib-file">File</button>
+      </form>
+      <input id="lib-filter" type="text" placeholder="Title, creator, subject, or path" aria-label="Filter the library" autocomplete="off" spellcheck="false">
+      <div id="lib-roots"></div>
+      <p class="lib-status" id="lib-status"></p>
+      <p class="count" id="lib-count"></p>
+      <p class="err" id="lib-err" hidden></p>
+      <form id="lib-edit" hidden>
+        <p class="lib-path" id="lib-edit-path"></p>
+      </form>
+      <div id="lib-rows"></div>
+    </div>
     </div>
     <div id="reader-col" hidden>
       <div class="tabs" id="tabs"></div>
@@ -343,6 +433,20 @@ const tabStrip = document.getElementById("tabs");
 const panes = document.getElementById("panes");
 const indexLine = document.getElementById("index");
 const savedRow = document.getElementById("saved");
+const modeSearch = document.getElementById("mode-search");
+const modeLibrary = document.getElementById("mode-library");
+const searchView = document.getElementById("search-view");
+const libraryView = document.getElementById("library-view");
+const libPath = document.getElementById("lib-path");
+const libFilter = document.getElementById("lib-filter");
+const libRoots = document.getElementById("lib-roots");
+const libStatus = document.getElementById("lib-status");
+const libCount = document.getElementById("lib-count");
+const libErr = document.getElementById("lib-err");
+const libEdit = document.getElementById("lib-edit");
+const libEditPath = document.getElementById("lib-edit-path");
+const libRows = document.getElementById("lib-rows");
+const libAddForm = document.getElementById("lib-add-form");
 let seq = 0;
 let savedSeq = 0;
 let alertSeq = 0;
@@ -1470,6 +1574,378 @@ async function loadInfo() {
   }
 }
 
+const LIB_FIELDS = [
+  ["title", "Title", false],
+  ["creator", "Creator", false],
+  ["date", "Date", false],
+  ["language", "Language", false],
+  ["type", "Type", false],
+  ["subject", "Subject", false],
+  ["coverage", "Coverage", false],
+  ["source", "Source", false],
+  ["description", "Description", true],
+  ["publisher", "Publisher", false],
+  ["contributor", "Contributor", false],
+  ["format", "Format", false],
+  ["identifier", "Identifier", false],
+  ["relation", "Relation", false],
+  ["rights", "Rights", true]
+];
+let groveView = "search";
+let editing = "";
+let shelfData = null;
+let shelfSeq = 0;
+let listSeq = 0;
+let jobWatch = 0;
+let filterTimer = 0;
+
+function showLibError(message) {
+  libErr.hidden = !message;
+  libErr.textContent = message || "";
+}
+
+function fieldValue(key) {
+  const el = document.getElementById("lib-f-" + key);
+  return el ? el.value : "";
+}
+
+function buildEditor() {
+  LIB_FIELDS.forEach(function (row) {
+    const label = document.createElement("label");
+    label.htmlFor = "lib-f-" + row[0];
+    label.textContent = row[1];
+    const input = document.createElement(row[2] ? "textarea" : "input");
+    input.id = "lib-f-" + row[0];
+    if (!row[2]) input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    libEdit.append(label, input);
+  });
+  const actions = document.createElement("div");
+  actions.className = "lib-actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", closeEditor);
+  actions.append(save, cancel);
+  libEdit.append(actions);
+}
+
+function closeEditor() {
+  editing = "";
+  libEdit.hidden = true;
+}
+
+function openEditor(vol) {
+  editing = vol.path;
+  libEdit.hidden = false;
+  libEditPath.textContent = vol.path;
+  libEditPath.title = vol.path;
+  LIB_FIELDS.forEach(function (row) {
+    const el = document.getElementById("lib-f-" + row[0]);
+    if (el) el.value = vol[row[0]] || "";
+  });
+  const title = document.getElementById("lib-f-title");
+  if (title) title.focus();
+  libEdit.scrollIntoView({ block: "nearest" });
+}
+
+function metaLine(vol) {
+  return ["creator", "type", "language", "subject"].map(function (key) {
+    return vol[key] || "";
+  }).filter(function (s) { return s; }).join(" · ");
+}
+
+function countLineLib(data) {
+  const total = data.total || 0;
+  const shown = data.shown || 0;
+  if (!total) return "No volumes";
+  if (shown < total) return shown + " of " + total;
+  return total + (total === 1 ? " volume" : " volumes");
+}
+
+function drawRoots(roots) {
+  libRoots.replaceChildren();
+  (roots || []).forEach(function (root) {
+    const p = document.createElement("p");
+    p.className = "lib-root";
+    p.textContent = root.path + (root.full ? "" : " · one file");
+    p.title = root.path || "";
+    libRoots.append(p);
+  });
+}
+
+function askRemove(actions, vol) {
+  actions.replaceChildren();
+  const ask = document.createElement("p");
+  ask.className = "lib-ask";
+  ask.textContent = "Take this volume off the shelf? The file stays on disk. Indexing its folder puts it back.";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.textContent = "Remove";
+  yes.addEventListener("click", function () { dropVolume(vol.path); });
+  const no = document.createElement("button");
+  no.type = "button";
+  no.textContent = "Cancel";
+  no.addEventListener("click", function () {
+    if (shelfData) drawLibrary(shelfData);
+  });
+  actions.append(ask, yes, no);
+}
+
+function drawLibrary(data) {
+  shelfData = data;
+  showLibError("");
+  drawRoots(data.roots);
+  libCount.textContent = countLineLib(data);
+  libRows.replaceChildren();
+  (data.volumes || []).forEach(function (vol) {
+    const row = document.createElement("article");
+    row.className = "lib-row";
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "lib-title";
+    title.textContent = vol.title || vol.path || "";
+    title.addEventListener("click", function () { openTab(vol.path, 0, ""); });
+    const meta = document.createElement("p");
+    meta.className = "lib-meta";
+    meta.textContent = metaLine(vol);
+    const path = document.createElement("p");
+    path.className = "lib-path";
+    path.textContent = vol.path || "";
+    path.title = vol.path || "";
+    const actions = document.createElement("div");
+    actions.className = "lib-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", function () { openTab(vol.path, 0, ""); });
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", function () { openEditor(vol); });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", function () { askRemove(actions, vol); });
+    actions.append(open, edit, remove);
+    if (!meta.textContent) meta.hidden = true;
+    row.append(title, meta, path, actions);
+    libRows.append(row);
+  });
+}
+
+async function loadLibrary() {
+  const id = ++listSeq;
+  try {
+    const raw = await grove_library(libFilter.value || "");
+    if (id !== listSeq || groveView !== "library") return;
+    const data = JSON.parse(raw);
+    if (data.error) {
+      if (groveView === "library" && data.error.indexOf("Preparing") === 0) {
+        ensureShelf();
+        return;
+      }
+      showLibError(data.error);
+      return;
+    }
+    drawLibrary(data);
+  } catch (e) {
+    if (id === listSeq) showLibError("Could not read the library");
+  }
+}
+
+function jobLine(job) {
+  return "indexed " + (job.indexed || 0) + ", unchanged " + (job.unchanged || 0) +
+    ", removed " + (job.removed || 0) + ", skipped " + (job.skipped || 0);
+}
+
+function watchJob() {
+  const id = ++jobWatch;
+  async function step() {
+    if (id !== jobWatch) return;
+    try {
+      const raw = await grove_job();
+      if (id !== jobWatch) return;
+      const job = JSON.parse(raw);
+      if (job.error && !job.running && job.ok === 0 && job.kind) {
+        if (groveView === "library") {
+          libStatus.textContent = "";
+          showLibError(job.error);
+        }
+        return;
+      }
+      if (job.running) {
+        if (groveView === "library") {
+          libStatus.textContent = job.kind === 2 ? "Adding files…" : "Preparing the shelf… Search waits until this finishes.";
+        }
+        setTimeout(step, 400);
+        return;
+      }
+      if (groveView === "library") {
+        libStatus.textContent = job.kind === 2 ? jobLine(job) : "";
+      }
+      if (job.kind) {
+        loadInfo();
+        loadLibrary();
+      }
+    } catch (e) {
+      if (id === jobWatch && groveView === "library") showLibError("Could not update the library");
+    }
+  }
+  step();
+}
+
+async function ensureShelf() {
+  const id = ++shelfSeq;
+  try {
+    const raw = await grove_shelf();
+    if (id !== shelfSeq || groveView !== "library") return;
+    const data = JSON.parse(raw);
+    if (data.ready) {
+      libStatus.textContent = "";
+      loadLibrary();
+      return;
+    }
+    if (data.preparing) {
+      libStatus.textContent = "Preparing the shelf… Search waits until this finishes.";
+      libCount.textContent = "";
+      libRows.replaceChildren();
+      watchJob();
+      return;
+    }
+    showLibError(data.error || "Could not open the library");
+  } catch (e) {
+    if (id === shelfSeq) showLibError("Could not open the library");
+  }
+}
+
+function setView(name) {
+  groveView = name === "library" ? "library" : "search";
+  searchView.hidden = groveView !== "search";
+  libraryView.hidden = groveView !== "library";
+  modeSearch.classList.toggle("on", groveView === "search");
+  modeLibrary.classList.toggle("on", groveView === "library");
+  modeSearch.setAttribute("aria-pressed", groveView === "search" ? "true" : "false");
+  modeLibrary.setAttribute("aria-pressed", groveView === "library" ? "true" : "false");
+  try { sessionStorage.setItem("grove.view", groveView); } catch (e) {}
+  if (groveView === "library") ensureShelf();
+  else q.focus();
+}
+
+async function addPath(path) {
+  showLibError("");
+  if (!path) {
+    showLibError("Type a folder or a file");
+    return;
+  }
+  try {
+    const raw = await grove_add(path);
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showLibError(data.error);
+      return;
+    }
+    libStatus.textContent = "Adding files…";
+    watchJob();
+  } catch (e) {
+    showLibError("Could not add that path");
+  }
+}
+
+async function pickPath(kind) {
+  showLibError("");
+  try {
+    const raw = await grove_pick(kind);
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showLibError(data.error);
+      return;
+    }
+    if (!data.path) return;
+    libPath.value = data.path;
+    addPath(data.path);
+  } catch (e) {
+    showLibError("Could not open the chooser");
+  }
+}
+
+async function dropVolume(path) {
+  showLibError("");
+  try {
+    const raw = await grove_drop(path);
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showLibError(data.error);
+      return;
+    }
+    if (editing === path) closeEditor();
+    loadLibrary();
+  } catch (e) {
+    showLibError("Could not remove the volume");
+  }
+}
+
+async function saveRecord(ev) {
+  ev.preventDefault();
+  const path = editing;
+  if (!path) return;
+  showLibError("");
+  try {
+    const raw = await grove_catalog(
+      path,
+      fieldValue("title"),
+      fieldValue("creator"),
+      fieldValue("date"),
+      fieldValue("language"),
+      fieldValue("type"),
+      fieldValue("subject"),
+      fieldValue("coverage"),
+      fieldValue("source"),
+      fieldValue("description"),
+      fieldValue("publisher"),
+      fieldValue("contributor"),
+      fieldValue("format"),
+      fieldValue("identifier"),
+      fieldValue("relation"),
+      fieldValue("rights")
+    );
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showLibError(data.error);
+      return;
+    }
+    closeEditor();
+    loadLibrary();
+  } catch (e) {
+    showLibError("Could not save the record");
+  }
+}
+
+function restoreView() {
+  let name = "";
+  try { name = sessionStorage.getItem("grove.view") || ""; } catch (e) { return; }
+  if (name === "library" && typeof grove_shelf === "function") setView("library");
+}
+
+modeSearch.addEventListener("click", function () { setView("search"); });
+modeLibrary.addEventListener("click", function () { setView("library"); });
+libAddForm.addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  addPath((libPath.value || "").trim());
+});
+document.getElementById("lib-folder").addEventListener("click", function () { pickPath("dir"); });
+document.getElementById("lib-file").addEventListener("click", function () { pickPath("file"); });
+libFilter.addEventListener("input", function () {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(loadLibrary, 200);
+});
+libEdit.addEventListener("submit", saveRecord);
+buildEditor();
+
 function whenReady(fn) {
   if (typeof grove_info === "function") fn();
   else setTimeout(function () { whenReady(fn); }, 40);
@@ -1494,6 +1970,7 @@ whenReady(function () {
   loadNotes();
   loadAlerts();
   restoreQuery();
+  restoreView();
 });
 </script>
 </body>

@@ -39,8 +39,8 @@ $(MOD): main.c page.h mod.h
 	mkdir -p $(LIVE_DIR)
 	$(CC) $(CFLAGS) -fPIC -shared -DGROVE_UI_MODULE $(INCLUDES) -o $@ main.c -pthread
 
-$(ROOT)/grove-ui: host.c mod.h $(WEBUI_LIB) $(CORE) $(SQLITE_OBJ)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ host.c $(CORE) $(SQLITE_OBJ) \
+$(ROOT)/grove-ui: host.c mod.h $(WEBUI_LIB) $(CORE) $(SQLITE_OBJ) $(ROOT)/src/main.c $(ROOT)/src/cli.h
+	$(CC) $(CFLAGS) -DGROVE_EMBED $(INCLUDES) -o $@ host.c $(ROOT)/src/main.c $(CORE) $(SQLITE_OBJ) \
 		-Wl,--whole-archive $(WEBUI_LIB) -Wl,--no-whole-archive \
 		$(LIBS) -Wl,--export-dynamic $(LDFLAGS)
 

@@ -1,3 +1,4 @@
+#include "cli.h"
 #include "index.h"
 #include "mod.h"
 #include "webui.h"
@@ -18,15 +19,26 @@ static void usage(FILE *out) {
     fputs(
         "grove-ui — search window for a grove index\n"
         "\n"
-        "usage: grove-ui [--index DIR] [--port N]\n"
+        "usage: grove-ui [--index DIR] [--port N] [COMMAND ...]\n"
         "\n"
-        "Opens a browser window on the grove index. The query language matches\n"
-        "grove search. A click on the file name opens it with the system.\n"
+        "With no command, opens a browser window on the grove index. The\n"
+        "query language matches grove search. Library adds a folder or a\n"
+        "file and keeps a record for each volume.\n"
+        "A click on the file name opens it with the system.\n"
         "A click on a passage opens that place when the reader can take a\n"
         "line, a PDF page, or a found line. Otherwise it opens the file.\n"
         "Save remembers the current query on this index.\n"
         "Watch remembers that query and the files that match it.\n"
         "Note keeps text on one passage.\n"
+        "\n"
+        "A command runs in this same program and leaves an open window\n"
+        "alone. Both use the one index:\n"
+        "\n"
+        "  grove-ui [--index DIR] status\n"
+        "  grove-ui [--index DIR] index PATH...\n"
+        "  grove-ui [--index DIR] search QUERY...\n"
+        "\n"
+        "grove-ui help prints the command manual.\n"
         "\n"
         "The index directory is $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
         "or ~/.local/share/grove.\n"
@@ -345,7 +357,148 @@ static void *c_watch(void *arg) {
     return NULL;
 }
 
+static int wants_cli(int argc, char **argv) {
+    int version = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--index") == 0 || strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "--smoke") == 0) {
+            if (i + 1 >= argc) {
+                return 0;
+            }
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--quiet") == 0) {
+            continue;
+        }
+        if (strcmp(argv[i], "--version") == 0) {
+            version = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            continue;
+        }
+        if (argv[i][0] != '-') {
+            return 1;
+        }
+    }
+    return version;
+}
+
+static pthread_mutex_t job_mu = PTHREAD_MUTEX_INITIALIZER;
+static int job_running;
+static int job_kind;
+static int job_ok;
+static IndexStats job_st;
+static char job_err[768];
+
+typedef struct JobArg {
+    char *dir;
+    char *path;
+} JobArg;
+
+static void *job_main(void *arg) {
+    JobArg *a = arg;
+    Err e;
+    err_clear(&e);
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    int rc = -1;
+    Index *w = index_open(a->dir, 1, &e);
+    if (w) {
+        if (a->path) {
+            rc = index_add(w, a->path, &st, &e);
+        } else {
+            rc = index_shelf_build(w, &e);
+        }
+        index_close(w);
+    }
+    pthread_mutex_lock(&job_mu);
+    job_running = 0;
+    job_ok = rc == 0;
+    job_st = st;
+    snprintf(job_err, sizeof job_err, "%s", rc == 0 ? "" : (e.msg[0] ? e.msg : "could not update the library"));
+    pthread_mutex_unlock(&job_mu);
+    free(a->dir);
+    free(a->path);
+    free(a);
+    return NULL;
+}
+
+static int job_start(const char *dir, const char *path) {
+    if (!dir || !dir[0] || (path && !path[0])) {
+        return -1;
+    }
+    JobArg *a = calloc(1, sizeof *a);
+    if (!a) {
+        return -1;
+    }
+    a->dir = xstrdup(dir);
+    a->path = path ? xstrdup(path) : NULL;
+    if (!a->dir || (path && !a->path)) {
+        free(a->dir);
+        free(a->path);
+        free(a);
+        return -1;
+    }
+    pthread_mutex_lock(&job_mu);
+    if (job_running) {
+        pthread_mutex_unlock(&job_mu);
+        free(a->dir);
+        free(a->path);
+        free(a);
+        return -1;
+    }
+    job_running = 1;
+    job_kind = path ? 2 : 1;
+    job_ok = 0;
+    job_err[0] = 0;
+    memset(&job_st, 0, sizeof job_st);
+    pthread_mutex_unlock(&job_mu);
+    pthread_t th;
+    if (pthread_create(&th, NULL, job_main, a) != 0) {
+        pthread_mutex_lock(&job_mu);
+        job_running = 0;
+        job_ok = 0;
+        snprintf(job_err, sizeof job_err, "could not start");
+        pthread_mutex_unlock(&job_mu);
+        free(a->dir);
+        free(a->path);
+        free(a);
+        return -1;
+    }
+    pthread_detach(th);
+    return 0;
+}
+
+int grove_host_prepare(const char *index_dir) {
+    return job_start(index_dir, NULL);
+}
+
+int grove_host_import(const char *index_dir, const char *path) {
+    return job_start(index_dir, path);
+}
+
+void grove_host_job(GroveJob *out) {
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof *out);
+    pthread_mutex_lock(&job_mu);
+    out->running = job_running;
+    out->kind = job_kind;
+    out->ok = job_ok;
+    out->indexed = job_st.indexed;
+    out->unchanged = job_st.unchanged;
+    out->removed = job_st.removed;
+    out->skipped = job_st.skipped;
+    snprintf(out->error, sizeof out->error, "%s", job_err);
+    pthread_mutex_unlock(&job_mu);
+}
+
 int main(int argc, char **argv) {
+    if (wants_cli(argc, argv)) {
+        return grove_cli(argc, argv);
+    }
     const char *index_arg = NULL;
     size_t port = 0;
     const char *smoke = NULL;

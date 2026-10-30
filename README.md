@@ -42,7 +42,7 @@ grove search --at /old/notes=/new/notes portable
 
 `--rebind` rewrites a stored root. `--at` only changes paths printed by that search. With one root, `--at /new/notes` is enough. An `=` inside a path cannot be used as the separator.
 
-`grove compact` rebuilds the full-text index and vacuums the database. `grove status` prints roots, document count, and the size of the stored text.
+`grove compact` rebuilds the full-text index and vacuums the database. `grove status` prints roots, document count, and the size of the stored text. `grove ui` opens the window on this index. `grove-ui` with a command is the same tool, and that command can run while the window is open.
 
 `grove save` remembers a query in that index. `grove saved` lists them, newest first. `grove forget` drops one. The same list is what the window shows. An older index gains the list on the first save. It does not need to be indexed again.
 
@@ -55,9 +55,14 @@ grove search --at /old/notes=/new/notes portable
 ```sh
 make ui
 ./grove-ui
+grove ui
 ```
 
-`grove-ui` is a second program. It opens the installed browser on this same index and the same query language. A second line ANDs another requirement onto the first. Two passages are listed under each file. Show more continues through the rest of that file. A click on the file name opens it with the system. A click on a passage opens that place beside the results, in its own tab: the extracted text of the file, the chapter, and the page when the file recorded one. The matched words are marked. Further passages open as more tabs, and the search stays put. Earlier and later move through that text. The original file is still opened from the reader. `ext:` and `path:` in the query show up as chips; removing a chip searches again. The file types, folders, and months in the whole match sit beside those chips, each with a file count. Choosing one adds that chip. `title:` stays in the query. Save keeps the query that is in the box. Remembered queries sit under the help line. Choosing one searches again, and × forgets it. Note, under a passage, keeps a line of text on that place. × removes it. The passage itself still opens in the reader. Watch, under the help line, keeps that query and the files it matches. A count on a remembered query is how many of those files are new or changed. Choosing the count marks them seen. Unwatch leaves the remembered query.
+`grove ui` opens the window. `grove-ui` with a command is the same tool: `grove-ui status`, `grove-ui index PATH`, and `grove-ui search` do what `grove` does. A command can run while the window is open. Both use the one index.
+
+With no command, the window opens the installed browser on this same index and the same query language. A second line ANDs another requirement onto the first. Two passages are listed under each file. Show more continues through the rest of that file. A click on the file name opens it with the system. A click on a passage opens that place beside the results, in its own tab: the extracted text of the file, the chapter, and the page when the file recorded one. The matched words are marked. Further passages open as more tabs, and the search stays put. Earlier and later move through that text. The original file is still opened from the reader. `ext:` and `path:` in the query show up as chips; removing a chip searches again. The file types, folders, and months in the whole match sit beside those chips, each with a file count. Choosing one adds that chip. `title:` stays in the query. Save keeps the query that is in the box. Remembered queries sit under the help line. Choosing one searches again, and × forgets it. Note, under a passage, keeps a line of text on that place. × removes it. The passage itself still opens in the reader. Watch, under the help line, keeps that query and the files it matches. A count on a remembered query is how many of those files are new or changed. Choosing the count marks them seen. Unwatch leaves the remembered query.
+
+Search and Library sit at the top of the window. Library lists each volume by title, creator, type, subject, language, and path. Add takes a folder or a file, from the path box or from the desktop chooser. The first time Library opens, grove prepares a list of titles and paths; search waits while that finishes. Edit keeps the fifteen Dublin Core elements on the volume. They describe the volume. The text stays in the file. Remove takes the volume off the shelf and leaves the file on disk. Indexing its folder puts it back.
 
 `grove-ui` uses the same compiled-in SQLite and also links WebUI, which needs a browser at runtime. `--index DIR` selects the index, as it does for `grove`. Firefox opens with the profile Grove, stored in `~/.local/share/grove/firefox`, so another program can keep the WebUI profile.
 

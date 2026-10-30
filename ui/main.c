@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <spawn.h>
@@ -123,8 +124,13 @@ static int allow_has(const char *path) {
 }
 
 static void allow_add(const char *path) {
-    if (!path || nallow >= ALLOW_MAX || allow_has(path)) {
+    if (!path || !path[0] || allow_has(path)) {
         return;
+    }
+    if (nallow >= ALLOW_MAX) {
+        free(allow[0]);
+        memmove(allow, allow + 1, (size_t)(nallow - 1) * sizeof *allow);
+        nallow--;
     }
     char *copy = xstrdup(path);
     if (copy) {
@@ -1313,24 +1319,399 @@ static void on_read(webui_event_t *e) {
     } else if (dir_s && dir_s[0] == '1') {
         dir = 1;
     }
-    int allowed = 0;
-    if (path) {
-        pthread_mutex_lock(&mu);
-        allowed = allow_has(path);
-        pthread_mutex_unlock(&mu);
-    }
     char *json = NULL;
     if (!path) {
         json = NULL;
-    } else if (!allowed) {
-        json = json_error("that file is not in these results");
     } else {
         pthread_mutex_lock(&mu);
         json = read_json(path, at, dir);
+        if (json && strncmp(json, "{\"error\":", 9) != 0) {
+            allow_add(path);
+        }
         pthread_mutex_unlock(&mu);
     }
     free(path);
     reply_owned(e, json);
+}
+
+/* A file input in the page does not yield a path, so the chooser is a
+ * desktop dialog. 0 is a path, 1 is cancel, -1 is no chooser. */
+static int dialog_path(char *const argv[], char *out, size_t n, int *cancel) {
+    *cancel = 0;
+    if (!out || n < 2) {
+        return -1;
+    }
+    out[0] = 0;
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return -1;
+    }
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addclose(&fa, fds[1]);
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fds[1]);
+    if (rc != 0) {
+        close(fds[0]);
+        return -1;
+    }
+    size_t got = 0;
+    int extra = 0;
+    int failed = 0;
+    while (got + 1 < n) {
+        ssize_t r = read(fds[0], out + got, n - 1 - got);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            failed = 1;
+            break;
+        }
+        if (r == 0) {
+            break;
+        }
+        got += (size_t)r;
+    }
+    if (!failed && got + 1 >= n) {
+        char dump[256];
+        for (;;) {
+            ssize_t r = read(fds[0], dump, sizeof dump);
+            if (r < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (r == 0) {
+                break;
+            }
+            extra = 1;
+        }
+    }
+    out[got] = 0;
+    close(fds[0]);
+    int st = 0;
+    for (;;) {
+        pid_t w = waitpid(pid, &st, 0);
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        if (w < 0) {
+            return -1;
+        }
+        break;
+    }
+    while (got && (out[got - 1] == '\n' || out[got - 1] == '\r')) {
+        out[--got] = 0;
+    }
+    if (failed || extra || !WIFEXITED(st)) {
+        return -1;
+    }
+    if (WEXITSTATUS(st) == 0 && out[0]) {
+        return 0;
+    }
+    if (WEXITSTATUS(st) == 1) {
+        *cancel = 1;
+        out[0] = 0;
+        return 1;
+    }
+    return -1;
+}
+
+static char *path_json(const char *path) {
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, path ? path : "") != 0 || buf_putc(&b, '}') != 0) {
+        buf_free(&b);
+        return NULL;
+    }
+    return b.data;
+}
+
+static char *pick_json(const char *kind) {
+    int directory = 0;
+    if (kind && strcmp(kind, "dir") == 0) {
+        directory = 1;
+    } else if (!kind || strcmp(kind, "file") != 0) {
+        return json_error("choose a folder or a file");
+    }
+    char out[PATH_MAX + 2];
+    int cancel = 0;
+    int ran = -1;
+    if (on_path("zenity")) {
+        char *title = directory ? "Add a folder" : "Add a file";
+        char *argv[6];
+        int argc = 0;
+        argv[argc++] = "zenity";
+        argv[argc++] = "--file-selection";
+        if (directory) {
+            argv[argc++] = "--directory";
+        }
+        argv[argc++] = "--title";
+        argv[argc++] = title;
+        argv[argc] = NULL;
+        ran = dialog_path(argv, out, sizeof out, &cancel);
+    }
+    if (ran < 0 && on_path("kdialog")) {
+        const char *home = getenv("HOME");
+        if (!home || !home[0]) {
+            home = ".";
+        }
+        char *argv[] = {"kdialog", directory ? "--getexistingdirectory" : "--getopenfilename", (char *)home, NULL};
+        cancel = 0;
+        ran = dialog_path(argv, out, sizeof out, &cancel);
+    }
+    if (ran < 0) {
+        return json_error("Type the path. This desktop has no folder chooser.");
+    }
+    if (cancel || !out[0]) {
+        return xstrdup("{\"path\":\"\"}");
+    }
+    if (strchr(out, '\n') || strchr(out, '\r') || strlen(out) > 4096) {
+        return json_error("that path is not usable");
+    }
+    return path_json(out);
+}
+
+static int jstr(Buf *b, const char *key, const char *val) {
+    if (buf_putc(b, ',') != 0 || buf_putc(b, '"') != 0 || buf_puts(b, key) != 0 || buf_puts(b, "\":") != 0) {
+        return -1;
+    }
+    return jesc(b, val);
+}
+
+static char *library_json(const char *filter) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    if (!index_shelf_ready(ix)) {
+        return json_error("Preparing the shelf…");
+    }
+    Library lib;
+    memset(&lib, 0, sizeof lib);
+    Err e;
+    err_clear(&e);
+    if (index_library_list(ix, filter && filter[0] ? filter : NULL, &lib, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not read the library");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_printf(&b, "{\"total\":%d,\"shown\":%d,\"roots\":[", lib.total, lib.n) != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < lib.nroots; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, lib.roots[i]) != 0 ||
+            buf_printf(&b, ",\"full\":%d}", lib.root_full[i] ? 1 : 0) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "],\"volumes\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < lib.n; i++) {
+        const Volume *v = &lib.volumes[i];
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, v->path) != 0 || jstr(&b, "title", v->title) != 0 ||
+            jstr(&b, "ext", v->ext) != 0 ||
+            buf_printf(&b, ",\"mtime\":%" PRId64 ",\"size\":%" PRId64, v->mtime, v->size) != 0 ||
+            jstr(&b, "creator", v->creator) != 0 || jstr(&b, "date", v->date) != 0 ||
+            jstr(&b, "language", v->language) != 0 || jstr(&b, "type", v->type) != 0 ||
+            jstr(&b, "subject", v->subject) != 0 || jstr(&b, "coverage", v->coverage) != 0 ||
+            jstr(&b, "source", v->source) != 0 || jstr(&b, "description", v->description) != 0 ||
+            jstr(&b, "publisher", v->publisher) != 0 || jstr(&b, "contributor", v->contributor) != 0 ||
+            jstr(&b, "format", v->format) != 0 || jstr(&b, "identifier", v->identifier) != 0 ||
+            jstr(&b, "relation", v->relation) != 0 || jstr(&b, "rights", v->rights) != 0 || buf_putc(&b, '}') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    library_free(&lib);
+    return b.data;
+fail:
+    library_free(&lib);
+    buf_free(&b);
+    return NULL;
+}
+
+static char *job_json(void) {
+    GroveJob job;
+    grove_host_job(&job);
+    Buf b;
+    buf_init(&b);
+    if (buf_printf(&b,
+                   "{\"running\":%d,\"kind\":%d,\"ok\":%d,\"indexed\":%" PRIu32 ",\"unchanged\":%" PRIu32
+                   ",\"removed\":%" PRIu32 ",\"skipped\":%" PRIu32 ",\"error\":",
+                   job.running ? 1 : 0, job.kind, job.ok ? 1 : 0, job.indexed, job.unchanged, job.removed,
+                   job.skipped) != 0 ||
+        jesc(&b, job.error) != 0 || buf_putc(&b, '}') != 0) {
+        buf_free(&b);
+        return NULL;
+    }
+    return b.data;
+}
+
+static const char *arg_at(webui_event_t *e, size_t i) {
+    const char *s = webui_get_string_at(e, i);
+    return s ? s : "";
+}
+
+static void on_library(webui_event_t *e) {
+    const char *in = webui_get_string_at(e, 0);
+    char *filter = xstrdup(in ? in : "");
+    pthread_mutex_lock(&mu);
+    char *json = filter ? library_json(filter) : NULL;
+    pthread_mutex_unlock(&mu);
+    free(filter);
+    reply_owned(e, json);
+}
+
+static void on_catalog(webui_event_t *e) {
+    enum { CAT_N = 16 };
+    char *field[CAT_N];
+    int n = 0;
+    for (size_t i = 0; i < CAT_N; i++) {
+        field[i] = xstrdup(arg_at(e, i));
+        if (!field[i]) {
+            for (int j = 0; j < n; j++) {
+                free(field[j]);
+            }
+            reply(e, "{\"error\":\"out of memory\"}");
+            return;
+        }
+        n++;
+    }
+    Volume rec;
+    memset(&rec, 0, sizeof rec);
+    rec.path = field[0];
+    rec.title = field[1];
+    rec.creator = field[2];
+    rec.date = field[3];
+    rec.language = field[4];
+    rec.type = field[5];
+    rec.subject = field[6];
+    rec.coverage = field[7];
+    rec.source = field[8];
+    rec.description = field[9];
+    rec.publisher = field[10];
+    rec.contributor = field[11];
+    rec.format = field[12];
+    rec.identifier = field[13];
+    rec.relation = field[14];
+    rec.rights = field[15];
+    Err err;
+    err_clear(&err);
+    pthread_mutex_lock(&mu);
+    int rc = ix ? index_catalog_put(ix, &rec, &err) : -1;
+    pthread_mutex_unlock(&mu);
+    for (int i = 0; i < CAT_N; i++) {
+        free(field[i]);
+    }
+    if (!ix) {
+        reply_owned(e, json_error(open_err[0] ? open_err : "no index"));
+        return;
+    }
+    reply_owned(e, rc == 0 ? xstrdup("{\"ok\":true}") : json_error(err.msg[0] ? err.msg : "could not save the record"));
+}
+
+static void on_drop(webui_event_t *e) {
+    const char *in = webui_get_string_at(e, 0);
+    char *path = xstrdup(in ? in : "");
+    if (!path) {
+        reply(e, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    Err err;
+    err_clear(&err);
+    int rc = -1;
+    pthread_mutex_lock(&mu);
+    if (ix) {
+        rc = index_library_drop(ix, path, &err);
+    }
+    pthread_mutex_unlock(&mu);
+    free(path);
+    if (!ix) {
+        reply_owned(e, json_error(open_err[0] ? open_err : "no index"));
+        return;
+    }
+    reply_owned(e, rc == 0 ? xstrdup("{\"ok\":true}") : json_error(err.msg[0] ? err.msg : "could not remove the volume"));
+}
+
+static void on_add(webui_event_t *e) {
+    const char *in = webui_get_string_at(e, 0);
+    if (!in || !in[0]) {
+        reply(e, "{\"error\":\"type a folder or a file\"}");
+        return;
+    }
+    if (strlen(in) > 4096 || strchr(in, '\n') || strchr(in, '\r')) {
+        reply(e, "{\"error\":\"that path is not usable\"}");
+        return;
+    }
+    if (grove_host_import(index_dir, in) != 0) {
+        GroveJob job;
+        grove_host_job(&job);
+        reply(e, job.running ? "{\"error\":\"an import is already running\"}" : "{\"error\":\"could not start\"}");
+        return;
+    }
+    reply(e, "{\"ok\":true}");
+}
+
+static void on_job(webui_event_t *e) {
+    reply_owned(e, job_json());
+}
+
+static void on_pick(webui_event_t *e) {
+    const char *kind = webui_get_string_at(e, 0);
+    reply_owned(e, pick_json(kind));
+}
+
+static void on_shelf(webui_event_t *e) {
+    int ready = 0;
+    pthread_mutex_lock(&mu);
+    if (ix) {
+        ready = index_shelf_ready(ix);
+    }
+    pthread_mutex_unlock(&mu);
+    if (!ix) {
+        reply_owned(e, json_error(open_err[0] ? open_err : "no index"));
+        return;
+    }
+    if (ready) {
+        reply(e, "{\"ready\":true}");
+        return;
+    }
+    if (grove_host_prepare(index_dir) != 0) {
+        GroveJob job;
+        grove_host_job(&job);
+        if (job.running) {
+            reply(e, "{\"ready\":false,\"preparing\":true}");
+            return;
+        }
+        pthread_mutex_lock(&mu);
+        ready = ix && index_shelf_ready(ix);
+        pthread_mutex_unlock(&mu);
+        if (ready) {
+            reply(e, "{\"ready\":true}");
+            return;
+        }
+        reply_owned(e, json_error(job.error[0] ? job.error : "could not prepare the shelf"));
+        return;
+    }
+    reply(e, "{\"ready\":false,\"preparing\":true}");
 }
 
 GUARD(on_search)
@@ -1347,6 +1728,13 @@ GUARD(on_note_drop)
 GUARD(on_alerts)
 GUARD(on_watch)
 GUARD(on_unwatch)
+GUARD(on_library)
+GUARD(on_catalog)
+GUARD(on_drop)
+GUARD(on_add)
+GUARD(on_job)
+GUARD(on_pick)
+GUARD(on_shelf)
 
 void grove_ui_detach(void) {
     pthread_mutex_lock(&call_mu);
@@ -1395,6 +1783,13 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_alerts", on_alerts_guard);
     webui_bind(win, "grove_watch", on_watch_guard);
     webui_bind(win, "grove_unwatch", on_unwatch_guard);
+    webui_bind(win, "grove_library", on_library_guard);
+    webui_bind(win, "grove_catalog", on_catalog_guard);
+    webui_bind(win, "grove_drop", on_drop_guard);
+    webui_bind(win, "grove_add", on_add_guard);
+    webui_bind(win, "grove_job", on_job_guard);
+    webui_bind(win, "grove_pick", on_pick_guard);
+    webui_bind(win, "grove_shelf", on_shelf_guard);
     if (!webui_show(win, live_name ? live_name : page_html)) {
         fprintf(stderr, "grove-ui: could not open a browser window\n");
         return 1;

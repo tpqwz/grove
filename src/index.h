@@ -186,4 +186,54 @@ int index_alert_unwatch(Index *ix, const char *query, Err *e);
 int index_alerts_list(Index *ix, Alert **alerts, int *n, Err *e);
 void index_alerts_free(Alert *alerts, int n);
 
+/* A shelf list reads titles and paths without the stored text. The first
+ * build of that list creates an index on those columns. A volume record is
+ * the Dublin Core elements, kept beside the file. An empty element is unset.
+ * title in the list is the record's title when one was saved, otherwise the
+ * title from the file. At most LIBRARY_SHOW volumes are returned; total is
+ * the whole match. */
+#define LIBRARY_SHOW 300
+
+typedef struct Volume {
+    char *path;
+    char *title;
+    char *ext;
+    int64_t mtime;
+    int64_t size;
+    char *creator;
+    char *date;
+    char *language;
+    char *type;
+    char *subject;
+    char *coverage;
+    char *source;
+    char *description;
+    char *publisher;
+    char *contributor;
+    char *format;
+    char *identifier;
+    char *relation;
+    char *rights;
+} Volume;
+
+typedef struct Library {
+    Volume *volumes;
+    int n;
+    int total;
+    char **roots;
+    uint8_t *root_full;
+    int nroots;
+} Library;
+
+int index_shelf_ready(Index *ix);
+int index_shelf_build(Index *ix, Err *e);
+int index_library_list(Index *ix, const char *filter, Library *out, Err *e);
+void library_free(Library *lib);
+/* rec->path is the volume. The other fields are copied. A title updates the
+ * title search uses. The file on disk is left where it is. */
+int index_catalog_put(Index *ix, const Volume *rec, Err *e);
+/* Drops the volume from the index. The file on disk stays. */
+int index_library_drop(Index *ix, const char *path, Err *e);
+
 #endif
+

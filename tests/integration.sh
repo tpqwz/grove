@@ -323,4 +323,6 @@ test -z "$("$GROVE" --index "$IDX" alerts)"
 test -z "$("$GROVE" --index "$IDX" saved)"
 test -z "$("$GROVE" --index "$IDX" alerts)"
 
+"$GROVE" help | grep -q 'ui \[--port N\]'
+
 echo "integration ok"

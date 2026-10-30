@@ -1,10 +1,13 @@
+#include "cli.h"
 #include "index.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define GROVE_VERSION "0.1.0-alpha"
 
@@ -50,6 +53,9 @@ static void usage(FILE *out) {
         "  alerts\n"
         "      List watched queries that have new or changed files.\n"
         "  status\n"
+        "  ui [--port N]\n"
+        "      Open the window on this index. grove-ui with a command is the\n"
+        "      same tool, and it can run while the window is open.\n"
         "  help\n"
         "\n"
         "The index is grove.db in $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
@@ -493,6 +499,70 @@ static int cmd_note_drop(Index *ix, int argc, char **argv) {
     return index_note_drop(ix, argv[0], off, &e) == 0 ? 0 : fail(&e);
 }
 
+int grove_is_command(const char *s) {
+    static const char *names[] = {"index", "search",  "purge",      "compact", "status", "saved", "save",
+                                  "forget", "notes",  "note",       "forget-note", "watch", "unwatch", "alerts",
+                                  "help",   NULL};
+    if (!s) {
+        return 0;
+    }
+    for (int i = 0; names[i]; i++) {
+        if (strcmp(s, names[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int launch_ui(const char *index_dir, int argc, char **argv) {
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0 || (size_t)n >= sizeof exe) {
+        fprintf(stderr, "grove: cannot find this program\n");
+        return 1;
+    }
+    exe[n] = 0;
+    char *slash = strrchr(exe, '/');
+    if (!slash) {
+        fprintf(stderr, "grove: cannot find this program\n");
+        return 1;
+    }
+    const char *leaf = "grove-ui";
+    size_t room = sizeof exe - (size_t)(slash + 1 - exe);
+    if (strlen(leaf) + 1 > room) {
+        fprintf(stderr, "grove: cannot open the window\n");
+        return 1;
+    }
+    memcpy(slash + 1, leaf, strlen(leaf) + 1);
+    if (access(exe, X_OK) != 0) {
+        fprintf(stderr, "grove: the window program is not beside this one (%s)\n", exe);
+        return 1;
+    }
+    if (argc < 0) {
+        return 1;
+    }
+    size_t narg = 0;
+    if (size_add((size_t)argc, 4, &narg) != 0) {
+        fprintf(stderr, "grove: out of memory\n");
+        return 1;
+    }
+    char **av = calloc(narg, sizeof *av);
+    if (!av) {
+        fprintf(stderr, "grove: out of memory\n");
+        return 1;
+    }
+    av[0] = exe;
+    av[1] = "--index";
+    av[2] = (char *)index_dir;
+    for (int i = 0; i < argc; i++) {
+        av[3 + i] = argv[i];
+    }
+    execv(exe, av);
+    fprintf(stderr, "grove: cannot open the window: %s\n", strerror(errno));
+    free(av);
+    return 1;
+}
+
 static int cmd_status(Index *ix) {
     Err e;
     err_clear(&e);
@@ -511,7 +581,7 @@ static int cmd_status(Index *ix) {
     return 0;
 }
 
-int main(int argc, char **argv) {
+int grove_cli(int argc, char **argv) {
     const char *index_arg = NULL;
     int quiet = 0;
     int i = 1;
@@ -560,6 +630,11 @@ int main(int argc, char **argv) {
     if (!dir) {
         fprintf(stderr, "grove: out of memory\n");
         return 1;
+    }
+    if (strcmp(cmd, "ui") == 0) {
+        int rc = launch_ui(dir, argc - i, argv + i);
+        free(owned);
+        return rc;
     }
     int writable = strcmp(cmd, "search") != 0 && strcmp(cmd, "status") != 0 && strcmp(cmd, "saved") != 0 &&
                    strcmp(cmd, "notes") != 0 && strcmp(cmd, "alerts") != 0;
@@ -621,3 +696,9 @@ int main(int argc, char **argv) {
     free(owned);
     return rc;
 }
+
+#ifndef GROVE_EMBED
+int main(int argc, char **argv) {
+    return grove_cli(argc, argv);
+}
+#endif

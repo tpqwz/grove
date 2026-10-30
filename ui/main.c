@@ -3,6 +3,7 @@
 #include "webui.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <spawn.h>
@@ -560,34 +561,42 @@ static int is_trim_space(unsigned char c) {
  * Extraction drops CR, keeps at most two newlines in a row, and trims
  * the start. Returns 0 when the file cannot be read. */
 static int plain_line(const char *path, uint32_t at) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
         return 0;
     }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        st.st_size > 32L * 1024L * 1024L) {
+        close(fd);
         return 0;
     }
-    long sz = ftell(f);
-    if (sz < 0 || sz > 32L * 1024L * 1024L) {
-        fclose(f);
-        return 0;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return 0;
-    }
-    unsigned char *b = malloc((size_t)sz + 1);
+    size_t sz = (size_t)st.st_size;
+    unsigned char *b = malloc(sz + 1);
     if (!b) {
-        fclose(f);
+        close(fd);
         return 0;
     }
-    if (sz && fread(b, 1, (size_t)sz, f) != (size_t)sz) {
+    size_t got = 0;
+    while (got < sz) {
+        ssize_t r = read(fd, b + got, sz - got);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(b);
+            close(fd);
+            return 0;
+        }
+        if (r == 0) {
+            break;
+        }
+        got += (size_t)r;
+    }
+    if (close(fd) != 0 || got != sz) {
         free(b);
-        fclose(f);
         return 0;
     }
-    fclose(f);
     int nl = 0;
     int in_lead = 1;
     int found = 0;
@@ -884,17 +893,19 @@ static void on_open(webui_event_t *e) {
     const char *page_s = nargs >= 3 ? webui_get_string_at(e, 2) : "";
     const char *needle_s = nargs >= 4 ? webui_get_string_at(e, 3) : "";
     if (at_s && at_s[0]) {
+        errno = 0;
         char *end = NULL;
         unsigned long long v = strtoull(at_s, &end, 10);
-        if (end && *end == 0 && v <= UINT32_MAX) {
+        if (end && end != at_s && *end == 0 && errno == 0 && v <= UINT32_MAX) {
             at = (uint32_t)v;
             has_at = 1;
         }
     }
     if (page_s && page_s[0]) {
+        errno = 0;
         char *end = NULL;
         unsigned long v = strtoul(page_s, &end, 10);
-        if (end && *end == 0 && v > 0 && v < 1000000UL) {
+        if (end && end != page_s && *end == 0 && errno == 0 && v > 0 && v < 1000000UL) {
             page = (int)v;
         }
     }
@@ -1290,9 +1301,10 @@ static void on_read(webui_event_t *e) {
     uint32_t at = 0;
     int dir = 0;
     if (at_s && at_s[0]) {
+        errno = 0;
         char *end = NULL;
         unsigned long long v = strtoull(at_s, &end, 10);
-        if (end && *end == 0 && v <= UINT32_MAX) {
+        if (end && end != at_s && *end == 0 && errno == 0 && v <= UINT32_MAX) {
             at = (uint32_t)v;
         }
     }

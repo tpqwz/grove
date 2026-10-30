@@ -367,9 +367,10 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "grove-ui: --port needs a number\n");
                 return 1;
             }
+            errno = 0;
             char *end = NULL;
             unsigned long v = strtoul(argv[++i], &end, 10);
-            if (!end || *end || v < 1 || v > 65535) {
+            if (!end || end == argv[i] || *end || errno != 0 || v < 1 || v > 65535) {
                 fprintf(stderr, "grove-ui: --port must be from 1 to 65535\n");
                 return 1;
             }

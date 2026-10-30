@@ -1,5 +1,6 @@
 #include "extract.h"
 #include "index.h"
+#include "pdf.h"
 #include "text.h"
 #include "zip.h"
 
@@ -2123,8 +2124,130 @@ done:
     rm_rf(root);
 }
 
+static void test_cert(void) {
+    Err e;
+    err_clear(&e);
+    const char *body = "[(Hello) -120 (World)] TJ\n";
+    char kern[256];
+    int kn = snprintf(kern, sizeof kern,
+                      "%%PDF-1.4\n1 0 obj\n<< /Length %zu >>\nstream\n%s\nendstream\nendobj\n",
+                      strlen(body), body);
+    CHECK(kn > 0 && (size_t)kn < sizeof kern);
+    Buf text;
+    buf_init(&text);
+    char *title = NULL;
+    CHECK(pdf_extract((const unsigned char *)kern, (size_t)kn, &text, &title, &e) == 0);
+    CHECK(text.data && strstr(text.data, "Hello World"));
+    buf_free(&text);
+    free(title);
+
+    char digits[48];
+    memset(digits, '9', 40);
+    digits[40] = 0;
+    char big[512];
+    int bn = snprintf(big, sizeof big,
+                      "%%PDF-1.4\n1 0 obj\n<< /Length %s >>\nstream\n(kelpbound) Tj\nendstream\nendobj\n",
+                      digits);
+    CHECK(bn > 0 && (size_t)bn < sizeof big);
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    CHECK(pdf_extract((const unsigned char *)big, (size_t)bn, &text, &title, &e) == 0);
+    CHECK(text.data && strstr(text.data, "kelpbound"));
+    buf_free(&text);
+    free(title);
+
+    Buf doc;
+    buf_init(&doc);
+    CHECK(buf_puts(&doc, "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n") == 0);
+    for (int i = 0; i < 129; i++) {
+        int obj = i + 2;
+        char line[160];
+        int ln;
+        if (i + 1 < 129) {
+            ln = snprintf(line, sizeof line,
+                          "%d 0 obj\n<< /Title (S%d) /Dest [1 0 R /Fit] /Next %d 0 R >>\nendobj\n", obj,
+                          i, obj + 1);
+        } else {
+            ln = snprintf(line, sizeof line,
+                          "%d 0 obj\n<< /Title (S%d) /Dest [1 0 R /Fit] >>\nendobj\n", obj, i);
+        }
+        CHECK(ln > 0 && (size_t)ln < sizeof line);
+        CHECK(buf_puts(&doc, line) == 0);
+    }
+    CHECK(buf_puts(&doc, "200 0 obj\n<< /Type /Outlines /First 2 0 R >>\nendobj\n/Outlines 200 0 R\n") ==
+          0);
+    PdfSection *secs = NULL;
+    int ns = 0;
+    if (doc.data) {
+        CHECK(pdf_sections((const unsigned char *)doc.data, doc.len, &secs, &ns) == 0);
+        CHECK(ns == 128);
+    }
+    pdf_sections_free(secs, ns);
+    buf_free(&doc);
+
+    const char *wrapped = "%PDF-1.4\n/Outlines 99999999999999999999 0 R\n";
+    secs = NULL;
+    ns = -1;
+    CHECK(pdf_sections((const unsigned char *)wrapped, strlen(wrapped), &secs, &ns) == 0);
+    CHECK(ns == 0 && !secs);
+
+    char dir[] = "/tmp/grove-cert-XXXXXX";
+    if (!mkdtemp(dir)) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *html = path_join(dir, "ent.html");
+    char *page = path_join(dir, "page.html");
+    char *over = path_join(dir, "over.html");
+    const char *ent = "<html><body><p>amp&#38;ok &#x41; &#x110000;end</p></body></html>";
+    const char *okpage =
+        "<html><body><span epub:type=\"pagebreak\" title=\"4\"></span><p>pagedigit</p></body></html>";
+    const char *badpage =
+        "<html><body><span epub:type=\"pagebreak\" title=\"999999999999\"></span><p>pagedigit</p></body></html>";
+    if (!html || !page || !over || write_file(html, ent, strlen(ent)) != 0 ||
+        write_file(page, okpage, strlen(okpage)) != 0 || write_file(over, badpage, strlen(badpage)) != 0) {
+        fprintf(stderr, "FAIL cert fixtures\n");
+        fails++;
+    } else {
+        Extract ex;
+        memset(&ex, 0, sizeof ex);
+        err_clear(&e);
+        CHECK(extract_path(html, &ex, &e) == EX_OK);
+        CHECK(ex.text && strstr(ex.text, "amp&ok A"));
+        CHECK(ex.text && strstr(ex.text, "&#x110000;end"));
+        extract_free(&ex);
+        err_clear(&e);
+        CHECK(extract_path(page, &ex, &e) == EX_OK);
+        int saw4 = 0;
+        for (int i = 0; ex.marks && i < ex.nmarks; i++) {
+            if (ex.marks[i].kind == MARK_PAGE && ex.marks[i].page == 4) {
+                saw4 = 1;
+            }
+        }
+        CHECK(saw4);
+        extract_free(&ex);
+        err_clear(&e);
+        CHECK(extract_path(over, &ex, &e) == EX_OK);
+        int huge_page = 0;
+        for (int i = 0; ex.marks && i < ex.nmarks; i++) {
+            if (ex.marks[i].kind == MARK_PAGE && ex.marks[i].page > 1000000u) {
+                huge_page = 1;
+            }
+        }
+        CHECK(!huge_page);
+        extract_free(&ex);
+    }
+    free(html);
+    free(page);
+    free(over);
+    rm_rf(dir);
+}
+
 int main(void) {
     test_bounds();
+    test_cert();
     test_tokens();
     test_query_shape();
     test_zip();

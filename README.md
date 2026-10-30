@@ -13,7 +13,7 @@ make
 make test
 ```
 
-`make` writes `./grove`. `make test` builds the unit tests with address and undefined-behavior sanitizers, then builds `./grove` and runs `tests/integration.sh`. The build refuses a wrapped allocation size, checks format strings, and links with a guarded stack and full RELRO. Running `grove` or `grove-ui` does not need Python.
+`make` writes `./grove`. `make test` builds the unit tests with address and undefined-behavior sanitizers, then builds `./grove` and runs `tests/integration.sh`. The build refuses a wrapped allocation size, checks format strings, and links with a guarded stack and full RELRO. Grove's own C follows the SEI CERT C Coding Standard: a conversion reports failure, a size that would wrap is refused, and a file is measured with `fstat` on the descriptor that was opened. Running `grove` or `grove-ui` does not need Python.
 
 ## Index
 

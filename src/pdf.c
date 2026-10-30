@@ -3,11 +3,14 @@
 #include "text.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
+
+enum { OUTLINE_SEEN_MAX = 128, OUTLINE_CAP = 256 };
 
 static int u_accum(unsigned *v, unsigned digit) {
     if (*v > UINT_MAX / 10 || (*v == UINT_MAX / 10 && digit > UINT_MAX % 10)) {
@@ -648,14 +651,16 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
             if (depth) {
                 char tmp[64];
                 size_t ln = (size_t)(p - ns);
-                if (ln >= sizeof tmp) {
-                    ln = sizeof tmp - 1;
-                }
-                memcpy(tmp, ns, ln);
-                tmp[ln] = 0;
-                double v = atof(tmp);
-                if (v <= -120.0) {
-                    pend_space = 1;
+                /* A positioning number that does not fit is not a kern. */
+                if (ln > 0 && ln < sizeof tmp) {
+                    memcpy(tmp, ns, ln);
+                    tmp[ln] = 0;
+                    errno = 0;
+                    char *conv = NULL;
+                    double v = strtod(tmp, &conv);
+                    if (conv && conv != tmp && *conv == 0 && errno == 0 && v <= -120.0) {
+                        pend_space = 1;
+                    }
                 }
             }
             continue;
@@ -749,18 +754,30 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
                         j++;
                     }
                     if (j < i && bytes[j] >= '0' && bytes[j] <= '9') {
-                        length = 0;
+                        size_t acc = 0;
+                        int over = 0;
                         while (j < i && bytes[j] >= '0' && bytes[j] <= '9') {
-                            length = length * 10 + (size_t)(bytes[j] - '0');
+                            size_t next = 0;
+                            if (size_mul(acc, 10, &next) != 0 ||
+                                size_add(next, (size_t)(bytes[j] - '0'), &next) != 0) {
+                                over = 1;
+                                break;
+                            }
+                            acc = next;
                             j++;
                         }
-                        have_len = 1;
+                        if (!over) {
+                            length = acc;
+                            have_len = 1;
+                        } else {
+                            have_len = 0;
+                        }
                     }
                 }
             }
             const unsigned char *stream = bytes + data;
             size_t slen = 0;
-            if (have_len && data + length <= n) {
+            if (have_len && size_fits(n, data, length)) {
                 slen = length;
             } else {
                 const unsigned char *ed = (const unsigned char *)memmem(stream, n - data, "endstream", 9);
@@ -1036,7 +1053,7 @@ static int page_index(const unsigned *ids, int nids, unsigned obj) {
 
 static int walk_outline(const unsigned char *b, size_t n, unsigned obj, int level, const unsigned *pages, int npages,
                         unsigned *seen, int *nseen, PdfSection **out, int *nout, int *cap) {
-    if (!obj || level > 8 || *nseen > 128 || *nout > 256) {
+    if (!obj || level > 8 || *nseen >= OUTLINE_SEEN_MAX || *nout >= OUTLINE_CAP) {
         return 0;
     }
     for (int i = 0; i < *nseen; i++) {
@@ -1095,11 +1112,17 @@ int pdf_sections(const unsigned char *bytes, size_t n, PdfSection **out, int *no
             q++;
         }
         if (q < end && *q >= '0' && *q <= '9') {
+            unsigned v = 0;
+            int over = 0;
             while (q < end && *q >= '0' && *q <= '9') {
-                root = root * 10u + (unsigned)(*q - '0');
+                if (u_accum(&v, (unsigned)(*q - '0')) != 0) {
+                    over = 1;
+                    break;
+                }
                 q++;
             }
-            if (root) {
+            if (!over && v) {
+                root = v;
                 break;
             }
         }
@@ -1123,7 +1146,7 @@ int pdf_sections(const unsigned char *bytes, size_t n, PdfSection **out, int *no
     if (collect_page_ids(bytes, n, &pages, &npages) != 0) {
         return -1;
     }
-    unsigned seen[128];
+    unsigned seen[OUTLINE_SEEN_MAX];
     int nseen = 0;
     int cap = 0;
     unsigned first = ref_after(body, len, "/First");

@@ -5,6 +5,7 @@
 #include "zip.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,17 +143,31 @@ static int decode_entity(const char *s, size_t n, size_t *used, uint32_t *cp) {
     if (semi >= n || s[semi] != ';') {
         return 0;
     }
-    *used = semi + 1;
     if (s[1] == '#') {
-        unsigned long v = 0;
-        if (s[2] == 'x' || s[2] == 'X') {
-            v = strtoul(s + 3, NULL, 16);
-        } else {
-            v = strtoul(s + 2, NULL, 10);
+        const char *num = s + 2;
+        int base = 10;
+        if ((size_t)(num - s) < semi && (s[2] == 'x' || s[2] == 'X')) {
+            num = s + 3;
+            base = 16;
         }
+        if ((size_t)(num - s) >= semi) {
+            return 0;
+        }
+        unsigned char lead = (unsigned char)num[0];
+        if (base == 16 ? !isxdigit(lead) : !isdigit(lead)) {
+            return 0;
+        }
+        errno = 0;
+        char *end = NULL;
+        unsigned long v = strtoul(num, &end, base);
+        if (end != s + semi || errno != 0 || v > 0x10FFFFul) {
+            return 0;
+        }
+        *used = semi + 1;
         *cp = (uint32_t)v;
         return 1;
     }
+    *used = semi + 1;
     if (semi == 3 && memcmp(s, "&lt", 3) == 0) {
         *cp = '<';
         return 1;
@@ -258,11 +273,17 @@ static int tag_page_num(const char *tag, size_t n, uint32_t *page) {
                 continue;
             }
             uint32_t v = 0;
+            int over = 0;
             while (p < n && isdigit((unsigned char)tag[p])) {
-                v = v * 10u + (uint32_t)(tag[p] - '0');
+                uint32_t digit = (uint32_t)((unsigned char)tag[p] - '0');
+                if (v > UINT32_MAX / 10u || (v == UINT32_MAX / 10u && digit > UINT32_MAX % 10u)) {
+                    over = 1;
+                    break;
+                }
+                v = v * 10u + digit;
                 p++;
             }
-            if (v > 0) {
+            if (!over && v > 0) {
                 *page = v;
                 return 1;
             }

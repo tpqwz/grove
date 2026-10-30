@@ -236,9 +236,10 @@ static int cmd_search(Index *ix, int argc, char **argv) {
                 fprintf(stderr, "grove: --limit needs a number\n");
                 return 1;
             }
+            errno = 0;
             char *end = NULL;
             long v = strtol(argv[++i], &end, 10);
-            if (!end || *end || v < 1 || v > 1000) {
+            if (!end || end == argv[i] || *end || errno != 0 || v < 1 || v > 1000) {
                 fprintf(stderr, "grove: --limit must be from 1 to 1000\n");
                 return 1;
             }

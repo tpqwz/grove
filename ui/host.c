@@ -2,6 +2,7 @@
 #include "index.h"
 #include "mod.h"
 #include "webui.h"
+#include "window_icon.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -22,9 +23,10 @@ static void usage(FILE *out) {
         "usage: grove-ui [--index DIR] [--port N] [COMMAND ...]\n"
         "\n"
         "With no command, opens a browser window on the grove index. The\n"
-        "query language matches grove search. Library adds a folder or a\n"
-        "file and keeps a record for each volume. Narrow lists language,\n"
-        "author, form, period, and genre from that record.\n"
+        "window shows Grove's icon. The query language matches grove\n"
+        "search. Library adds a folder or a file and keeps a record for\n"
+        "each volume. Narrow lists language, author, form, period, and\n"
+        "genre from that record.\n"
         "A click on the file name opens it with the system.\n"
         "A click on a passage opens that place when the reader can take a\n"
         "line, a PDF page, or a found line. Otherwise it opens the file.\n"
@@ -686,9 +688,11 @@ int main(int argc, char **argv) {
         fflush(stderr);
         cwatching = pthread_create(&cthread, NULL, c_watch, main_c) == 0;
     }
+    grove_window_icon_start(win);
 
     webui_wait();
     c_stop = 1;
+    grove_window_icon_stop();
     if (cwatching) {
         pthread_mutex_lock(&swap_mu);
         pthread_mutex_unlock(&swap_mu);

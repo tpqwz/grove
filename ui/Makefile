@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2 \
 	-fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 	-Wformat=2 -Wno-format-nonliteral -Wnull-dereference -Wshadow
-LIBS = -lz -lm -pthread -ldl
+LIBS = -lz -lm -pthread -ldl -lX11
 LDFLAGS = -Wl,-z,relro,-z,now
 
 ROOT = ..
@@ -39,8 +39,8 @@ $(MOD): main.c page.h mod.h
 	mkdir -p $(LIVE_DIR)
 	$(CC) $(CFLAGS) -fPIC -shared -DGROVE_UI_MODULE $(INCLUDES) -o $@ main.c -pthread
 
-$(ROOT)/grove-ui: host.c mod.h $(WEBUI_LIB) $(CORE) $(SQLITE_OBJ) $(ROOT)/src/main.c $(ROOT)/src/cli.h
-	$(CC) $(CFLAGS) -DGROVE_EMBED $(INCLUDES) -o $@ host.c $(ROOT)/src/main.c $(CORE) $(SQLITE_OBJ) \
+$(ROOT)/grove-ui: host.c window_icon.c window_icon.h mod.h $(WEBUI_LIB) $(CORE) $(SQLITE_OBJ) $(ROOT)/src/main.c $(ROOT)/src/cli.h
+	$(CC) $(CFLAGS) -DGROVE_EMBED $(INCLUDES) -o $@ host.c window_icon.c $(ROOT)/src/main.c $(CORE) $(SQLITE_OBJ) \
 		-Wl,--whole-archive $(WEBUI_LIB) -Wl,--no-whole-archive \
 		$(LIBS) -Wl,--export-dynamic $(LDFLAGS)
 

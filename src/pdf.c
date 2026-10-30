@@ -139,14 +139,24 @@ static int read_hex_string(const unsigned char *p, const unsigned char *end, Buf
 }
 
 static void append_cp(Buf *out, uint32_t cp) {
+    /* U+0000 would cut the text at the first stored C string. */
+    if (cp == 0 || cp > 0x10FFFF) {
+        return;
+    }
     char enc[4];
     int k = utf8_encode(cp, enc);
+    if (k <= 0) {
+        return;
+    }
     buf_append(out, enc, (size_t)k);
 }
 
 static void append_winansi(Buf *out, const unsigned char *s, size_t n) {
     for (size_t i = 0; i < n; i++) {
         unsigned char c = s[i];
+        if (c == 0) {
+            continue;
+        }
         if (c < 0x80) {
             buf_putc(out, (char)c);
         } else if (c < 0xa0) {
@@ -561,7 +571,47 @@ static int is_kw(const unsigned char *p, const unsigned char *end, const char *k
     return !isalnum(c);
 }
 
-static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *text) {
+/* One content stream's font resource names, each pointing at that font's map. */
+typedef struct FontUse {
+    unsigned content;
+    unsigned uni_obj;
+    char name[32];
+} FontUse;
+
+typedef struct UniSlot {
+    unsigned uni_obj;
+    Cmap cmap;
+    int ready;
+} UniSlot;
+
+typedef struct FontCtx {
+    FontUse *uses;
+    int nuses;
+    UniSlot *slots;
+    int nslots;
+    unsigned content;
+} FontCtx;
+
+static Cmap *font_cmap(const FontCtx *fonts, const char *name) {
+    if (!fonts || !name || !name[0]) {
+        return NULL;
+    }
+    for (int i = 0; i < fonts->nuses; i++) {
+        if (fonts->uses[i].content != fonts->content || strcmp(fonts->uses[i].name, name) != 0) {
+            continue;
+        }
+        unsigned uni = fonts->uses[i].uni_obj;
+        for (int s = 0; s < fonts->nslots; s++) {
+            if (fonts->slots[s].uni_obj == uni) {
+                return &fonts->slots[s].cmap;
+            }
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+static void content_to_text(const unsigned char *s, size_t n, const FontCtx *fonts, Buf *text) {
     const unsigned char *p = s;
     const unsigned char *end = s + n;
     Buf raw;
@@ -571,6 +621,14 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
     int pend_space = 0;
     int depth = 0;
     int have_pending = 0;
+    Cmap *cur = NULL;
+    if (fonts && fonts->nuses == 0 && fonts->nslots == 1) {
+        cur = &fonts->slots[0].cmap;
+    }
+    Cmap *stack[32];
+    int sp = 0;
+    char fontname[32];
+    int have_font = 0;
     while (p < end) {
         unsigned char c = *p;
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f') {
@@ -589,7 +647,7 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
             }
             Buf dec;
             buf_init(&dec);
-            decode_pdf_string(cmap, (unsigned char *)raw.data, raw.len, &dec);
+            decode_pdf_string(cur, (unsigned char *)raw.data, raw.len, &dec);
             if (pend_space && pending.len) {
                 buf_putc(&pending, ' ');
             }
@@ -610,7 +668,7 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
             }
             Buf dec;
             buf_init(&dec);
-            decode_pdf_string(cmap, (unsigned char *)raw.data, raw.len, &dec);
+            decode_pdf_string(cur, (unsigned char *)raw.data, raw.len, &dec);
             if (pend_space && pending.len) {
                 buf_putc(&pending, ' ');
             }
@@ -632,11 +690,19 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
             p++;
             continue;
         }
-        if (c == '/' ) {
+        if (c == '/') {
             p++;
+            const unsigned char *ns = p;
             while (p < end && !isspace(*p) && *p != '[' && *p != ']' && *p != '(' && *p != '<' && *p != '>' &&
                    *p != '/') {
                 p++;
+            }
+            size_t nlen = (size_t)(p - ns);
+            have_font = 0;
+            if (nlen > 0 && nlen < sizeof fontname) {
+                memcpy(fontname, ns, nlen);
+                fontname[nlen] = 0;
+                have_font = 1;
             }
             continue;
         }
@@ -693,6 +759,27 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
             p += (p[0] == 'T' && p[1] == '*') ? 2 : 2;
             continue;
         }
+        if (is_kw(p, end, "Tf")) {
+            cur = have_font ? font_cmap(fonts, fontname) : NULL;
+            have_font = 0;
+            p += 2;
+            continue;
+        }
+        if (is_kw(p, end, "q")) {
+            if (sp < 32) {
+                stack[sp++] = cur;
+            }
+            p++;
+            continue;
+        }
+        if (is_kw(p, end, "Q")) {
+            if (sp > 0) {
+                cur = stack[--sp];
+            }
+            have_font = 0;
+            p++;
+            continue;
+        }
         p++;
     }
     if (have_pending && pending.len) {
@@ -704,6 +791,10 @@ static void content_to_text(const unsigned char *s, size_t n, Cmap *cmap, Buf *t
     buf_free(&raw);
     buf_free(&pending);
 }
+
+static unsigned obj_num_before(const unsigned char *b, const unsigned char *at);
+static int collect_font_uses(const unsigned char *b, size_t n, FontUse **uses, int *nuses, UniSlot **slots,
+                             int *nslots);
 
 static int window_has(const unsigned char *s, size_t n, size_t at, const char *lit) {
     size_t from = at > 400 ? at - 400 : 0;
@@ -724,20 +815,41 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
         err_set(e, "not a PDF");
         return -1;
     }
-    Cmap cmap;
-    memset(&cmap, 0, sizeof cmap);
+    FontUse *uses = NULL;
+    UniSlot *slots = NULL;
+    int nuses = 0;
+    int nslots = 0;
+    if (collect_font_uses(bytes, n, &uses, &nuses, &slots, &nslots) != 0) {
+        nuses = 0;
+        nslots = 0;
+    }
+    /* No font dictionary: one map for the whole file, as a bare ToUnicode stream. */
+    UniSlot orphan;
+    memset(&orphan, 0, sizeof orphan);
     take_title(bytes, n, title);
-    /* Two passes: first learn ToUnicode maps, then pull text. Streams are decoded twice. */
+    /* Two passes: first learn each font's ToUnicode map, then pull text. */
     for (int pass = 0; pass < 2; pass++) {
-        for (size_t i = 0; i + 6 < n; i++) {
+        for (size_t i = 0; i < n; i++) {
+            size_t word = 0;
+            if (size_add(i, 6, &word) != 0 || word > n) {
+                break;
+            }
             if (memcmp(bytes + i, "stream", 6) != 0) {
                 continue;
             }
+            /* InDesign writes >>stream with no space. The keyword still has to
+             * end at CR, LF, or the buffer, so streaming is not a stream. */
             int boundary = (i == 0) || isspace(bytes[i - 1]);
+            if (!boundary && i >= 2 && bytes[i - 2] == '>' && bytes[i - 1] == '>') {
+                boundary = 1;
+            }
             if (!boundary) {
                 continue;
             }
-            size_t data = i + 6;
+            if (word < n && bytes[word] != '\r' && bytes[word] != '\n') {
+                continue;
+            }
+            size_t data = word;
             if (data < n && bytes[data] == '\r') {
                 data++;
             }
@@ -807,22 +919,66 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
                 use = dec;
                 un = dn;
             }
+            unsigned obj = obj_num_before(bytes, bytes + i);
             if (pass == 0) {
                 if (memmem(use, un, "beginbfchar", 11) || memmem(use, un, "beginbfrange", 12)) {
-                    parse_cmap(use, un, &cmap);
+                    int matched = 0;
+                    for (int s = 0; s < nslots; s++) {
+                        if (slots[s].uni_obj == obj && !slots[s].ready) {
+                            parse_cmap(use, un, &slots[s].cmap);
+                            slots[s].ready = 1;
+                            matched = 1;
+                        }
+                    }
+                    if (!matched && nslots == 0) {
+                        parse_cmap(use, un, &orphan.cmap);
+                    }
                 }
                 if (!*title) {
                     take_title(use, un, title);
                 }
             } else {
-                int textual = memmem(use, un, " Tj", 3) || memmem(use, un, " TJ", 3) || memmem(use, un, "Tj", 2);
-                if (textual) {
+                int is_content = 0;
+                if (nuses) {
+                    for (int u = 0; u < nuses; u++) {
+                        if (uses[u].content == obj) {
+                            is_content = 1;
+                            break;
+                        }
+                    }
+                }
+                /* Page contents only, once a page catalog exists. An image
+                 * stream can contain the letters Tj and is not the book. */
+                int textual = memmem(use, un, " Tj", 3) || memmem(use, un, " TJ", 3) || memmem(use, un, "Tj", 2) ||
+                              memmem(use, un, "TJ", 2);
+                if ((!nuses || is_content) && textual) {
                     /* One form feed per text stream after the first. A PDF that
                      * stores one stream per page then has a real page number. */
+                    size_t before = text->len;
                     if (text->len) {
                         buf_putc(text, '\f');
                     }
-                    content_to_text(use, un, &cmap, text);
+                    size_t marked = text->len;
+                    FontCtx ctx;
+                    ctx.uses = uses;
+                    ctx.nuses = nuses;
+                    ctx.slots = slots;
+                    ctx.nslots = nslots;
+                    ctx.content = obj;
+                    const FontCtx *use_fonts = NULL;
+                    if (nuses || nslots) {
+                        use_fonts = &ctx;
+                    } else if (orphan.cmap.n) {
+                        ctx.slots = &orphan;
+                        ctx.nslots = 1;
+                        ctx.nuses = 0;
+                        use_fonts = &ctx;
+                    }
+                    content_to_text(use, un, use_fonts, text);
+                    if (text->len == marked && text->data) {
+                        text->len = before;
+                        text->data[before] = 0;
+                    }
                 }
             }
             free(dec);
@@ -831,7 +987,12 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
             }
         }
     }
-    cmap_free(&cmap);
+    for (int s = 0; s < nslots; s++) {
+        cmap_free(&slots[s].cmap);
+    }
+    cmap_free(&orphan.cmap);
+    free(slots);
+    free(uses);
     return 0;
 }
 
@@ -970,6 +1131,305 @@ static int collect_page_ids(const unsigned char *b, size_t n, unsigned **ids, in
         }
         (*ids)[(*nids)++] = num;
     }
+    return 0;
+}
+
+static int pdf_delim(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '(' || c == ')' || c == '<' ||
+           c == '>' || c == '[' || c == ']' || c == '{' || c == '}' || c == '/' || c == '%';
+}
+
+static unsigned read_ref(const unsigned char **pp, const unsigned char *end) {
+    const unsigned char *p = *pp;
+    while (p < end && isspace(*p)) {
+        p++;
+    }
+    if (p >= end || *p < '0' || *p > '9') {
+        return 0;
+    }
+    unsigned v = 0;
+    while (p < end && *p >= '0' && *p <= '9') {
+        if (u_accum(&v, (unsigned)(*p - '0')) != 0) {
+            return 0;
+        }
+        p++;
+    }
+    while (p < end && isspace(*p)) {
+        p++;
+    }
+    if (p >= end || *p != '0') {
+        return 0;
+    }
+    p++;
+    while (p < end && isspace(*p)) {
+        p++;
+    }
+    if (p >= end || (*p != 'R' && *p != 'r')) {
+        return 0;
+    }
+    *pp = p + 1;
+    return v;
+}
+
+static size_t dict_span(const unsigned char *body, size_t len) {
+    for (size_t i = 0; i + 6 <= len; i++) {
+        if (memcmp(body + i, "stream", 6) != 0) {
+            continue;
+        }
+        int boundary = (i == 0) || isspace(body[i - 1]) || (i >= 2 && body[i - 2] == '>' && body[i - 1] == '>');
+        if (!boundary) {
+            continue;
+        }
+        if (i + 6 < len && body[i + 6] != '\r' && body[i + 6] != '\n') {
+            continue;
+        }
+        return i;
+    }
+    return len;
+}
+
+static int ensure_slot(UniSlot **slots, int *nslots, int *cap, unsigned uni) {
+    for (int i = 0; i < *nslots; i++) {
+        if ((*slots)[i].uni_obj == uni) {
+            return 0;
+        }
+    }
+    if (*nslots == *cap) {
+        int nc;
+        if (cap_grow(*cap, 8, &nc) != 0 || grow_alloc((void **)slots, (size_t)nc, sizeof(UniSlot)) != 0) {
+            return -1;
+        }
+        *cap = nc;
+    }
+    memset(&(*slots)[*nslots], 0, sizeof(UniSlot));
+    (*slots)[*nslots].uni_obj = uni;
+    (*nslots)++;
+    return 0;
+}
+
+static int push_font_use(FontUse **uses, int *nuses, int *cap, unsigned content, unsigned uni, const char *name) {
+    if (!content || !name || !name[0] || strlen(name) >= 32) {
+        return 0;
+    }
+    for (int i = 0; i < *nuses; i++) {
+        if ((*uses)[i].content == content && (*uses)[i].uni_obj == uni && strcmp((*uses)[i].name, name) == 0) {
+            return 0;
+        }
+    }
+    if (*nuses == *cap) {
+        int nc;
+        if (cap_grow(*cap, 16, &nc) != 0 || grow_alloc((void **)uses, (size_t)nc, sizeof(FontUse)) != 0) {
+            return -1;
+        }
+        *cap = nc;
+    }
+    FontUse *row = &(*uses)[*nuses];
+    memset(row, 0, sizeof *row);
+    row->content = content;
+    row->uni_obj = uni;
+    memcpy(row->name, name, strlen(name) + 1);
+    (*nuses)++;
+    return 0;
+}
+
+static void clear_font_uses(FontUse **uses, int *nuses, UniSlot **slots, int *nslots) {
+    if (slots && *slots) {
+        for (int i = 0; i < *nslots; i++) {
+            cmap_free(&(*slots)[i].cmap);
+        }
+    }
+    free(*slots);
+    free(*uses);
+    *slots = NULL;
+    *uses = NULL;
+    *nslots = 0;
+    *nuses = 0;
+}
+
+/* A ToUnicode map belongs to one font. One shared map spells a header
+ * with another font's letters. */
+static int collect_font_uses(const unsigned char *b, size_t n, FontUse **uses, int *nuses, UniSlot **slots,
+                             int *nslots) {
+    *uses = NULL;
+    *nuses = 0;
+    *slots = NULL;
+    *nslots = 0;
+    typedef struct FontLink {
+        unsigned font_obj;
+        unsigned uni_obj;
+    } FontLink;
+    FontLink *links = NULL;
+    int nlinks = 0;
+    int lcap = 0;
+    int ucap = 0;
+    int ucap_uses = 0;
+    for (size_t i = 0; i + 10 < n; i++) {
+        if (memcmp(b + i, "/ToUnicode", 10) != 0 || (i + 10 < n && !pdf_delim(b[i + 10]))) {
+            continue;
+        }
+        unsigned font = obj_num_before(b, b + i);
+        if (!font) {
+            continue;
+        }
+        size_t len = 0;
+        const unsigned char *body = pdf_obj(b, n, font, &len);
+        if (!body) {
+            continue;
+        }
+        size_t dictn = dict_span(body, len);
+        unsigned uni = ref_after(body, dictn, "/ToUnicode");
+        if (!uni) {
+            continue;
+        }
+        int known = 0;
+        for (int k = 0; k < nlinks; k++) {
+            if (links[k].font_obj == font) {
+                known = 1;
+                break;
+            }
+        }
+        if (known) {
+            continue;
+        }
+        if (nlinks == lcap) {
+            int nc;
+            if (cap_grow(lcap, 8, &nc) != 0 || grow_alloc((void **)&links, (size_t)nc, sizeof(FontLink)) != 0) {
+                free(links);
+                clear_font_uses(uses, nuses, slots, nslots);
+                return -1;
+            }
+            lcap = nc;
+        }
+        links[nlinks].font_obj = font;
+        links[nlinks].uni_obj = uni;
+        nlinks++;
+        if (ensure_slot(slots, nslots, &ucap, uni) != 0) {
+            free(links);
+            clear_font_uses(uses, nuses, slots, nslots);
+            return -1;
+        }
+    }
+    unsigned *ids = NULL;
+    int nids = 0;
+    if (collect_page_ids(b, n, &ids, &nids) != 0) {
+        free(links);
+        clear_font_uses(uses, nuses, slots, nslots);
+        return -1;
+    }
+    for (int p = 0; p < nids; p++) {
+        size_t len = 0;
+        const unsigned char *body = pdf_obj(b, n, ids[p], &len);
+        if (!body) {
+            continue;
+        }
+        size_t dictn = dict_span(body, len);
+        unsigned contents[8];
+        int nc = 0;
+        for (size_t i = 0; i + 10 <= dictn; i++) {
+            if (memcmp(body + i, "/Contents", 9) != 0 || !pdf_delim(body[i + 9])) {
+                continue;
+            }
+            const unsigned char *q = body + i + 9;
+            const unsigned char *end = body + dictn;
+            while (q < end && isspace(*q)) {
+                q++;
+            }
+            int array = q < end && *q == '[';
+            if (array) {
+                q++;
+            }
+            while (nc < 8) {
+                unsigned v = read_ref(&q, end);
+                if (!v) {
+                    break;
+                }
+                contents[nc++] = v;
+                if (!array) {
+                    break;
+                }
+            }
+            break;
+        }
+        if (!nc) {
+            continue;
+        }
+        int pushed = 0;
+        for (size_t i = 0; i + 6 <= dictn; i++) {
+            if (memcmp(body + i, "/Font", 5) != 0 || !pdf_delim(body[i + 5])) {
+                continue;
+            }
+            const unsigned char *q = body + i + 5;
+            const unsigned char *end = body + dictn;
+            while (q < end && isspace(*q)) {
+                q++;
+            }
+            if (q + 1 >= end || q[0] != '<' || q[1] != '<') {
+                continue;
+            }
+            q += 2;
+            while (q < end) {
+                while (q < end && isspace(*q)) {
+                    q++;
+                }
+                if (q + 1 < end && q[0] == '>' && q[1] == '>') {
+                    break;
+                }
+                if (q >= end || *q != '/') {
+                    break;
+                }
+                q++;
+                const unsigned char *ns = q;
+                while (q < end && !pdf_delim(*q)) {
+                    q++;
+                }
+                size_t nlen = (size_t)(q - ns);
+                char name[32];
+                if (nlen == 0 || nlen >= sizeof name) {
+                    break;
+                }
+                memcpy(name, ns, nlen);
+                name[nlen] = 0;
+                unsigned font_obj = read_ref(&q, end);
+                if (!font_obj) {
+                    break;
+                }
+                unsigned uni = 0;
+                for (int k = 0; k < nlinks; k++) {
+                    if (links[k].font_obj == font_obj) {
+                        uni = links[k].uni_obj;
+                        break;
+                    }
+                }
+                if (!uni) {
+                    continue;
+                }
+                for (int c = 0; c < nc; c++) {
+                    if (push_font_use(uses, nuses, &ucap_uses, contents[c], uni, name) != 0) {
+                        free(ids);
+                        free(links);
+                        clear_font_uses(uses, nuses, slots, nslots);
+                        return -1;
+                    }
+                    pushed = 1;
+                }
+            }
+            break;
+        }
+        /* A page with no ToUnicode still has content streams. Naming them
+         * keeps an image stream that merely contains Tj out of the text. */
+        if (!pushed) {
+            for (int c = 0; c < nc; c++) {
+                if (push_font_use(uses, nuses, &ucap_uses, contents[c], 0, "*") != 0) {
+                    free(ids);
+                    free(links);
+                    clear_font_uses(uses, nuses, slots, nslots);
+                    return -1;
+                }
+            }
+        }
+    }
+    free(ids);
+    free(links);
     return 0;
 }
 

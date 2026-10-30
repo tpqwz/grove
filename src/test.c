@@ -2206,6 +2206,64 @@ static void test_cert(void) {
     buf_free(&text);
     free(title);
 
+    const char *tight =
+        "%PDF-1.4\n1 0 obj\n<< /Length 13 >>stream\r\n(Scrooge) Tj\nendstream\nendobj\n";
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    CHECK(pdf_extract((const unsigned char *)tight, strlen(tight), &text, &title, &e) == 0);
+    CHECK(text.data && strstr(text.data, "Scrooge"));
+    buf_free(&text);
+    free(title);
+
+    const char *longer =
+        "%PDF-1.4\n1 0 obj\n<< /Length 18 >>streaming\r\n(notastream) Tj\nendstream\nendobj\n";
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    CHECK(pdf_extract((const unsigned char *)longer, strlen(longer), &text, &title, &e) == 0);
+    CHECK(!text.data || !strstr(text.data, "notastream"));
+    buf_free(&text);
+    free(title);
+
+    const char *onesign =
+        "%PDF-1.4\n1 0 obj\n<< /Length 11 >stream\n(onesign) Tj\nendstream\nendobj\n";
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    CHECK(pdf_extract((const unsigned char *)onesign, strlen(onesign), &text, &title, &e) == 0);
+    CHECK(!text.data || !strstr(text.data, "onesign"));
+    buf_free(&text);
+    free(title);
+
+    const char *show = "BT /F1 12 Tf (Hello) Tj /F1 12 Tf (\014) Tj /F2 12 Tf (\014) Tj ET\n";
+    const char *map_a = "beginbfchar\n<0C> <0041>\nendbfchar\n";
+    const char *map_b = "beginbfchar\n<0C> <0042>\nendbfchar\n";
+    const char *noise = "(notpage) Tj\n";
+    Buf fonts;
+    buf_init(&fonts);
+    CHECK(buf_puts(&fonts, "%PDF-1.4\n") == 0);
+    CHECK(buf_puts(&fonts,
+                   "1 0 obj\n<< /Type /Page /Contents 2 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+                   ">>\nendobj\n") == 0);
+    CHECK(buf_printf(&fonts, "2 0 obj\n<< /Length %zu >>\nstream\n%sendstream\nendobj\n", strlen(show), show) == 0);
+    CHECK(buf_puts(&fonts, "3 0 obj\n<< /Type /Font /ToUnicode 5 0 R >>\nendobj\n") == 0);
+    CHECK(buf_puts(&fonts, "4 0 obj\n<< /Type /Font /ToUnicode 6 0 R >>\nendobj\n") == 0);
+    CHECK(buf_printf(&fonts, "5 0 obj\n<< /Length %zu >>\nstream\n%sendstream\nendobj\n", strlen(map_a), map_a) == 0);
+    CHECK(buf_printf(&fonts, "6 0 obj\n<< /Length %zu >>\nstream\n%sendstream\nendobj\n", strlen(map_b), map_b) == 0);
+    CHECK(buf_printf(&fonts, "7 0 obj\n<< /Length %zu >>\nstream\n%sendstream\nendobj\n", strlen(noise), noise) == 0);
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    if (fonts.data) {
+        CHECK(pdf_extract((const unsigned char *)fonts.data, fonts.len, &text, &title, &e) == 0);
+        CHECK(text.data && strstr(text.data, "Hello A B"));
+        CHECK(!strstr(text.data ? text.data : "", "notpage"));
+    }
+    buf_free(&text);
+    buf_free(&fonts);
+    free(title);
+
     Buf doc;
     buf_init(&doc);
     CHECK(buf_puts(&doc, "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n") == 0);

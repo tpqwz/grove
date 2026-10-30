@@ -111,6 +111,17 @@ static void test_query_shape(void) {
     parsed_free(&pq);
     CHECK(query_parse("mtime:2026-13", &pq, &e) != 0);
     CHECK(query_parse("mtime:nope", &pq, &e) != 0);
+    CHECK(query_parse("language:English language:Greek", &pq, &e) == 0);
+    CHECK(pq.q == NULL && pq.nlanguage == 2);
+    CHECK(pq.language && strcmp(pq.language[0], "English") == 0 && strcmp(pq.language[1], "Greek") == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("author:\" A Reader \"", &pq, &e) == 0);
+    CHECK(pq.nauthor == 1 && pq.author && strcmp(pq.author[0], "A Reader") == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("language:English author:Freud form:Prose period:1900s genre:Essay", &pq, &e) == 0);
+    CHECK(pq.nlanguage == 1 && pq.nauthor == 1 && pq.nform == 1 && pq.nperiod == 1 && pq.ngenre == 1);
+    parsed_free(&pq);
+    CHECK(query_parse("language:\"\"", &pq, &e) != 0);
     CHECK(query_parse("東京駅", &pq, &e) == 0);
     CHECK(pq.q && pq.q->kind == Q_PHRASE && pq.q->nkids == 2);
     parsed_free(&pq);
@@ -2286,6 +2297,238 @@ static int plan_covers(const char *db_path, const char *sql) {
     return cover;
 }
 
+static int facet_at(const Facet *a, int n, int i, const char *value, int count) {
+    return a && i >= 0 && i < n && a[i].value && strcmp(a[i].value, value) == 0 && a[i].count == count;
+}
+
+static void put_record(Index *ix, const char *path, const char *creator, const char *language, const char *type,
+                       const char *coverage, const char *subject) {
+    Volume rec;
+    Err e;
+    err_clear(&e);
+    memset(&rec, 0, sizeof rec);
+    rec.path = (char *)path;
+    rec.creator = (char *)creator;
+    rec.language = (char *)language;
+    rec.type = (char *)type;
+    rec.coverage = (char *)coverage;
+    rec.subject = (char *)subject;
+    if (index_catalog_put(ix, &rec, &e) != 0) {
+        fprintf(stderr, "catalog %s: %s\n", path ? path : "", e.msg);
+        fails++;
+    }
+}
+
+static const Volume *vol_suffix(const Library *lib, const char *suffix) {
+    for (int i = 0; i < lib->n; i++) {
+        if (lib->volumes[i].path && strstr(lib->volumes[i].path, suffix)) {
+            return &lib->volumes[i];
+        }
+    }
+    return NULL;
+}
+
+static void test_narrow(void) {
+    char tmpl[] = "/tmp/grove-narrow-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = root ? path_join(root, "docs") : NULL;
+    char *idx = root ? path_join(root, "idx") : NULL;
+    char *paths[5];
+    const char *names[] = {"a.txt", "b.md", "c.txt", "d.txt", "e.txt"};
+    const char *texts[] = {"widget freudessay\n", "widget aristotlepage\n", "widget freudverse\n", "widget nocat\n",
+                           "widget hybridform\n"};
+    Index *ix = NULL;
+    Library lib;
+    memset(paths, 0, sizeof paths);
+    memset(&lib, 0, sizeof lib);
+    if (!root || !docs || !idx || mkdir(docs, 0700) != 0) {
+        fprintf(stderr, "narrow corpus\n");
+        fails++;
+        goto done;
+    }
+    for (int i = 0; i < 5; i++) {
+        paths[i] = path_join(docs, names[i]);
+        if (!paths[i] || write_file(paths[i], texts[i], strlen(texts[i])) != 0) {
+            fails++;
+            goto done;
+        }
+    }
+    Err e;
+    err_clear(&e);
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "narrow open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "narrow add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 5);
+    CHECK(lib.narrow.nlanguage == 0 && lib.narrow.nauthor == 0 && lib.narrow.nform == 0);
+    const Volume *a = vol_suffix(&lib, "/a.txt");
+    const Volume *b = vol_suffix(&lib, "/b.md");
+    const Volume *c = vol_suffix(&lib, "/c.txt");
+    const Volume *evol = vol_suffix(&lib, "/e.txt");
+    CHECK(a && b && c && evol);
+    put_record(ix, a ? a->path : "", "Freud; Jung", "English", "Prose", "1900s", "Essay");
+    put_record(ix, b ? b->path : "", "Aristotle", "Greek", "Prose", "Ancient", "Philosophy");
+    put_record(ix, c ? c->path : "", "Freud", "English", "Verse", "1900s", "Poem");
+    put_record(ix, evol ? evol->path : "", "Only One", "English ; Latin", "Prose; Verse", "1900s", "Essay");
+    library_free(&lib);
+    CHECK(index_library_narrow(ix, NULL, NULL, NULL, NULL, NULL, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 5 && lib.n == 5);
+    CHECK(facet_at(lib.narrow.language, lib.narrow.nlanguage, 0, "English", 3));
+    CHECK(facet_at(lib.narrow.language, lib.narrow.nlanguage, 1, "Greek", 1));
+    CHECK(facet_at(lib.narrow.language, lib.narrow.nlanguage, 2, "Latin", 1));
+    CHECK(facet_at(lib.narrow.author, lib.narrow.nauthor, 0, "Freud", 2));
+    CHECK(facet_at(lib.narrow.author, lib.narrow.nauthor, 1, "Aristotle", 1));
+    CHECK(facet_at(lib.narrow.author, lib.narrow.nauthor, 2, "Jung", 1));
+    CHECK(facet_at(lib.narrow.author, lib.narrow.nauthor, 3, "Only One", 1));
+    CHECK(facet_n(lib.narrow.form, lib.narrow.nform, "Prose") == 2);
+    CHECK(facet_n(lib.narrow.form, lib.narrow.nform, "Verse") == 1);
+    CHECK(facet_n(lib.narrow.form, lib.narrow.nform, "Prose; Verse") == 1);
+    CHECK(facet_n(lib.narrow.form, lib.narrow.nform, "Prose;Verse") == -1);
+    CHECK(facet_at(lib.narrow.period, lib.narrow.nperiod, 0, "1900s", 3));
+    CHECK(facet_n(lib.narrow.genre, lib.narrow.ngenre, "Essay") == 2);
+    library_free(&lib);
+
+    CHECK(index_library_narrow(ix, NULL, "English\nGreek", NULL, NULL, NULL, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 4);
+    CHECK(vol_suffix(&lib, "/d.txt") == NULL);
+    CHECK(facet_at(lib.narrow.author, lib.narrow.nauthor, 0, "Freud", 2));
+    CHECK(facet_n(lib.narrow.author, lib.narrow.nauthor, "Aristotle") == 1);
+    CHECK(facet_n(lib.narrow.language, lib.narrow.nlanguage, "English") == 3);
+    CHECK(facet_n(lib.narrow.language, lib.narrow.nlanguage, "Greek") == 1);
+    library_free(&lib);
+
+    CHECK(index_library_narrow(ix, NULL, "English", "Aristotle", NULL, NULL, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 0 && lib.n == 0);
+    CHECK(facet_at(lib.narrow.language, lib.narrow.nlanguage, 0, "Greek", 1));
+    CHECK(facet_n(lib.narrow.language, lib.narrow.nlanguage, "English") == 0);
+    CHECK(facet_n(lib.narrow.author, lib.narrow.nauthor, "Aristotle") == 0);
+    CHECK(facet_n(lib.narrow.author, lib.narrow.nauthor, "Freud") == 2);
+    library_free(&lib);
+
+    CHECK(index_library_narrow(ix, "freud", NULL, NULL, NULL, NULL, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 2);
+    CHECK(facet_n(lib.narrow.language, lib.narrow.nlanguage, "English") == 2);
+    CHECK(facet_n(lib.narrow.language, lib.narrow.nlanguage, "Greek") == -1);
+    CHECK(facet_n(lib.narrow.author, lib.narrow.nauthor, "Freud") == 2);
+    CHECK(facet_n(lib.narrow.author, lib.narrow.nauthor, "Jung") == 1);
+    library_free(&lib);
+
+    char *many = NULL;
+    size_t many_n = 0;
+    for (int i = 0; i < 65; i++) {
+        char line[32];
+        int nw = snprintf(line, sizeof line, "Name%d\n", i);
+        if (nw < 0 || (size_t)nw >= sizeof line) {
+            fails++;
+            break;
+        }
+        char *grown = realloc(many, many_n + (size_t)nw + 1);
+        if (!grown) {
+            fails++;
+            break;
+        }
+        memcpy(grown + many_n, line, (size_t)nw + 1);
+        many = grown;
+        many_n += (size_t)nw;
+    }
+    CHECK(index_library_narrow(ix, NULL, many, NULL, NULL, NULL, NULL, &lib, &e) != 0);
+    free(many);
+    library_free(&lib);
+
+    Facets fac;
+    memset(&fac, 0, sizeof fac);
+    Hit *h = NULL;
+    int nh = 0;
+    CHECK(index_search(ix, "widget language:English", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(nh == 3 && fac.nfiles == 3);
+    CHECK(facet_n(fac.types, fac.ntypes, "txt") == 3);
+    CHECK(facet_n(fac.types, fac.ntypes, "md") == -1);
+    CHECK(facet_at(fac.narrow.author, fac.narrow.nauthor, 0, "Freud", 2));
+    CHECK(facet_n(fac.narrow.author, fac.narrow.nauthor, "Jung") == 1);
+    CHECK(facet_n(fac.narrow.author, fac.narrow.nauthor, "Aristotle") == -1);
+    CHECK(facet_n(fac.narrow.form, fac.narrow.nform, "Prose") == 1);
+    CHECK(facet_n(fac.narrow.form, fac.narrow.nform, "Prose; Verse") == 1);
+    expect_miss(h, nh, "/b.md", "english");
+    expect_miss(h, nh, "/d.txt", "english");
+    hits_free(h, nh);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    nh = 0;
+    CHECK(index_search(ix, "language:English language:Greek", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(fac.nfiles == 4);
+    expect_miss(h, nh, "/d.txt", "either language");
+    hits_free(h, nh);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    nh = 0;
+    CHECK(index_search(ix, "author:Freud author:Aristotle", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(fac.nfiles == 3);
+    expect_hit(h, nh, "/b.md", "or author");
+    expect_miss(h, nh, "/e.txt", "or author");
+    hits_free(h, nh);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    nh = 0;
+    CHECK(index_search(ix, "author:Jung language:Greek", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(nh == 0 && fac.nfiles == 0);
+    CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "Greek") == 0);
+    CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "English") == 1);
+    CHECK(facet_n(fac.narrow.author, fac.narrow.nauthor, "Jung") == 0);
+    CHECK(facet_n(fac.narrow.author, fac.narrow.nauthor, "Aristotle") == 1);
+    hits_free(h, nh);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    nh = 0;
+    CHECK(index_search(ix, "form:Prose", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(fac.nfiles == 2);
+    expect_miss(h, nh, "/e.txt", "whole form");
+    expect_hit(h, nh, "/a.txt", "whole form");
+    hits_free(h, nh);
+    facets_free(&fac);
+
+    memset(&fac, 0, sizeof fac);
+    h = NULL;
+    nh = 0;
+    CHECK(index_search(ix, "language:Latin", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(nh == 1 && fac.nfiles == 1);
+    expect_hit(h, nh, "/e.txt", "latin");
+    CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "Latin") == 1);
+    CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "English") == 3);
+    hits_free(h, nh);
+    facets_free(&fac);
+    index_close(ix);
+    ix = NULL;
+done:
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    for (int i = 0; i < 5; i++) {
+        free(paths[i]);
+    }
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
 static void test_library(void) {
     char tmpl[] = "/tmp/grove-lib-XXXXXX";
     char *root = mkdtemp(tmpl);
@@ -2428,6 +2671,7 @@ int main(void) {
     test_saved();
     test_notes();
     test_library();
+    test_narrow();
     test_alerts();
     test_reader();
     char tmpl[] = "/tmp/grove-test-XXXXXX";

@@ -426,6 +426,16 @@ static void query_free(Query *q) {
     free(q);
 }
 
+static void strs_free(char **a, int n) {
+    if (!a) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(a[i]);
+    }
+    free(a);
+}
+
 void parsed_free(ParsedQuery *p) {
     if (!p) {
         return;
@@ -434,6 +444,11 @@ void parsed_free(ParsedQuery *p) {
     free(p->ext);
     free(p->path_sub);
     free(p->title_sub);
+    strs_free(p->language, p->nlanguage);
+    strs_free(p->author, p->nauthor);
+    strs_free(p->form, p->nform);
+    strs_free(p->period, p->nperiod);
+    strs_free(p->genre, p->ngenre);
     memset(p, 0, sizeof *p);
 }
 
@@ -610,23 +625,70 @@ static Query *atom_from_raw(const char *s, size_t n, int prefix) {
     return q;
 }
 
+static int sel_push(char ***arr, int *n, char *owned) {
+    if (*n < 0) {
+        free(owned);
+        return -1;
+    }
+    size_t bytes = 0;
+    if (size_mul((size_t)*n + 1, sizeof(char *), &bytes) != 0) {
+        free(owned);
+        return -1;
+    }
+    char **grown = realloc(*arr, bytes);
+    if (!grown) {
+        free(owned);
+        return -1;
+    }
+    *arr = grown;
+    (*arr)[(*n)++] = owned;
+    return 0;
+}
+
+static char *trim_copy(const char *s, size_t n) {
+    while (n > 0 && (s[0] == ' ' || s[0] == '\t')) {
+        s++;
+        n--;
+    }
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        n--;
+    }
+    return xstrndup(s, n);
+}
+
+/* Longest name first. None of these names is a prefix of another. */
 static int take_filter(Cur *c, ParsedQuery *out) {
     skip_ws(c);
     size_t save = c->i;
     const char *name = NULL;
     size_t namelen = 0;
-    if (c->i + 4 <= c->n && memcmp(c->s + c->i, "ext:", 4) == 0) {
-        name = "ext";
-        namelen = 4;
-    } else if (c->i + 5 <= c->n && memcmp(c->s + c->i, "path:", 5) == 0) {
-        name = "path";
-        namelen = 5;
+    if (c->i + 9 <= c->n && memcmp(c->s + c->i, "language:", 9) == 0) {
+        name = "language";
+        namelen = 9;
+    } else if (c->i + 7 <= c->n && memcmp(c->s + c->i, "author:", 7) == 0) {
+        name = "author";
+        namelen = 7;
+    } else if (c->i + 7 <= c->n && memcmp(c->s + c->i, "period:", 7) == 0) {
+        name = "period";
+        namelen = 7;
+    } else if (c->i + 6 <= c->n && memcmp(c->s + c->i, "genre:", 6) == 0) {
+        name = "genre";
+        namelen = 6;
     } else if (c->i + 6 <= c->n && memcmp(c->s + c->i, "title:", 6) == 0) {
         name = "title";
         namelen = 6;
     } else if (c->i + 6 <= c->n && memcmp(c->s + c->i, "mtime:", 6) == 0) {
         name = "mtime";
         namelen = 6;
+    } else if (c->i + 5 <= c->n && memcmp(c->s + c->i, "form:", 5) == 0) {
+        name = "form";
+        namelen = 5;
+    } else if (c->i + 5 <= c->n && memcmp(c->s + c->i, "path:", 5) == 0) {
+        name = "path";
+        namelen = 5;
+    } else if (c->i + 4 <= c->n && memcmp(c->s + c->i, "ext:", 4) == 0) {
+        name = "ext";
+        namelen = 4;
     } else {
         return 0;
     }
@@ -656,6 +718,43 @@ static int take_filter(Cur *c, ParsedQuery *out) {
             err_set(c->e, "out of memory");
             return -1;
         }
+    }
+    int record = strcmp(name, "language") == 0 || strcmp(name, "author") == 0 || strcmp(name, "form") == 0 ||
+                 strcmp(name, "period") == 0 || strcmp(name, "genre") == 0;
+    if (record) {
+        char *trimmed = trim_copy(val, vn);
+        free(val);
+        if (!trimmed) {
+            err_set(c->e, "out of memory");
+            return -1;
+        }
+        if (!trimmed[0]) {
+            free(trimmed);
+            return 1;
+        }
+        char ***slot = NULL;
+        int *count = NULL;
+        if (strcmp(name, "language") == 0) {
+            slot = &out->language;
+            count = &out->nlanguage;
+        } else if (strcmp(name, "author") == 0) {
+            slot = &out->author;
+            count = &out->nauthor;
+        } else if (strcmp(name, "form") == 0) {
+            slot = &out->form;
+            count = &out->nform;
+        } else if (strcmp(name, "period") == 0) {
+            slot = &out->period;
+            count = &out->nperiod;
+        } else {
+            slot = &out->genre;
+            count = &out->ngenre;
+        }
+        if (sel_push(slot, count, trimmed) != 0) {
+            err_set(c->e, "out of memory");
+            return -1;
+        }
+        return 1;
     }
     if (strcmp(name, "ext") == 0) {
         ascii_lower_inplace(val);
@@ -893,7 +992,8 @@ int query_parse(const char *s, ParsedQuery *out, Err *e) {
         err_set(e, "unexpected text at the end of the query");
         return -1;
     }
-    if (!q && !out->ext && !out->path_sub && !out->title_sub && !out->mtime_year) {
+    if (!q && !out->ext && !out->path_sub && !out->title_sub && !out->mtime_year && !out->nlanguage && !out->nauthor &&
+        !out->nform && !out->nperiod && !out->ngenre) {
         err_set(e, "empty query");
         return -1;
     }

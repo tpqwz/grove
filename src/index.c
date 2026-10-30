@@ -1533,22 +1533,36 @@ static int keys_to_facets(char **keys, int n, Facet **out, int *nout) {
     return 0;
 }
 
+static void facet_list_free(Facet *a, int n) {
+    if (!a) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(a[i].value);
+    }
+    free(a);
+}
+
+static void narrow_free(Narrow *n) {
+    if (!n) {
+        return;
+    }
+    facet_list_free(n->language, n->nlanguage);
+    facet_list_free(n->author, n->nauthor);
+    facet_list_free(n->form, n->nform);
+    facet_list_free(n->period, n->nperiod);
+    facet_list_free(n->genre, n->ngenre);
+    memset(n, 0, sizeof *n);
+}
+
 void facets_free(Facets *f) {
     if (!f) {
         return;
     }
-    for (int i = 0; i < f->ntypes; i++) {
-        free(f->types[i].value);
-    }
-    for (int i = 0; i < f->nfolders; i++) {
-        free(f->folders[i].value);
-    }
-    for (int i = 0; i < f->nmonths; i++) {
-        free(f->months[i].value);
-    }
-    free(f->types);
-    free(f->folders);
-    free(f->months);
+    facet_list_free(f->types, f->ntypes);
+    facet_list_free(f->folders, f->nfolders);
+    facet_list_free(f->months, f->nmonths);
+    narrow_free(&f->narrow);
     memset(f, 0, sizeof *f);
 }
 
@@ -1740,6 +1754,16 @@ static int load_body(Index *ix, int64_t id, char **text, Mark **marks, int *nmar
     return 0;
 }
 
+typedef struct NarrowGate NarrowGate;
+
+static int catalog_narrow_filter(Index *ix, Cand *cands, int *nc, const ParsedQuery *pq, int with_facets,
+                                 char ***type_keys, int *ntype, int *type_cap, char ***folder_keys, int *nfolder,
+                                 int *folder_cap, char ***month_keys, int *nmonth, int *month_cap, Narrow *narrow,
+                                 Err *e);
+static int narrow_gate_open(Index *ix, const ParsedQuery *pq, NarrowGate **out, Err *e);
+static void narrow_gate_close(NarrowGate *g);
+static int narrow_gate_ok(const NarrowGate *g, const char *path);
+
 static int cand_cmp(const void *a, const void *b) {
     const Cand *x = a;
     const Cand *y = b;
@@ -1760,6 +1784,8 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
     char **month_keys = NULL;
     int nmonth_keys = 0;
     int month_cap = 0;
+    Narrow record;
+    memset(&record, 0, sizeof record);
     int w = 0;
     for (int i = 0; i < nc; i++) {
         if (!doc_passes(cands[i].rel, cands[i].title, cands[i].ext, cands[i].mtime, pq)) {
@@ -1771,33 +1797,16 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
             err_set(e, "out of memory");
             goto fail;
         }
-        if (facets) {
-            if (cands[i].ext && cands[i].ext[0]) {
-                char *copy = xstrdup(cands[i].ext);
-                if (!copy || push_key(&type_keys, &ntype_keys, &type_cap, copy) != 0) {
-                    err_set(e, "out of memory");
-                    goto fail;
-                }
-            }
-            char *folder = NULL;
-            if (parent_folder(cands[i].rel, &folder) != 0 ||
-                (folder && push_key(&folder_keys, &nfolder_keys, &folder_cap, folder) != 0)) {
-                err_set(e, "out of memory");
-                goto fail;
-            }
-            char *month = month_key(cands[i].mtime);
-            if (!month || push_key(&month_keys, &nmonth_keys, &month_cap, month) != 0) {
-                free(month);
-                err_set(e, "out of memory");
-                goto fail;
-            }
-        }
         cands[w++] = cands[i];
         if (w - 1 != i) {
             memset(&cands[i], 0, sizeof cands[i]);
         }
     }
     nc = w;
+    if (catalog_narrow_filter(ix, cands, &nc, pq, facets != NULL, &type_keys, &ntype_keys, &type_cap, &folder_keys,
+                              &nfolder_keys, &folder_cap, &month_keys, &nmonth_keys, &month_cap, &record, e) != 0) {
+        goto fail;
+    }
     double best = 0;
     for (int i = 0; i < nc; i++) {
         if (cands[i].raw > best) {
@@ -1900,6 +1909,8 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
     if (facets) {
         memset(facets, 0, sizeof *facets);
         facets->nfiles = nfiles;
+        facets->narrow = record;
+        memset(&record, 0, sizeof record);
         if (keys_to_facets(type_keys, ntype_keys, &facets->types, &facets->ntypes) != 0 ||
             keys_to_facets(folder_keys, nfolder_keys, &facets->folders, &facets->nfolders) != 0 ||
             keys_to_facets(month_keys, nmonth_keys, &facets->months, &facets->nmonths) != 0) {
@@ -1908,6 +1919,7 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
             free_key_array(month_keys, nmonth_keys);
             hits_free(arr, nc);
             cands_free(cands, nc);
+            facets_free(facets);
             err_set(e, "out of memory");
             return -1;
         }
@@ -1920,6 +1932,7 @@ static int finish_search(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, 
     *nhits = nc;
     return 0;
 fail:
+    narrow_free(&record);
     free_key_array(type_keys, ntype_keys);
     free_key_array(folder_keys, nfolder_keys);
     free_key_array(month_keys, nmonth_keys);
@@ -2390,8 +2403,14 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
     if (query_parse(query ? query : "", &pq, e) != 0) {
         return -1;
     }
+    NarrowGate *gate = NULL;
+    if (narrow_gate_open(ix, &pq, &gate, e) != 0) {
+        parsed_free(&pq);
+        return -1;
+    }
     sqlite3_stmt *st = NULL;
     if (prep(ix, &st, "SELECT docid, root_id, rel, title, ext, mtime FROM docs", e) != 0) {
+        narrow_gate_close(gate);
         parsed_free(&pq);
         return -1;
     }
@@ -2407,7 +2426,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
             continue;
         }
         char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
-        int eq = shown && strcmp(shown, path) == 0;
+        int eq = shown && strcmp(shown, path) == 0 && narrow_gate_ok(gate, shown);
         free(shown);
         if (eq) {
             found = sqlite3_column_int64(st, 0);
@@ -2416,6 +2435,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
         }
     }
     sqlite3_finalize(st);
+    narrow_gate_close(gate);
     if (step != SQLITE_ROW && step != SQLITE_DONE) {
         parsed_free(&pq);
         free(ext);
@@ -3678,8 +3698,16 @@ static int match_files(Index *ix, const char *query, AlertFile **out, int *nout,
         return -1;
     }
     (void)match;
+    NarrowGate *gate = NULL;
+    if (narrow_gate_open(ix, &pq, &gate, e) != 0) {
+        cands_free(cands, nc);
+        mx_free(&mx);
+        parsed_free(&pq);
+        return -1;
+    }
     sqlite3_stmt *st = NULL;
     if (prep(ix, &st, "SELECT mtime, nsec, size FROM docs WHERE docid=?", e) != 0) {
+        narrow_gate_close(gate);
         cands_free(cands, nc);
         mx_free(&mx);
         parsed_free(&pq);
@@ -3698,6 +3726,10 @@ static int match_files(Index *ix, const char *query, AlertFile **out, int *nout,
             err_set(e, "out of memory");
             failed = 1;
             break;
+        }
+        if (!narrow_gate_ok(gate, path)) {
+            free(path);
+            continue;
         }
         sqlite3_reset(st);
         sqlite3_clear_bindings(st);
@@ -3722,6 +3754,7 @@ static int match_files(Index *ix, const char *query, AlertFile **out, int *nout,
         }
     }
     sqlite3_finalize(st);
+    narrow_gate_close(gate);
     cands_free(cands, nc);
     mx_free(&mx);
     parsed_free(&pq);
@@ -4364,6 +4397,7 @@ void library_free(Library *lib) {
         free(lib->roots);
     }
     free(lib->root_full);
+    narrow_free(&lib->narrow);
     memset(lib, 0, sizeof *lib);
 }
 
@@ -4580,8 +4614,574 @@ static int volume_push(Volume *v, const char *path, const char *title, const cha
     return 0;
 }
 
-int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
+enum { NG_LANGUAGE = 0, NG_AUTHOR, NG_FORM, NG_PERIOD, NG_GENRE, NG_N, NARROW_SEL_MAX = 64 };
+
+typedef struct NarrowSel {
+    char **v[NG_N];
+    int n[NG_N];
+    int owned;
+} NarrowSel;
+
+struct NarrowGate {
+    Cat *cats;
+    int ncats;
+    NarrowSel sel;
+};
+
+static void sel_clear(NarrowSel *s) {
+    if (!s) {
+        return;
+    }
+    if (s->owned) {
+        for (int g = 0; g < NG_N; g++) {
+            for (int i = 0; i < s->n[g]; i++) {
+                free(s->v[g][i]);
+            }
+            free(s->v[g]);
+        }
+    }
+    memset(s, 0, sizeof *s);
+}
+
+static int sel_any(const NarrowSel *s) {
+    if (!s) {
+        return 0;
+    }
+    for (int g = 0; g < NG_N; g++) {
+        if (s->n[g] > 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void sel_from_query(NarrowSel *s, const ParsedQuery *pq) {
+    memset(s, 0, sizeof *s);
+    if (!pq) {
+        return;
+    }
+    s->v[NG_LANGUAGE] = pq->language;
+    s->n[NG_LANGUAGE] = pq->nlanguage;
+    s->v[NG_AUTHOR] = pq->author;
+    s->n[NG_AUTHOR] = pq->nauthor;
+    s->v[NG_FORM] = pq->form;
+    s->n[NG_FORM] = pq->nform;
+    s->v[NG_PERIOD] = pq->period;
+    s->n[NG_PERIOD] = pq->nperiod;
+    s->v[NG_GENRE] = pq->genre;
+    s->n[NG_GENRE] = pq->ngenre;
+}
+
+static int sel_add(char ***arr, int *n, char *owned, Err *e) {
+    if (*n >= NARROW_SEL_MAX) {
+        free(owned);
+        err_set(e, "too many values");
+        return -1;
+    }
+    size_t bytes = 0;
+    if (size_mul((size_t)*n + 1, sizeof(char *), &bytes) != 0) {
+        free(owned);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    char **grown = realloc(*arr, bytes);
+    if (!grown) {
+        free(owned);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    *arr = grown;
+    (*arr)[(*n)++] = owned;
+    return 0;
+}
+
+static int parse_sel_lines(const char *s, char ***out, int *nout, Err *e) {
+    *out = NULL;
+    *nout = 0;
+    if (!s || !s[0]) {
+        return 0;
+    }
+    const char *p = s;
+    while (*p) {
+        const char *nl = p;
+        while (*nl && *nl != '\n' && *nl != '\r') {
+            nl++;
+        }
+        size_t raw = (size_t)(nl - p);
+        if (raw > 0) {
+            char *tmp = xstrndup(p, raw);
+            if (!tmp) {
+                err_set(e, "out of memory");
+                return -1;
+            }
+            char *piece = field_copy(tmp, 400, 0, e);
+            free(tmp);
+            if (!piece) {
+                return -1;
+            }
+            if (piece[0]) {
+                if (sel_add(out, nout, piece, e) != 0) {
+                    return -1;
+                }
+            } else {
+                free(piece);
+            }
+        }
+        if (!*nl) {
+            break;
+        }
+        p = nl + 1;
+        if (*nl == '\r' && *p == '\n') {
+            p++;
+        }
+    }
+    return 0;
+}
+
+static int narrow_splits(int g) {
+    return g == NG_LANGUAGE || g == NG_AUTHOR;
+}
+
+static const char *narrow_field(const Cat *cat, int g) {
+    int id = CF_LANGUAGE;
+    if (!cat) {
+        return "";
+    }
+    switch (g) {
+    case NG_LANGUAGE:
+        id = CF_LANGUAGE;
+        break;
+    case NG_AUTHOR:
+        id = CF_CREATOR;
+        break;
+    case NG_FORM:
+        id = CF_TYPE;
+        break;
+    case NG_PERIOD:
+        id = CF_COVERAGE;
+        break;
+    case NG_GENRE:
+        id = CF_SUBJECT;
+        break;
+    default:
+        return "";
+    }
+    return cat->field[id] ? cat->field[id] : "";
+}
+
+static void span_trim(const char *s, size_t n, const char **out, size_t *outn) {
+    while (n > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r')) {
+        s++;
+        n--;
+    }
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\n' || s[n - 1] == '\r')) {
+        n--;
+    }
+    *out = s;
+    *outn = n;
+}
+
+static int token_eq(const char *s, size_t n, const char *want) {
+    size_t wn;
+    if (!want) {
+        return 0;
+    }
+    wn = strlen(want);
+    return n == wn && memcmp(s, want, n) == 0;
+}
+
+static int field_has(const char *field, int split, const char *want) {
+    const char *p;
+    if (!want || !want[0] || !field) {
+        return 0;
+    }
+    if (!split) {
+        const char *s = NULL;
+        size_t n = 0;
+        span_trim(field, strlen(field), &s, &n);
+        return token_eq(s, n, want);
+    }
+    p = field;
+    for (;;) {
+        const char *semi = strchr(p, ';');
+        size_t raw = semi ? (size_t)(semi - p) : strlen(p);
+        const char *s = NULL;
+        size_t n = 0;
+        span_trim(p, raw, &s, &n);
+        if (n > 0 && token_eq(s, n, want)) {
+            return 1;
+        }
+        if (!semi) {
+            break;
+        }
+        p = semi + 1;
+    }
+    return 0;
+}
+
+static int group_ok(const char *field, int split, char **sel, int nsel) {
+    if (nsel <= 0) {
+        return 1;
+    }
+    for (int i = 0; i < nsel; i++) {
+        if (field_has(field, split, sel[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* skip is one group to ignore, or -1 to apply every group. */
+static int narrow_passes(const Cat *cat, const NarrowSel *sel, int skip) {
+    for (int g = 0; g < NG_N; g++) {
+        if (g == skip || !sel || sel->n[g] <= 0) {
+            continue;
+        }
+        if (!group_ok(narrow_field(cat, g), narrow_splits(g), sel->v[g], sel->n[g])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+typedef struct TokAcc {
+    char **keys;
+    int n;
+    int cap;
+    int err;
+} TokAcc;
+
+static int tok_keep(const char *s, size_t n, void *ud) {
+    TokAcc *a = ud;
+    char *copy = xstrndup(s, n);
+    if (!copy || push_key(&a->keys, &a->n, &a->cap, copy) != 0) {
+        a->err = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int each_token(const char *field, int split, int (*cb)(const char *, size_t, void *), void *ud) {
+    const char *p;
+    if (!field || !field[0]) {
+        return 0;
+    }
+    if (!split) {
+        const char *s = NULL;
+        size_t n = 0;
+        span_trim(field, strlen(field), &s, &n);
+        if (n == 0) {
+            return 0;
+        }
+        return cb(s, n, ud);
+    }
+    p = field;
+    for (;;) {
+        const char *semi = strchr(p, ';');
+        size_t raw = semi ? (size_t)(semi - p) : strlen(p);
+        const char *s = NULL;
+        size_t n = 0;
+        span_trim(p, raw, &s, &n);
+        if (n > 0) {
+            int rc = cb(s, n, ud);
+            if (rc) {
+                return rc;
+            }
+        }
+        if (!semi) {
+            break;
+        }
+        p = semi + 1;
+    }
+    return 0;
+}
+
+static int facet_keep_selected(Facet **out, int *nout, char **sel, int nsel) {
+    for (int i = 0; i < nsel; i++) {
+        const char *v = sel ? sel[i] : NULL;
+        int found = 0;
+        if (!v || !v[0]) {
+            continue;
+        }
+        for (int j = 0; j < *nout; j++) {
+            if ((*out)[j].value && strcmp((*out)[j].value, v) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (found) {
+            continue;
+        }
+        if (*nout < 0) {
+            return -1;
+        }
+        size_t bytes = 0;
+        Facet *grown;
+        char *copy;
+        if (size_mul((size_t)*nout + 1, sizeof(Facet), &bytes) != 0) {
+            return -1;
+        }
+        grown = realloc(*out, bytes);
+        if (!grown) {
+            return -1;
+        }
+        *out = grown;
+        copy = xstrdup(v);
+        if (!copy) {
+            return -1;
+        }
+        (*out)[*nout].value = copy;
+        (*out)[*nout].count = 0;
+        (*nout)++;
+    }
+    if (*nout > 1) {
+        qsort(*out, (size_t)*nout, sizeof(Facet), facet_cmp);
+    }
+    return 0;
+}
+
+static Facet **narrow_slot(Narrow *n, int g, int **count) {
+    switch (g) {
+    case NG_AUTHOR:
+        *count = &n->nauthor;
+        return &n->author;
+    case NG_FORM:
+        *count = &n->nform;
+        return &n->form;
+    case NG_PERIOD:
+        *count = &n->nperiod;
+        return &n->period;
+    case NG_GENRE:
+        *count = &n->ngenre;
+        return &n->genre;
+    default:
+        *count = &n->nlanguage;
+        return &n->language;
+    }
+}
+
+static int fill_narrow(const Cat *const *rows, int nrows, const NarrowSel *sel, Narrow *out, Err *e) {
     memset(out, 0, sizeof *out);
+    for (int g = 0; g < NG_N; g++) {
+        TokAcc acc;
+        int *count = NULL;
+        Facet **slot;
+        memset(&acc, 0, sizeof acc);
+        for (int i = 0; i < nrows; i++) {
+            const Cat *cat = rows ? rows[i] : NULL;
+            if (!narrow_passes(cat, sel, g)) {
+                continue;
+            }
+            if (each_token(narrow_field(cat, g), narrow_splits(g), tok_keep, &acc) != 0 || acc.err) {
+                free_key_array(acc.keys, acc.n);
+                narrow_free(out);
+                err_set(e, "out of memory");
+                return -1;
+            }
+        }
+        slot = narrow_slot(out, g, &count);
+        if (keys_to_facets(acc.keys, acc.n, slot, count) != 0) {
+            free_key_array(acc.keys, acc.n);
+            narrow_free(out);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        free_key_array(acc.keys, acc.n);
+        if (facet_keep_selected(slot, count, sel ? sel->v[g] : NULL, sel ? sel->n[g] : 0) != 0) {
+            narrow_free(out);
+            err_set(e, "out of memory");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int push_file_facet(const Cand *c, char ***type_keys, int *ntype, int *type_cap, char ***folder_keys,
+                           int *nfolder, int *folder_cap, char ***month_keys, int *nmonth, int *month_cap, Err *e) {
+    if (c->ext && c->ext[0]) {
+        char *copy = xstrdup(c->ext);
+        if (!copy || push_key(type_keys, ntype, type_cap, copy) != 0) {
+            err_set(e, "out of memory");
+            return -1;
+        }
+    }
+    char *folder = NULL;
+    if (parent_folder(c->rel, &folder) != 0) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    if (folder && push_key(folder_keys, nfolder, folder_cap, folder) != 0) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    char *month = month_key(c->mtime);
+    if (!month || push_key(month_keys, nmonth, month_cap, month) != 0) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    return 0;
+}
+
+static int catalog_narrow_filter(Index *ix, Cand *cands, int *nc, const ParsedQuery *pq, int with_facets,
+                                 char ***type_keys, int *ntype, int *type_cap, char ***folder_keys, int *nfolder,
+                                 int *folder_cap, char ***month_keys, int *nmonth, int *month_cap, Narrow *narrow,
+                                 Err *e) {
+    NarrowSel sel;
+    Cat *cats = NULL;
+    int ncats = 0;
+    const Cat **rows = NULL;
+    int filter;
+    memset(narrow, 0, sizeof *narrow);
+    sel_from_query(&sel, pq);
+    filter = sel_any(&sel);
+    if (!filter && !with_facets) {
+        return 0;
+    }
+    if (load_catalog(ix->db, &cats, &ncats, e) != 0) {
+        return -1;
+    }
+    if (*nc > 0) {
+        size_t bytes = 0;
+        if (size_mul((size_t)*nc, sizeof *rows, &bytes) != 0) {
+            cats_free(cats, ncats);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        rows = calloc((size_t)*nc, sizeof *rows);
+        if (!rows) {
+            cats_free(cats, ncats);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        for (int i = 0; i < *nc; i++) {
+            rows[i] = cat_find(cats, ncats, cands[i].path);
+        }
+    }
+    if (with_facets) {
+        if (fill_narrow(rows, *nc, &sel, narrow, e) != 0) {
+            free(rows);
+            cats_free(cats, ncats);
+            return -1;
+        }
+        for (int i = 0; i < *nc; i++) {
+            if (!narrow_passes(rows ? rows[i] : NULL, &sel, -1)) {
+                continue;
+            }
+            if (push_file_facet(&cands[i], type_keys, ntype, type_cap, folder_keys, nfolder, folder_cap, month_keys,
+                                nmonth, month_cap, e) != 0) {
+                narrow_free(narrow);
+                free(rows);
+                cats_free(cats, ncats);
+                return -1;
+            }
+        }
+    }
+    int w = 0;
+    for (int i = 0; i < *nc; i++) {
+        const Cat *cat = rows ? rows[i] : NULL;
+        if (filter && !narrow_passes(cat, &sel, -1)) {
+            cand_free(&cands[i]);
+            continue;
+        }
+        cands[w++] = cands[i];
+        if (w - 1 != i) {
+            memset(&cands[i], 0, sizeof cands[i]);
+        }
+    }
+    *nc = w;
+    free(rows);
+    cats_free(cats, ncats);
+    return 0;
+}
+
+static int narrow_gate_open(Index *ix, const ParsedQuery *pq, NarrowGate **out, Err *e) {
+    NarrowGate *g = calloc(1, sizeof *g);
+    *out = NULL;
+    if (!g) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    sel_from_query(&g->sel, pq);
+    if (sel_any(&g->sel) && load_catalog(ix->db, &g->cats, &g->ncats, e) != 0) {
+        free(g);
+        return -1;
+    }
+    *out = g;
+    return 0;
+}
+
+static void narrow_gate_close(NarrowGate *g) {
+    if (!g) {
+        return;
+    }
+    cats_free(g->cats, g->ncats);
+    free(g);
+}
+
+static int narrow_gate_ok(const NarrowGate *g, const char *path) {
+    if (!g || !sel_any(&g->sel)) {
+        return 1;
+    }
+    return narrow_passes(cat_find(g->cats, g->ncats, path), &g->sel, -1);
+}
+
+typedef struct ShelfRow {
+    char *path;
+    char *title;
+    char *ext;
+    int64_t mtime;
+    int64_t size;
+    const Cat *cat;
+} ShelfRow;
+
+static void shelf_rows_free(ShelfRow *rows, int n) {
+    if (!rows) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        free(rows[i].path);
+        free(rows[i].title);
+        free(rows[i].ext);
+    }
+    free(rows);
+}
+
+static int library_fail(char *needle, NarrowSel *sel, Cat *cats, int ncats, ShelfRow *rows, int nrows, const Cat **of,
+                        Volume *vols, int nvols, Narrow *built, sqlite3_stmt *st) {
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    narrow_free(built);
+    volumes_free(vols, nvols);
+    shelf_rows_free(rows, nrows);
+    free((void *)of);
+    cats_free(cats, ncats);
+    sel_clear(sel);
+    free(needle);
+    return -1;
+}
+
+int index_library_narrow(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                         const char *period, const char *genre, Library *out, Err *e) {
+    char *needle = NULL;
+    NarrowSel sel;
+    Cat *cats = NULL;
+    int ncats = 0;
+    ShelfRow *rows = NULL;
+    int nrows = 0;
+    const Cat **of = NULL;
+    Volume *vols = NULL;
+    int nvols = 0;
+    int total = 0;
+    Narrow built;
+    sqlite3_stmt *st = NULL;
+    const char *lines[NG_N];
+    const char *list_sql;
+    int step = SQLITE_DONE;
+    memset(out, 0, sizeof *out);
+    memset(&sel, 0, sizeof sel);
+    memset(&built, 0, sizeof built);
+    sel.owned = 1;
     if (!ix) {
         err_set(e, "no index");
         return -1;
@@ -4589,33 +5189,31 @@ int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
     if (reload_roots(ix, e) != 0) {
         return -1;
     }
-    char *needle = NULL;
     if (filter && filter[0]) {
         needle = field_copy(filter, 200, 0, e);
         if (!needle) {
             return -1;
         }
     }
-    Cat *cats = NULL;
-    int ncats = 0;
+    lines[NG_LANGUAGE] = language;
+    lines[NG_AUTHOR] = author;
+    lines[NG_FORM] = form;
+    lines[NG_PERIOD] = period;
+    lines[NG_GENRE] = genre;
+    for (int g = 0; g < NG_N; g++) {
+        if (parse_sel_lines(lines[g], &sel.v[g], &sel.n[g], e) != 0) {
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+    }
     if (load_catalog(ix->db, &cats, &ncats, e) != 0) {
-        free(needle);
-        return -1;
+        return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
     }
-    sqlite3_stmt *st = NULL;
-    const char *list_sql = index_shelf_ready(ix)
-                                ? "SELECT title, ext, mtime, size, root_id, rel FROM docs INDEXED BY docs_shelf "
-                                  "ORDER BY title, rel"
-                                : "SELECT title, ext, mtime, size, root_id, rel FROM docs ORDER BY title, rel";
+    list_sql = index_shelf_ready(ix) ? "SELECT title, ext, mtime, size, root_id, rel FROM docs INDEXED BY docs_shelf "
+                                       "ORDER BY title, rel"
+                                     : "SELECT title, ext, mtime, size, root_id, rel FROM docs ORDER BY title, rel";
     if (prep(ix, &st, list_sql, e) != 0) {
-        cats_free(cats, ncats);
-        free(needle);
-        return -1;
+        return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
     }
-    Volume *vols = NULL;
-    int n = 0;
-    int total = 0;
-    int step;
     while ((step = sqlite3_step(st)) == SQLITE_ROW) {
         const char *title = (const char *)sqlite3_column_text(st, 0);
         const char *ext = (const char *)sqlite3_column_text(st, 1);
@@ -4624,68 +5222,116 @@ int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
         int64_t root_id = sqlite3_column_int64(st, 4);
         const char *rel = (const char *)sqlite3_column_text(st, 5);
         char *path = display_path(ix, root_id, rel, NULL);
+        char *title_copy;
+        char *ext_copy;
+        size_t bytes = 0;
+        ShelfRow *grown;
+        const Cat *cat;
         if (!path) {
-            sqlite3_finalize(st);
-            cats_free(cats, ncats);
-            volumes_free(vols, n);
-            free(needle);
             err_set(e, "out of memory");
-            return -1;
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
         }
-        const Cat *cat = cat_find(cats, ncats, path);
+        cat = cat_find(cats, ncats, path);
         if (!shelf_match(needle, path, title, ext, cat)) {
             free(path);
             continue;
         }
-        total++;
-        if (n >= LIBRARY_SHOW) {
+        title_copy = xstrdup(title ? title : "");
+        ext_copy = xstrdup(ext ? ext : "");
+        if (!title_copy || !ext_copy || size_mul((size_t)nrows + 1, sizeof *rows, &bytes) != 0) {
             free(path);
-            continue;
-        }
-        Volume one;
-        if (volume_push(&one, path, title, ext, mtime, size, cat) != 0) {
-            free(path);
-            sqlite3_finalize(st);
-            cats_free(cats, ncats);
-            free(needle);
-            volumes_free(vols, n);
+            free(title_copy);
+            free(ext_copy);
             err_set(e, "out of memory");
-            return -1;
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
         }
-        free(path);
-        size_t bytes = 0;
-        if (size_mul((size_t)n + 1, sizeof *vols, &bytes) != 0) {
-            volume_clear(&one);
-            sqlite3_finalize(st);
-            cats_free(cats, ncats);
-            free(needle);
-            volumes_free(vols, n);
-            err_set(e, "out of memory");
-            return -1;
-        }
-        Volume *grown = realloc(vols, bytes);
+        grown = realloc(rows, bytes);
         if (!grown) {
-            volume_clear(&one);
-            sqlite3_finalize(st);
-            cats_free(cats, ncats);
-            free(needle);
-            volumes_free(vols, n);
+            free(path);
+            free(title_copy);
+            free(ext_copy);
             err_set(e, "out of memory");
-            return -1;
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
         }
-        vols = grown;
-        vols[n++] = one;
+        rows = grown;
+        rows[nrows].path = path;
+        rows[nrows].title = title_copy;
+        rows[nrows].ext = ext_copy;
+        rows[nrows].mtime = mtime;
+        rows[nrows].size = size;
+        rows[nrows].cat = cat;
+        nrows++;
     }
     sqlite3_finalize(st);
-    cats_free(cats, ncats);
-    free(needle);
+    st = NULL;
     if (step != SQLITE_DONE) {
-        volumes_free(vols, n);
-        return db_fail(ix, e, "library");
+        db_fail(ix, e, "library");
+        return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+    }
+    if (nrows > 0) {
+        size_t bytes = 0;
+        if (size_mul((size_t)nrows, sizeof *of, &bytes) != 0) {
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+        of = calloc((size_t)nrows, sizeof *of);
+        if (!of) {
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+        for (int i = 0; i < nrows; i++) {
+            of[i] = rows[i].cat;
+        }
+    }
+    if (fill_narrow(of, nrows, &sel, &built, e) != 0) {
+        return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+    }
+    for (int i = 0; i < nrows; i++) {
+        Volume one;
+        size_t bytes = 0;
+        Volume *grown;
+        if (!narrow_passes(rows[i].cat, &sel, -1)) {
+            continue;
+        }
+        total++;
+        if (nvols >= LIBRARY_SHOW) {
+            continue;
+        }
+        if (volume_push(&one, rows[i].path, rows[i].title, rows[i].ext, rows[i].mtime, rows[i].size, rows[i].cat) !=
+            0) {
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+        if (size_mul((size_t)nvols + 1, sizeof *vols, &bytes) != 0) {
+            volume_clear(&one);
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+        grown = realloc(vols, bytes);
+        if (!grown) {
+            volume_clear(&one);
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
+        vols = grown;
+        vols[nvols++] = one;
     }
     out->volumes = vols;
-    out->n = n;
+    out->n = nvols;
     out->total = total;
+    out->narrow = built;
+    vols = NULL;
+    nvols = 0;
+    memset(&built, 0, sizeof built);
+    shelf_rows_free(rows, nrows);
+    rows = NULL;
+    free(of);
+    of = NULL;
+    cats_free(cats, ncats);
+    cats = NULL;
+    sel_clear(&sel);
+    free(needle);
+    needle = NULL;
     if (ix->nroots > 0) {
         out->roots = calloc(ix->nroots, sizeof *out->roots);
         out->root_full = calloc(ix->nroots, sizeof *out->root_full);
@@ -4706,6 +5352,10 @@ int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
         }
     }
     return 0;
+}
+
+int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
+    return index_library_narrow(ix, filter, NULL, NULL, NULL, NULL, NULL, out, e);
 }
 
 int index_catalog_put(Index *ix, const Volume *rec, Err *e) {

@@ -70,6 +70,23 @@ typedef struct Facet {
     int count;
 } Facet;
 
+/* Language, author, form, period, and genre from the record. Author is the
+ * creator, form the type, period the coverage, and genre the subject.
+ * A creator or a language may hold several names separated by semicolons.
+ * The others are one value. Counts are files. */
+typedef struct Narrow {
+    Facet *language;
+    int nlanguage;
+    Facet *author;
+    int nauthor;
+    Facet *form;
+    int nform;
+    Facet *period;
+    int nperiod;
+    Facet *genre;
+    int ngenre;
+} Narrow;
+
 typedef struct Facets {
     Facet *types;
     int ntypes;
@@ -77,7 +94,8 @@ typedef struct Facets {
     int nfolders;
     Facet *months;
     int nmonths;
-    /* Matching files before the limit trim. */
+    Narrow narrow;
+    /* Matching files before the limit trim, after the record filters. */
     int nfiles;
 } Facets;
 
@@ -223,11 +241,18 @@ typedef struct Library {
     char **roots;
     uint8_t *root_full;
     int nroots;
+    /* Counts over every volume the text filter matches, past LIBRARY_SHOW.
+     * Each group ignores its own selection and keeps a selected name at 0. */
+    Narrow narrow;
 } Library;
 
 int index_shelf_ready(Index *ix);
 int index_shelf_build(Index *ix, Err *e);
 int index_library_list(Index *ix, const char *filter, Library *out, Err *e);
+/* language, author, form, period, and genre are newline-separated selections.
+ * Empty means that group is open. Several names in one group match any of them. */
+int index_library_narrow(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                         const char *period, const char *genre, Library *out, Err *e);
 void library_free(Library *lib);
 /* rec->path is the volume. The other fields are copied. A title updates the
  * title search uses. The file on disk is left where it is. */

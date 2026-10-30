@@ -47,6 +47,18 @@ typedef struct ParsedQuery {
     /* mtime_year is 0 when the query has no month. Otherwise both are set. */
     int mtime_year;
     int mtime_mon;
+    /* Record filters. Several values of one kind are OR. The kinds combine.
+     * Author is the creator, form the type, period the coverage, genre the subject. */
+    char **language;
+    int nlanguage;
+    char **author;
+    int nauthor;
+    char **form;
+    int nform;
+    char **period;
+    int nperiod;
+    char **genre;
+    int ngenre;
 } ParsedQuery;
 
 int query_parse(const char *s, ParsedQuery *out, Err *e);

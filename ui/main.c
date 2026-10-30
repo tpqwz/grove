@@ -54,6 +54,9 @@ static void ui_leave(void) {
     pthread_mutex_unlock(&call_mu);
 }
 
+static int write_facet_list(Buf *b, const Facet *a, int n);
+static int write_narrow(Buf *b, const Narrow *n);
+
 static int jesc(Buf *b, const char *s) {
     if (buf_putc(b, '"') != 0) {
         return -1;
@@ -263,19 +266,8 @@ static char *search_json(const char *query) {
             goto fail;
         }
     }
-    if (buf_puts(&b, "],\"months\":[") != 0) {
-        goto fail;
-    }
-    for (int t = 0; t < facets.nmonths; t++) {
-        if (t && buf_putc(&b, ',') != 0) {
-            goto fail;
-        }
-        if (buf_puts(&b, "{\"value\":") != 0 || jesc(&b, facets.months[t].value) != 0 ||
-            buf_printf(&b, ",\"count\":%d}", facets.months[t].count) != 0) {
-            goto fail;
-        }
-    }
-    if (buf_puts(&b, "]}}") != 0) {
+    if (buf_puts(&b, "],\"months\":[") != 0 || write_facet_list(&b, facets.months, facets.nmonths) != 0 ||
+        buf_puts(&b, "],\"narrow\":") != 0 || write_narrow(&b, &facets.narrow) != 0 || buf_puts(&b, "}}") != 0) {
         goto fail;
     }
     hits_free(hits, n);
@@ -1481,6 +1473,48 @@ static char *pick_json(const char *kind) {
     return path_json(out);
 }
 
+static int write_facet_list(Buf *b, const Facet *a, int n) {
+    for (int t = 0; t < n; t++) {
+        if (t && buf_putc(b, ',') != 0) {
+            return -1;
+        }
+        if (buf_puts(b, "{\"value\":") != 0 || jesc(b, a[t].value) != 0 ||
+            buf_printf(b, ",\"count\":%d}", a[t].count) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int write_narrow(Buf *b, const Narrow *n) {
+    const Facet *cols[5];
+    int ns[5];
+    const char *names[5] = {"language", "author", "form", "period", "genre"};
+    cols[0] = n->language;
+    ns[0] = n->nlanguage;
+    cols[1] = n->author;
+    ns[1] = n->nauthor;
+    cols[2] = n->form;
+    ns[2] = n->nform;
+    cols[3] = n->period;
+    ns[3] = n->nperiod;
+    cols[4] = n->genre;
+    ns[4] = n->ngenre;
+    if (buf_putc(b, '{') != 0) {
+        return -1;
+    }
+    for (int i = 0; i < 5; i++) {
+        if (i && buf_putc(b, ',') != 0) {
+            return -1;
+        }
+        if (buf_putc(b, '"') != 0 || buf_puts(b, names[i]) != 0 || buf_puts(b, "\":[") != 0 ||
+            write_facet_list(b, cols[i], ns[i]) != 0 || buf_putc(b, ']') != 0) {
+            return -1;
+        }
+    }
+    return buf_putc(b, '}');
+}
+
 static int jstr(Buf *b, const char *key, const char *val) {
     if (buf_putc(b, ',') != 0 || buf_putc(b, '"') != 0 || buf_puts(b, key) != 0 || buf_puts(b, "\":") != 0) {
         return -1;
@@ -1488,7 +1522,8 @@ static int jstr(Buf *b, const char *key, const char *val) {
     return jesc(b, val);
 }
 
-static char *library_json(const char *filter) {
+static char *library_json(const char *filter, const char *language, const char *author, const char *form,
+                           const char *period, const char *genre) {
     if (!ix) {
         return json_error(open_err[0] ? open_err : "no index");
     }
@@ -1499,7 +1534,8 @@ static char *library_json(const char *filter) {
     memset(&lib, 0, sizeof lib);
     Err e;
     err_clear(&e);
-    if (index_library_list(ix, filter && filter[0] ? filter : NULL, &lib, &e) != 0) {
+    if (index_library_narrow(ix, filter && filter[0] ? filter : NULL, language, author, form, period, genre, &lib,
+                             &e) != 0) {
         return json_error(e.msg[0] ? e.msg : "could not read the library");
     }
     Buf b;
@@ -1537,7 +1573,7 @@ static char *library_json(const char *filter) {
             goto fail;
         }
     }
-    if (buf_puts(&b, "]}") != 0) {
+    if (buf_puts(&b, "],\"narrow\":") != 0 || write_narrow(&b, &lib.narrow) != 0 || buf_putc(&b, '}') != 0) {
         goto fail;
     }
     library_free(&lib);
@@ -1571,12 +1607,26 @@ static const char *arg_at(webui_event_t *e, size_t i) {
 }
 
 static void on_library(webui_event_t *e) {
-    const char *in = webui_get_string_at(e, 0);
-    char *filter = xstrdup(in ? in : "");
+    char *field[6];
+    int n = 0;
+    char *json = NULL;
+    for (size_t i = 0; i < 6; i++) {
+        field[i] = xstrdup(arg_at(e, i));
+        if (!field[i]) {
+            for (int j = 0; j < n; j++) {
+                free(field[j]);
+            }
+            reply(e, "{\"error\":\"out of memory\"}");
+            return;
+        }
+        n++;
+    }
     pthread_mutex_lock(&mu);
-    char *json = filter ? library_json(filter) : NULL;
+    json = library_json(field[0], field[1], field[2], field[3], field[4], field[5]);
     pthread_mutex_unlock(&mu);
-    free(filter);
+    for (int i = 0; i < 6; i++) {
+        free(field[i]);
+    }
     reply_owned(e, json);
 }
 

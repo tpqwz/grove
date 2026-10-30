@@ -458,6 +458,73 @@
   }
   .modal-actions button { color: var(--focus); font-size: 0.95rem; }
   .modal-actions button:hover { text-decoration: underline; }
+  .wrap:not(.split):has(#search-narrow:not([hidden])) {
+    width: min(58rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
+  }
+  #search-view { container-type: inline-size; }
+  .narrow-open { color: var(--focus); font-size: 0.9rem; margin: 0.15rem 0 0.35rem; }
+  .narrow-open[hidden] { display: none; }
+  .narrow-aside { display: none; }
+  .shelf { min-width: 0; }
+  @container (min-width: 38rem) {
+    .shelf:has(> .narrow-aside:not([hidden])) {
+      display: grid;
+      grid-template-columns: 15rem minmax(0, 1fr);
+      column-gap: clamp(1.25rem, 3vw, 2.5rem);
+      align-items: start;
+    }
+    .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
+      display: block;
+      position: sticky;
+      top: 0.25rem;
+      max-height: calc(100dvh - 1.5rem);
+      overflow: auto;
+    }
+    .narrow-open { display: none; }
+  }
+  .narrow-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; }
+  .narrow-title {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .narrow-clear { color: var(--focus); font-size: 0.82rem; }
+  .narrow-clear:hover { text-decoration: underline; }
+  .narrow-group { border: 0; margin: 0.95rem 0 0; padding: 0; min-width: 0; }
+  .narrow-group legend { padding: 0; margin: 0 0 0.15rem; color: var(--muted); font-size: 0.78rem; }
+  .narrow-opt {
+    display: flex;
+    width: 100%;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.65rem;
+    padding: 0.28rem 0.4rem;
+    border-radius: 6px;
+    font-size: 0.92rem;
+  }
+  .narrow-opt .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .narrow-opt .n { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .narrow-opt[aria-pressed="true"] { background: var(--mark); }
+  .narrow-opt:hover { background: #efe8dc; }
+  .narrow-opt[aria-pressed="true"]:hover { background: var(--mark); }
+  .narrow-empty { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.85rem; }
+  .narrow-sheet[hidden] { display: none; }
+  .narrow-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 28;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--ink);
+    padding: clamp(0.8rem, 3vw, 1.25rem);
+  }
+  .narrow-sheet .narrow-body { overflow: auto; min-height: 0; flex: 1; }
+  .narrow-done { color: var(--focus); font-size: 0.95rem; margin-top: 0.8rem; align-self: flex-start; }
+  .narrow-done:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -469,6 +536,10 @@
       <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
     </div>
     <div id="search-view">
+    <button type="button" id="search-narrow-open" class="narrow-open" hidden>Narrow</button>
+    <div class="shelf">
+    <aside id="search-narrow" class="narrow-aside" hidden></aside>
+    <div class="shelf-main">
     <header id="search-head">
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
@@ -483,7 +554,13 @@
     </header>
     <main id="results"></main>
     </div>
+    </div>
+    </div>
     <div id="library-view" hidden>
+      <button type="button" id="lib-narrow-open" class="narrow-open">Narrow</button>
+      <div class="shelf">
+      <aside id="lib-narrow" class="narrow-aside"></aside>
+      <div class="shelf-main">
       <p class="help">Add a folder or a file. Edit describes the volume. The text stays in the file.</p>
       <div class="lib-tools">
         <button type="button" id="lib-folder">Add a folder</button>
@@ -495,6 +572,8 @@
       <p class="count" id="lib-count"></p>
       <p class="err" id="lib-err" hidden></p>
       <div id="lib-rows"></div>
+      </div>
+      </div>
     </div>
     </div>
     <div id="reader-col" hidden>
@@ -513,6 +592,10 @@
       </div>
     </div>
   </form>
+  <div id="narrow-sheet" class="narrow-sheet" role="dialog" aria-modal="true" aria-label="Narrow" hidden>
+    <div id="narrow-sheet-body" class="narrow-body"></div>
+    <button type="button" id="narrow-done">Done</button>
+  </div>
 <script>
 const q = document.getElementById("q");
 const also = document.getElementById("also");
@@ -541,6 +624,13 @@ const libEditTitle = document.getElementById("lib-edit-title");
 const libEditPath = document.getElementById("lib-edit-path");
 const libEditFields = document.getElementById("lib-edit-fields");
 const libRows = document.getElementById("lib-rows");
+const searchNarrowOpen = document.getElementById("search-narrow-open");
+const searchNarrowEl = document.getElementById("search-narrow");
+const libNarrowOpen = document.getElementById("lib-narrow-open");
+const libNarrowEl = document.getElementById("lib-narrow");
+const narrowSheet = document.getElementById("narrow-sheet");
+const narrowSheetBody = document.getElementById("narrow-sheet-body");
+const narrowDone = document.getElementById("narrow-done");
 let seq = 0;
 let savedSeq = 0;
 let alertSeq = 0;
@@ -682,6 +772,276 @@ function combinedQuery() {
   if (!b) return a;
   return "(" + a + ") AND (" + b + ")";
 }
+
+const NARROW_ORDER = ["language", "author", "form", "period", "genre"];
+const NARROW_LABEL = {
+  language: "Language",
+  author: "Author",
+  form: "Form",
+  period: "Period",
+  genre: "Genre"
+};
+const NARROW_EMPTY = "These fill in from the record.";
+const NARROW_SEL_MAX = 64;
+
+function emptyNarrow() {
+  return {language: [], author: [], form: [], period: [], genre: []};
+}
+
+let searchNarrow = emptyNarrow();
+let libraryNarrow = emptyNarrow();
+let searchGroups = null;
+let libraryGroups = null;
+let sheetKind = "";
+let sheetOpener = null;
+
+function copyNarrow(sel) {
+  const out = emptyNarrow();
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const key = NARROW_ORDER[i];
+    out[key] = (sel && sel[key] ? sel[key] : []).slice();
+  }
+  return out;
+}
+
+function narrowActive(sel) {
+  if (!sel) return false;
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const list = sel[NARROW_ORDER[i]];
+    if (list && list.length) return true;
+  }
+  return false;
+}
+
+function groupsEmpty(narrow) {
+  if (!narrow) return true;
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const rows = narrow[NARROW_ORDER[i]];
+    if (rows && rows.length) return false;
+  }
+  return true;
+}
+
+function saveNarrow(key, sel) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(copyNarrow(sel)));
+  } catch (e) {}
+}
+
+function readNarrow(key) {
+  const out = emptyNarrow();
+  let raw = "";
+  try {
+    raw = sessionStorage.getItem(key) || "";
+  } catch (e) {
+    return out;
+  }
+  if (!raw) return out;
+  let data = null;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return out;
+  }
+  if (!data || typeof data !== "object") return out;
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const keyName = NARROW_ORDER[i];
+    const arr = data[keyName];
+    if (!Array.isArray(arr)) continue;
+    for (let j = 0; j < arr.length; j++) {
+      const value = arr[j];
+      if (typeof value !== "string" || !value) continue;
+      if (out[keyName].length >= NARROW_SEL_MAX) break;
+      out[keyName].push(value);
+    }
+  }
+  return out;
+}
+
+function narrowSuffix(sel) {
+  const parts = [];
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const key = NARROW_ORDER[i];
+    const list = sel && sel[key] ? sel[key] : [];
+    for (let j = 0; j < list.length; j++) {
+      if (!list[j]) continue;
+      parts.push(key + ":" + quoteFilter(list[j]));
+    }
+  }
+  return parts.join(" ");
+}
+
+function shownQuery() {
+  const box = combinedQuery();
+  const suffix = narrowSuffix(searchNarrow);
+  if (!box) return suffix;
+  if (!suffix) return box;
+  return box + " " + suffix;
+}
+
+function narrowArg(sel, key) {
+  const list = sel && sel[key] ? sel[key] : [];
+  return list.join("\n");
+}
+
+function toggleList(list, value) {
+  const at = list.indexOf(value);
+  if (at >= 0) {
+    list.splice(at, 1);
+    return true;
+  }
+  if (list.length >= NARROW_SEL_MAX) return false;
+  list.push(value);
+  return true;
+}
+
+function fillNarrow(el, narrow, sel, onToggle, onClear, emptyCopy) {
+  if (!el) return;
+  el.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "narrow-head";
+  const title = document.createElement("h2");
+  title.className = "narrow-title";
+  title.textContent = "Narrow";
+  head.append(title);
+  if (narrowActive(sel)) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "narrow-clear";
+    clear.textContent = "Clear";
+    clear.addEventListener("click", onClear);
+    head.append(clear);
+  }
+  el.append(head);
+  if (groupsEmpty(narrow)) {
+    if (emptyCopy) {
+      const note = document.createElement("p");
+      note.className = "narrow-empty";
+      note.textContent = emptyCopy;
+      el.append(note);
+    }
+    return;
+  }
+  for (let i = 0; i < NARROW_ORDER.length; i++) {
+    const key = NARROW_ORDER[i];
+    const rows = narrow && Array.isArray(narrow[key]) ? narrow[key] : [];
+    if (!rows.length) continue;
+    const group = document.createElement("fieldset");
+    group.className = "narrow-group";
+    const legend = document.createElement("legend");
+    legend.textContent = NARROW_LABEL[key];
+    group.append(legend);
+    const chosen = sel && sel[key] ? sel[key] : [];
+    for (let j = 0; j < rows.length; j++) {
+      const row = rows[j];
+      if (!row || typeof row.value !== "string" || !row.value) continue;
+      const value = row.value;
+      const count = typeof row.count === "number" ? row.count : 0;
+      const pressed = chosen.indexOf(value) >= 0;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "narrow-opt";
+      btn.title = value;
+      btn.setAttribute("aria-pressed", pressed ? "true" : "false");
+      const files = count === 1 ? "file" : "files";
+      btn.setAttribute("aria-label", value + ", " + count + " " + files);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = value;
+      const n = document.createElement("span");
+      n.className = "n";
+      n.textContent = String(count);
+      btn.append(name, n);
+      btn.addEventListener("click", function () { onToggle(key, value); });
+      group.append(btn);
+    }
+    if (group.querySelector(".narrow-opt")) el.append(group);
+  }
+}
+
+function narrowButton(btn, sel) {
+  if (!btn) return;
+  btn.textContent = narrowActive(sel) ? "Narrow · on" : "Narrow";
+}
+
+function paintSearchNarrow() {
+  const show = !groupsEmpty(searchGroups);
+  if (searchNarrowEl) searchNarrowEl.hidden = !show;
+  if (searchNarrowOpen) searchNarrowOpen.hidden = !show;
+  narrowButton(searchNarrowOpen, searchNarrow);
+  if (show) fillNarrow(searchNarrowEl, searchGroups, searchNarrow, toggleSearch, clearSearch, "");
+  if (sheetKind === "search") {
+    if (show && narrowSheet && !narrowSheet.hidden) {
+      fillNarrow(narrowSheetBody, searchGroups, searchNarrow, toggleSearch, clearSearch, "");
+    } else if (!show) {
+      closeNarrowSheet();
+    }
+  }
+}
+
+function paintLibraryNarrow() {
+  narrowButton(libNarrowOpen, libraryNarrow);
+  const copy = groupsEmpty(libraryGroups) ? NARROW_EMPTY : "";
+  fillNarrow(libNarrowEl, libraryGroups, libraryNarrow, toggleLibrary, clearLibrary, copy);
+  if (sheetKind === "library" && narrowSheet && !narrowSheet.hidden) {
+    fillNarrow(narrowSheetBody, libraryGroups, libraryNarrow, toggleLibrary, clearLibrary, copy);
+  }
+}
+
+function toggleSearch(key, value) {
+  if (!toggleList(searchNarrow[key], value)) {
+    showError("too many values");
+    return;
+  }
+  showError("");
+  saveNarrow("grove.narrow.search", searchNarrow);
+  paintSearchNarrow();
+  runSearch();
+}
+
+function clearSearch() {
+  searchNarrow = emptyNarrow();
+  saveNarrow("grove.narrow.search", searchNarrow);
+  paintSearchNarrow();
+  runSearch();
+}
+
+function toggleLibrary(key, value) {
+  if (!toggleList(libraryNarrow[key], value)) {
+    showLibError("too many values");
+    return;
+  }
+  showLibError("");
+  saveNarrow("grove.narrow.library", libraryNarrow);
+  paintLibraryNarrow();
+  loadLibrary();
+}
+
+function clearLibrary() {
+  libraryNarrow = emptyNarrow();
+  saveNarrow("grove.narrow.library", libraryNarrow);
+  paintLibraryNarrow();
+  loadLibrary();
+}
+
+function openNarrowSheet(kind, opener) {
+  sheetKind = kind;
+  sheetOpener = opener || null;
+  if (narrowSheet) narrowSheet.hidden = false;
+  if (kind === "library") paintLibraryNarrow();
+  else paintSearchNarrow();
+  if (narrowDone) narrowDone.focus();
+}
+
+function closeNarrowSheet() {
+  const was = narrowSheet && !narrowSheet.hidden;
+  if (narrowSheet) narrowSheet.hidden = true;
+  const back = sheetOpener;
+  sheetKind = "";
+  sheetOpener = null;
+  if (was && back && back.isConnected) back.focus();
+}
+
 
 function collectFilters() {
   const out = [];
@@ -1436,7 +1796,8 @@ function alertCount(query) {
 function drawSaved() {
   savedRow.replaceChildren();
   const current = combinedQuery();
-  const watching = current && alertCount(current) >= 0;
+  const watched = shownQuery();
+  const watching = watched && alertCount(watched) >= 0;
   if (current && remembered.indexOf(current) < 0) {
     const keep = document.createElement("button");
     keep.type = "button";
@@ -1446,13 +1807,13 @@ function drawSaved() {
     keep.addEventListener("click", function () { remember(current); });
     savedRow.append(keep);
   }
-  if (current && !watching) {
+  if (watched && !watching) {
     const watch = document.createElement("button");
     watch.type = "button";
     watch.className = "watch";
     watch.textContent = "Watch";
     watch.setAttribute("aria-label", "Watch this search");
-    watch.addEventListener("click", function () { watchQuery(current); });
+    watch.addEventListener("click", function () { watchQuery(watched); });
     savedRow.append(watch);
   }
   if (watching) {
@@ -1461,7 +1822,7 @@ function drawSaved() {
     stop.className = "unwatch";
     stop.textContent = "Unwatch";
     stop.setAttribute("aria-label", "Stop watching this search");
-    stop.addEventListener("click", function () { unwatchQuery(current); });
+    stop.addEventListener("click", function () { unwatchQuery(watched); });
     savedRow.append(stop);
   }
   remembered.forEach(function (query) {
@@ -1599,13 +1960,15 @@ async function seenNew(query) {
 
 async function runSearch() {
   const id = ++seq;
-  const query = combinedQuery();
+  const query = shownQuery();
   drawChips();
   drawSaved();
   showError("");
   if (!query.trim()) {
     results.replaceChildren();
     count.textContent = "";
+    searchGroups = null;
+    paintSearchNarrow();
     return;
   }
   count.textContent = "Searching…";
@@ -1616,6 +1979,8 @@ async function runSearch() {
     if (id !== seq) return;
     count.textContent = "";
     showError("Search failed");
+    searchGroups = null;
+    paintSearchNarrow();
     return;
   }
   if (id !== seq) return;
@@ -1625,15 +1990,21 @@ async function runSearch() {
   } catch (e) {
     count.textContent = "";
     showError("Search failed");
+    searchGroups = null;
+    paintSearchNarrow();
     return;
   }
   if (data && data.error) {
     results.replaceChildren();
     count.textContent = "";
     showError(data.error);
+    searchGroups = null;
+    paintSearchNarrow();
     return;
   }
   const hits = Array.isArray(data) ? data : (data.hits || []);
+  searchGroups = data && data.facets && data.facets.narrow ? data.facets.narrow : null;
+  paintSearchNarrow();
   drawFacets(data && data.facets);
   const places = render(hits, query);
   count.textContent = hits.length ? countLine(hits.length, places) : "No places";
@@ -1742,6 +2113,7 @@ function closeEditor() {
 }
 
 function openEditor(vol, opener) {
+  closeNarrowSheet();
   editing = vol.path;
   editingLabel = vol.title || fileTail(vol.path);
   editReturn = opener || null;
@@ -1802,6 +2174,8 @@ function askRemove(actions, vol) {
 
 function drawLibrary(data) {
   shelfData = data;
+  libraryGroups = data && data.narrow ? data.narrow : null;
+  paintLibraryNarrow();
   showLibError("");
   drawRoots(data.roots);
   libCount.textContent = countLineLib(data);
@@ -1845,7 +2219,14 @@ function drawLibrary(data) {
 async function loadLibrary() {
   const id = ++listSeq;
   try {
-    const raw = await grove_library(libFilter.value || "");
+    const raw = await grove_library(
+      libFilter.value || "",
+      narrowArg(libraryNarrow, "language"),
+      narrowArg(libraryNarrow, "author"),
+      narrowArg(libraryNarrow, "form"),
+      narrowArg(libraryNarrow, "period"),
+      narrowArg(libraryNarrow, "genre")
+    );
     if (id !== listSeq || groveView !== "library") return;
     const data = JSON.parse(raw);
     if (data.error) {
@@ -1930,6 +2311,7 @@ async function ensureShelf() {
 function setView(name) {
   const next = name === "library" ? "library" : "search";
   if (next !== "library") closeEditor();
+  closeNarrowSheet();
   groveView = next;
   searchView.hidden = groveView !== "search";
   libraryView.hidden = groveView !== "library";
@@ -2047,23 +2429,29 @@ libEdit.addEventListener("click", function (ev) {
 });
 document.getElementById("lib-edit-cancel").addEventListener("click", closeEditor);
 document.addEventListener("keydown", function (ev) {
-  if (libEdit.hidden) return;
-  if (ev.key === "Escape") {
-    ev.preventDefault();
-    closeEditor();
+  if (!libEdit.hidden) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeEditor();
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    const nodes = libEdit.querySelectorAll("input, textarea, button");
+    if (!nodes.length) return;
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
     return;
   }
-  if (ev.key !== "Tab") return;
-  const nodes = libEdit.querySelectorAll("input, textarea, button");
-  if (!nodes.length) return;
-  const first = nodes[0];
-  const last = nodes[nodes.length - 1];
-  if (ev.shiftKey && document.activeElement === first) {
+  if (narrowSheet && !narrowSheet.hidden && ev.key === "Escape") {
     ev.preventDefault();
-    last.focus();
-  } else if (!ev.shiftKey && document.activeElement === last) {
-    ev.preventDefault();
-    first.focus();
+    closeNarrowSheet();
   }
 });
 buildEditor();
@@ -2078,14 +2466,25 @@ function restoreQuery() {
   try {
     qv = sessionStorage.getItem("grove.q") || "";
     av = sessionStorage.getItem("grove.also") || "";
-  } catch (e) {
-    return;
-  }
-  if (!qv && !av) return;
+  } catch (e) {}
   if (qv) q.value = qv;
   if (av) also.value = av;
-  runSearch();
+  if (qv || av || narrowActive(searchNarrow)) runSearch();
 }
+searchNarrow = readNarrow("grove.narrow.search");
+libraryNarrow = readNarrow("grove.narrow.library");
+paintLibraryNarrow();
+if (searchNarrowOpen) {
+  searchNarrowOpen.addEventListener("click", function () {
+    openNarrowSheet("search", searchNarrowOpen);
+  });
+}
+if (libNarrowOpen) {
+  libNarrowOpen.addEventListener("click", function () {
+    openNarrowSheet("library", libNarrowOpen);
+  });
+}
+if (narrowDone) narrowDone.addEventListener("click", closeNarrowSheet);
 whenReady(function () {
   loadInfo();
   loadSaved();

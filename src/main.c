@@ -24,11 +24,14 @@ static void usage(FILE *out) {
         "  search [--limit N] [--json] [--at SPEC] QUERY...\n"
         "      QUERY words are ANDed. OR and NOT are uppercase. -term excludes.\n"
         "      \"quoted phrases\", trailing *, and ext: path: title: mtime: filters.\n"
+        "      language: author: form: period: genre: narrow by the record.\n"
+        "      Several of one are OR. Those five combine. Author is the creator,\n"
+        "      form the type, period the coverage, and genre the subject.\n"
         "      --at OLD=NEW rewrites a stored root in the printed paths.\n"
         "      With one root, --at NEW replaces it. Scores are a percent of the best hit.\n"
         "      Each hit prints up to 8 passages: a byte offset, a PDF page, and the extract.\n"
-        "      --json adds matchinfo and token offsets, plus type, folder, and\n"
-        "      month file counts for every match, past --limit too.\n"
+        "      --json adds matchinfo and token offsets, plus type, folder,\n"
+        "      month, and record counts for every match, past --limit too.\n"
         "      mtime:YYYY-MM keeps files touched in that month.\n"
         "  purge\n"
         "      Drop documents whose files are gone. Missing roots are kept.\n"
@@ -332,7 +335,17 @@ static int cmd_search(Index *ix, int argc, char **argv) {
         print_facets(facets.folders, facets.nfolders);
         fputs("],\"months\":[", stdout);
         print_facets(facets.months, facets.nmonths);
-        fputs("]}}\n", stdout);
+        fputs("],\"narrow\":{\"language\":[", stdout);
+        print_facets(facets.narrow.language, facets.narrow.nlanguage);
+        fputs("],\"author\":[", stdout);
+        print_facets(facets.narrow.author, facets.narrow.nauthor);
+        fputs("],\"form\":[", stdout);
+        print_facets(facets.narrow.form, facets.narrow.nform);
+        fputs("],\"period\":[", stdout);
+        print_facets(facets.narrow.period, facets.narrow.nperiod);
+        fputs("],\"genre\":[", stdout);
+        print_facets(facets.narrow.genre, facets.narrow.ngenre);
+        fputs("]}}}\n", stdout);
     } else {
         for (int h = 0; h < n; h++) {
             printf("%d %d%% %s\n", h + 1, hits[h].score, hits[h].path ? hits[h].path : "");

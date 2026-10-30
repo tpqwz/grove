@@ -196,7 +196,9 @@ static int cmd_index(Index *ix, int quiet, int argc, char **argv) {
 static char *join_query(int argc, char **argv) {
     size_t n = 0;
     for (int i = 0; i < argc; i++) {
-        n += strlen(argv[i]) + 1;
+        if (!argv[i] || size_add(n, strlen(argv[i]), &n) != 0 || size_add(n, 1, &n) != 0) {
+            return NULL;
+        }
     }
     char *q = malloc(n ? n : 1);
     if (!q) {

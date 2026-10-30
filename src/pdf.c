@@ -3,10 +3,19 @@
 #include "text.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
+
+static int u_accum(unsigned *v, unsigned digit) {
+    if (*v > UINT_MAX / 10 || (*v == UINT_MAX / 10 && digit > UINT_MAX % 10)) {
+        return -1;
+    }
+    *v = *v * 10u + digit;
+    return 0;
+}
 
 /* Windows-1252 for bytes 0x80..0x9F. 0xA0..0xFF match Unicode. */
 static const uint16_t CP1252_80[32] = {
@@ -48,12 +57,10 @@ static int cmap_cmp(const void *a, const void *b) {
 
 static int cmap_add(Cmap *c, uint32_t src, const char *dst, size_t n) {
     if (c->n == c->cap) {
-        size_t cap = c->cap ? c->cap * 2 : 32;
-        CmapEnt *p = realloc(c->e, cap * sizeof(CmapEnt));
-        if (!p) {
+        size_t cap;
+        if (cap_grow_size(c->cap, 32, &cap) != 0 || grow_alloc((void **)&c->e, cap, sizeof(CmapEnt)) != 0) {
             return -1;
         }
-        c->e = p;
         c->cap = cap;
     }
     char *s = xstrndup(dst, n);
@@ -431,12 +438,15 @@ static void parse_cmap(const unsigned char *s, size_t n, Cmap *c) {
 }
 
 static int inflate_zlib(const unsigned char *src, size_t n, unsigned char **out, size_t *outn) {
-    size_t cap = n * 4 + 64;
+    if (n > (size_t)UINT_MAX) {
+        return -1;
+    }
+    size_t cap;
+    if (size_mul(n, 4, &cap) != 0 || size_add(cap, 64, &cap) != 0 || cap > 32u * 1024u * 1024u) {
+        cap = 32u * 1024u * 1024u;
+    }
     if (cap < 256) {
         cap = 256;
-    }
-    if (cap > 32u * 1024u * 1024u) {
-        cap = 32u * 1024u * 1024u;
     }
     unsigned char *dst = malloc(cap);
     if (!dst) {
@@ -452,13 +462,18 @@ static int inflate_zlib(const unsigned char *src, size_t n, unsigned char **out,
     }
     int rc;
     for (;;) {
-        if (strm.total_out + 64 >= cap) {
+        if (strm.total_out >= cap || cap - (size_t)strm.total_out < 64) {
             if (cap >= 32u * 1024u * 1024u) {
                 inflateEnd(&strm);
                 free(dst);
                 return -1;
             }
-            size_t ncap = cap * 2;
+            size_t ncap;
+            if (size_mul(cap, 2, &ncap) != 0) {
+                inflateEnd(&strm);
+                free(dst);
+                return -1;
+            }
             if (ncap > 32u * 1024u * 1024u) {
                 ncap = 32u * 1024u * 1024u;
             }
@@ -861,7 +876,9 @@ static unsigned ref_after(const unsigned char *s, size_t n, const char *key) {
     }
     unsigned v = 0;
     while (p < end && *p >= '0' && *p <= '9') {
-        v = v * 10u + (unsigned)(*p - '0');
+        if (u_accum(&v, (unsigned)(*p - '0')) != 0) {
+            return 0;
+        }
         p++;
     }
     while (p < end && isspace(*p)) {
@@ -886,11 +903,15 @@ static unsigned obj_num_before(const unsigned char *b, const unsigned char *at) 
         }
         unsigned v = 0;
         size_t j = i;
+        int over = 0;
         while (j < span && b[j] >= '0' && b[j] <= '9') {
-            v = v * 10u + (unsigned)(b[j] - '0');
+            if (u_accum(&v, (unsigned)(b[j] - '0')) != 0) {
+                over = 1;
+                break;
+            }
             j++;
         }
-        if (j + 5 >= span || b[j] != ' ' || memcmp(b + j, " 0 obj", 6) != 0) {
+        if (over || !size_fits(span, j, 6) || b[j] != ' ' || memcmp(b + j, " 0 obj", 6) != 0) {
             continue;
         }
         found = v;
@@ -922,14 +943,12 @@ static int collect_page_ids(const unsigned char *b, size_t n, unsigned **ids, in
             continue;
         }
         if (*nids == cap) {
-            int nc = cap ? cap * 2 : 16;
-            unsigned *p = realloc(*ids, (size_t)nc * sizeof(unsigned));
-            if (!p) {
+            int nc;
+            if (cap_grow(cap, 16, &nc) != 0 || grow_alloc((void **)ids, (size_t)nc, sizeof(unsigned)) != 0) {
                 free(*ids);
                 *ids = NULL;
                 return -1;
             }
-            *ids = p;
             cap = nc;
         }
         (*ids)[(*nids)++] = num;
@@ -998,7 +1017,9 @@ static unsigned outline_dest_page(const unsigned char *s, size_t n) {
     }
     unsigned v = 0;
     while (br < end && *br >= '0' && *br <= '9') {
-        v = v * 10u + (unsigned)(*br - '0');
+        if (u_accum(&v, (unsigned)(*br - '0')) != 0) {
+            return 0;
+        }
         br++;
     }
     return v;
@@ -1033,13 +1054,11 @@ static int walk_outline(const unsigned char *b, size_t n, unsigned obj, int leve
     int pg = page_index(pages, npages, outline_dest_page(body, len));
     if (title && title[0] && pg > 0) {
         if (*nout == *cap) {
-            int nc = *cap ? *cap * 2 : 8;
-            PdfSection *p = realloc(*out, (size_t)nc * sizeof(PdfSection));
-            if (!p) {
+            int nc;
+            if (cap_grow(*cap, 8, &nc) != 0 || grow_alloc((void **)out, (size_t)nc, sizeof(PdfSection)) != 0) {
                 free(title);
                 return -1;
             }
-            *out = p;
             *cap = nc;
         }
         (*out)[*nout].page = (uint32_t)pg;

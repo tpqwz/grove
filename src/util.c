@@ -1,6 +1,7 @@
 #include "util.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,7 +66,14 @@ int buf_reserve(Buf *b, size_t need) {
 }
 
 int buf_append(Buf *b, const void *p, size_t n) {
-    if (buf_reserve(b, b->len + n + 1) != 0) {
+    size_t need;
+    if (size_add(b->len, n, &need) != 0 || size_add(need, 1, &need) != 0) {
+        return -1;
+    }
+    if (n && !p) {
+        return -1;
+    }
+    if (buf_reserve(b, need) != 0) {
         return -1;
     }
     if (n) {
@@ -96,28 +104,43 @@ int buf_printf(Buf *b, const char *fmt, ...) {
         va_end(aq);
         return -1;
     }
-    if (buf_reserve(b, b->len + (size_t)n + 1) != 0) {
+    size_t need;
+    if (size_add(b->len, (size_t)n, &need) != 0 || size_add(need, 1, &need) != 0 || buf_reserve(b, need) != 0) {
         va_end(aq);
         return -1;
     }
-    vsnprintf(b->data + b->len, (size_t)n + 1, fmt, aq);
+    int wrote = vsnprintf(b->data + b->len, (size_t)n + 1, fmt, aq);
     va_end(aq);
+    if (wrote < 0 || wrote != n) {
+        return -1;
+    }
     b->len += (size_t)n;
     return 0;
 }
 
 char *xstrdup(const char *s) {
+    if (!s) {
+        return NULL;
+    }
     size_t n = strlen(s);
-    char *p = malloc(n + 1);
+    size_t alloc;
+    if (size_add(n, 1, &alloc) != 0) {
+        return NULL;
+    }
+    char *p = malloc(alloc);
     if (!p) {
         return NULL;
     }
-    memcpy(p, s, n + 1);
+    memcpy(p, s, alloc);
     return p;
 }
 
 char *xstrndup(const char *s, size_t n) {
-    char *p = malloc(n + 1);
+    size_t alloc;
+    if (!s || size_add(n, 1, &alloc) != 0) {
+        return NULL;
+    }
+    char *p = malloc(alloc);
     if (!p) {
         return NULL;
     }
@@ -127,6 +150,9 @@ char *xstrndup(const char *s, size_t n) {
 }
 
 char *path_join(const char *a, const char *b) {
+    if (!a || !b) {
+        return NULL;
+    }
     size_t na = strlen(a);
     size_t nb = strlen(b);
     while (nb && b[0] == '/') {
@@ -134,7 +160,11 @@ char *path_join(const char *a, const char *b) {
         nb--;
     }
     int slash = na && a[na - 1] != '/';
-    char *s = malloc(na + nb + 2);
+    size_t alloc;
+    if (size_add(na, nb, &alloc) != 0 || size_add(alloc, slash ? 2 : 1, &alloc) != 0) {
+        return NULL;
+    }
+    char *s = malloc(alloc);
     if (!s) {
         return NULL;
     }
@@ -177,40 +207,69 @@ int mkdir_p(const char *path) {
     return 0;
 }
 
+static void discard_temp(int fd, const char *tp) {
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (tp) {
+        unlink(tp);
+    }
+}
+
 int write_file_atomic(const char *path, const void *data, size_t n, Err *e) {
+    if (!path || !path[0] || (n > 0 && !data)) {
+        err_set(e, "missing path");
+        return -1;
+    }
     size_t lp = strlen(path);
-    char *tp = malloc(lp + 5);
+    size_t need;
+    if (size_add(lp, sizeof ".XXXXXX", &need) != 0) {
+        err_set(e, "path is too long");
+        return -1;
+    }
+    char *tp = malloc(need);
     if (!tp) {
         err_set(e, "out of memory");
         return -1;
     }
     memcpy(tp, path, lp);
-    memcpy(tp + lp, ".tmp", 5);
-    FILE *f = fopen(tp, "wb");
-    if (!f) {
-        err_set(e, "cannot write %s: %s", tp, strerror(errno));
+    memcpy(tp + lp, ".XXXXXX", sizeof ".XXXXXX");
+    int fd = mkstemp(tp);
+    if (fd < 0) {
+        err_set(e, "cannot write %s: %s", path, strerror(errno));
         free(tp);
         return -1;
     }
-    if (n && fwrite(data, 1, n, f) != n) {
-        err_set(e, "short write %s", tp);
-        fclose(f);
-        unlink(tp);
-        free(tp);
-        return -1;
+    size_t got = 0;
+    while (got < n) {
+        ssize_t w = write(fd, (const unsigned char *)data + got, n - got);
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_set(e, "short write %s", tp);
+            discard_temp(fd, tp);
+            free(tp);
+            return -1;
+        }
+        if (w == 0) {
+            err_set(e, "short write %s", tp);
+            discard_temp(fd, tp);
+            free(tp);
+            return -1;
+        }
+        got += (size_t)w;
     }
-    if (fflush(f) != 0) {
+    while (fsync(fd) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
         err_set(e, "flush %s: %s", tp, strerror(errno));
-        fclose(f);
-        unlink(tp);
+        discard_temp(fd, tp);
         free(tp);
         return -1;
     }
-    int fd = fileno(f);
-    if (fd >= 0) {
-        fsync(fd);
-    }
-    if (fclose(f) != 0) {
+    if (close(fd) != 0) {
         err_set(e, "close %s: %s", tp, strerror(errno));
         unlink(tp);
         free(tp);
@@ -227,48 +286,78 @@ int write_file_atomic(const char *path, const void *data, size_t n, Err *e) {
 }
 
 int read_entire_file(const char *path, unsigned char **out, size_t *n, size_t cap, Err *e) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    if (out) {
+        *out = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!path || !out || !n) {
+        err_set(e, "missing path");
+        return -1;
+    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
         err_set(e, "cannot read %s: %s", path, strerror(errno));
         return -1;
     }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        err_set(e, "seek %s", path);
-        fclose(f);
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        err_set(e, "cannot stat %s: %s", path, strerror(errno));
+        close(fd);
         return -1;
     }
-    long sz = ftell(f);
-    if (sz < 0) {
-        err_set(e, "tell %s", path);
-        fclose(f);
+    if (!S_ISREG(st.st_mode)) {
+        err_set(e, "%s is not a regular file", path);
+        close(fd);
         return -1;
     }
-    if ((size_t)sz > cap) {
+    if (st.st_size < 0 || (uint64_t)st.st_size > cap) {
         err_set(e, "%s is larger than %zu bytes", path, cap);
-        fclose(f);
+        close(fd);
         return -1;
     }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        err_set(e, "rewind %s", path);
-        fclose(f);
+    size_t sz = (size_t)st.st_size;
+    size_t alloc;
+    if (size_add(sz, 1, &alloc) != 0) {
+        err_set(e, "out of memory");
+        close(fd);
         return -1;
     }
-    unsigned char *buf = malloc((size_t)sz + 1);
+    unsigned char *buf = malloc(alloc);
     if (!buf) {
         err_set(e, "out of memory");
-        fclose(f);
+        close(fd);
         return -1;
     }
-    if (sz && fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
-        err_set(e, "short read %s", path);
+    size_t got = 0;
+    while (got < sz) {
+        ssize_t r = read(fd, buf + got, sz - got);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_set(e, "short read %s", path);
+            free(buf);
+            close(fd);
+            return -1;
+        }
+        if (r == 0) {
+            err_set(e, "short read %s", path);
+            free(buf);
+            close(fd);
+            return -1;
+        }
+        got += (size_t)r;
+    }
+    if (close(fd) != 0) {
+        err_set(e, "close %s: %s", path, strerror(errno));
         free(buf);
-        fclose(f);
         return -1;
     }
     buf[sz] = 0;
-    fclose(f);
     *out = buf;
-    *n = (size_t)sz;
+    *n = sz;
     return 0;
 }
 
@@ -316,7 +405,11 @@ int varint_get(const unsigned char *p, const unsigned char *end, uint32_t *v, co
     int shift = 0;
     while (p < end && shift <= 28) {
         unsigned char b = *p++;
-        out |= (uint32_t)(b & 0x7f) << shift;
+        uint32_t piece = (uint32_t)(b & 0x7f);
+        if (piece > (UINT32_MAX >> shift)) {
+            return -1;
+        }
+        out |= piece << shift;
         if ((b & 0x80) == 0) {
             *v = out;
             *next = p;

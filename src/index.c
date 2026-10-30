@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,20 +169,15 @@ static int reload_roots(Index *ix, Err *e) {
     }
     int rc = 0;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        char **nr = realloc(ix->roots, (ix->nroots + 1) * sizeof(char *));
-        int64_t *ni = realloc(ix->root_ids, (ix->nroots + 1) * sizeof(int64_t));
-        uint8_t *nf = realloc(ix->root_full, (ix->nroots + 1) * sizeof(uint8_t));
-        if (!nr || !ni || !nf) {
-            free(nr);
-            free(ni);
-            free(nf);
+        size_t nn;
+        if (size_add(ix->nroots, 1, &nn) != 0 ||
+            grow_alloc((void **)&ix->roots, nn, sizeof *ix->roots) != 0 ||
+            grow_alloc((void **)&ix->root_ids, nn, sizeof *ix->root_ids) != 0 ||
+            grow_alloc((void **)&ix->root_full, nn, sizeof *ix->root_full) != 0) {
             sqlite3_finalize(st);
             err_set(e, "out of memory");
             return -1;
         }
-        ix->roots = nr;
-        ix->root_ids = ni;
-        ix->root_full = nf;
         const char *path = (const char *)sqlite3_column_text(st, 1);
         ix->roots[ix->nroots] = xstrdup(path ? path : "");
         ix->root_ids[ix->nroots] = sqlite3_column_int64(st, 0);
@@ -247,16 +243,13 @@ static int root_insert(Index *ix, const char *path, int full, Err *e) {
         return db_fail(ix, e, "root");
     }
     int64_t id = sqlite3_last_insert_rowid(ix->db);
-    char **nr = realloc(ix->roots, (ix->nroots + 1) * sizeof(char *));
-    int64_t *ni = realloc(ix->root_ids, (ix->nroots + 1) * sizeof(int64_t));
-    uint8_t *nf = realloc(ix->root_full, (ix->nroots + 1) * sizeof(uint8_t));
-    if (!nr || !ni || !nf) {
+    size_t nn;
+    if (size_add(ix->nroots, 1, &nn) != 0 || grow_alloc((void **)&ix->roots, nn, sizeof *ix->roots) != 0 ||
+        grow_alloc((void **)&ix->root_ids, nn, sizeof *ix->root_ids) != 0 ||
+        grow_alloc((void **)&ix->root_full, nn, sizeof *ix->root_full) != 0) {
         err_set(e, "out of memory");
         return -1;
     }
-    ix->roots = nr;
-    ix->root_ids = ni;
-    ix->root_full = nf;
     ix->roots[ix->nroots] = xstrdup(path);
     ix->root_ids[ix->nroots] = id;
     ix->root_full[ix->nroots] = (uint8_t)(full ? 1 : 0);
@@ -518,14 +511,12 @@ static int scope_load(Index *ix, int64_t root, const char *prefix, Scope *s, Err
         if (!rel_in_prefix(rel ? rel : "", prefix)) {
             continue;
         }
-        Pend *p = realloc(s->a, (size_t)(s->n + 1) * sizeof(Pend));
-        if (!p) {
+        if (s->n == INT_MAX || grow_alloc((void **)&s->a, (size_t)s->n + 1, sizeof(Pend)) != 0) {
             sqlite3_finalize(st);
             scope_free(s);
             err_set(e, "out of memory");
             return -1;
         }
-        s->a = p;
         s->a[s->n].id = sqlite3_column_int64(st, 0);
         s->a[s->n].rel = xstrdup(rel ? rel : "");
         s->a[s->n].drop = 1;
@@ -1163,12 +1154,20 @@ static MExpr mx_make(int kind, char *sql) {
 }
 
 static char *mx_wrap(const char *a, const char *op, const char *b) {
-    size_t n = strlen(a) + strlen(b) + strlen(op) + 8;
+    size_t n;
+    if (!a || !op || !b || size_add(strlen(a), strlen(b), &n) != 0 || size_add(n, strlen(op), &n) != 0 ||
+        size_add(n, 8, &n) != 0) {
+        return NULL;
+    }
     char *s = malloc(n);
     if (!s) {
         return NULL;
     }
-    snprintf(s, n, "(%s) %s (%s)", a, op, b);
+    int wrote = snprintf(s, n, "(%s) %s (%s)", a, op, b);
+    if (wrote < 0 || (size_t)wrote >= n) {
+        free(s);
+        return NULL;
+    }
     return s;
 }
 
@@ -1385,16 +1384,22 @@ static int parse_offsets(const char *s, MatchOff **out, int *nout, int *nmatches
             continue;
         }
         if (n == cap) {
-            int nc = cap ? cap * 2 : 32;
-            if (nc > GROVE_OFFSET_MAX) {
-                nc = GROVE_OFFSET_MAX;
-            }
-            MatchOff *np = realloc(arr, (size_t)nc * sizeof(MatchOff));
-            if (!np) {
+            if (cap >= GROVE_OFFSET_MAX) {
                 free(arr);
                 return -1;
             }
-            arr = np;
+            int nc;
+            if (cap_grow(cap, 32, &nc) != 0) {
+                free(arr);
+                return -1;
+            }
+            if (nc > GROVE_OFFSET_MAX) {
+                nc = GROVE_OFFSET_MAX;
+            }
+            if (grow_alloc((void **)&arr, (size_t)nc, sizeof(MatchOff)) != 0) {
+                free(arr);
+                return -1;
+            }
             cap = nc;
         }
         arr[n].column = (int)col;
@@ -1439,13 +1444,11 @@ static void free_key_array(char **keys, int n) {
 
 static int push_key(char ***arr, int *n, int *cap, char *owned) {
     if (*n == *cap) {
-        int nc = *cap ? *cap * 2 : 16;
-        char **p = realloc(*arr, (size_t)nc * sizeof(*p));
-        if (!p) {
+        int nc;
+        if (cap_grow(*cap, 16, &nc) != 0 || grow_alloc((void **)arr, (size_t)nc, sizeof **arr) != 0) {
             free(owned);
             return -1;
         }
-        *arr = p;
         *cap = nc;
     }
     (*arr)[(*n)++] = owned;
@@ -1461,8 +1464,12 @@ static int parent_folder(const char *rel, char **out) {
     if (!slash || slash == rel) {
         return 0;
     }
-    size_t n = (size_t)(slash - rel) + 1;
-    char *s = malloc(n + 1);
+    size_t n;
+    size_t alloc;
+    if (size_add((size_t)(slash - rel), 1, &n) != 0 || size_add(n, 1, &alloc) != 0) {
+        return -1;
+    }
+    char *s = malloc(alloc);
     if (!s) {
         return -1;
     }
@@ -1603,12 +1610,10 @@ static void cands_free(Cand *c, int n) {
 
 static int cand_push(Cand **arr, int *n, int *cap, Cand *src) {
     if (*n == *cap) {
-        int nc = *cap ? *cap * 2 : 32;
-        Cand *p = realloc(*arr, (size_t)nc * sizeof(Cand));
-        if (!p) {
+        int nc;
+        if (cap_grow(*cap, 32, &nc) != 0 || grow_alloc((void **)arr, (size_t)nc, sizeof(Cand)) != 0) {
             return -1;
         }
-        *arr = p;
         *cap = nc;
     }
     (*arr)[(*n)++] = *src;
@@ -1991,12 +1996,10 @@ static int scored_cmp(const void *a, const void *b) {
 
 static int scored_push(Scored **arr, int *n, int *cap, Scored *src) {
     if (*n == *cap) {
-        int nc = *cap ? *cap * 2 : 32;
-        Scored *p = realloc(*arr, (size_t)nc * sizeof(Scored));
-        if (!p) {
+        int nc;
+        if (cap_grow(*cap, 32, &nc) != 0 || grow_alloc((void **)arr, (size_t)nc, sizeof(Scored)) != 0) {
             return -1;
         }
-        *arr = p;
         *cap = nc;
     }
     (*arr)[(*n)++] = *src;
@@ -2779,7 +2782,16 @@ int index_read(Index *ix, const char *path, uint32_t at, int dir, DocRead **out,
         free(ext);
         return -1;
     }
-    uint32_t n = text ? (uint32_t)strlen(text) : 0;
+    size_t tn = text ? strlen(text) : 0;
+    if (tn > UINT32_MAX) {
+        free(title);
+        free(ext);
+        marks_free(marks, nmarks);
+        free(text);
+        err_set(e, "document is too long");
+        return -1;
+    }
+    uint32_t n = (uint32_t)tn;
     if (at > n) {
         at = n;
     }
@@ -3116,7 +3128,12 @@ static char *saved_text(const char *query, int check_parse, Err *e) {
             return NULL;
         }
     }
-    char *s = malloc(n + 1);
+    size_t alloc;
+    if (size_add(n, 1, &alloc) != 0) {
+        err_set(e, "out of memory");
+        return NULL;
+    }
+    char *s = malloc(alloc);
     if (!s) {
         err_set(e, "out of memory");
         return NULL;
@@ -3312,15 +3329,13 @@ int index_saved_list(Index *ix, char ***queries, int *n, Err *e) {
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         char *copy = xstrdup(s ? s : "");
-        char **next = copy ? realloc(rows, (size_t)(nr + 1) * sizeof(*rows)) : NULL;
-        if (!copy || !next) {
+        if (!copy || nr == INT_MAX || grow_alloc((void **)&rows, (size_t)nr + 1, sizeof *rows) != 0) {
             free(copy);
             sqlite3_finalize(st);
             index_saved_free(rows, nr);
             err_set(e, "out of memory");
             return -1;
         }
-        rows = next;
         rows[nr++] = copy;
     }
     sqlite3_finalize(st);
@@ -3400,7 +3415,12 @@ static char *note_line(const char *s, size_t max, const char *empty_msg, const c
             return NULL;
         }
     }
-    char *out = malloc(n + 1);
+    size_t alloc;
+    if (size_add(n, 1, &alloc) != 0) {
+        err_set(e, "out of memory");
+        return NULL;
+    }
+    char *out = malloc(alloc);
     if (!out) {
         err_set(e, "out of memory");
         return NULL;
@@ -3531,18 +3551,23 @@ int index_notes_list(Index *ix, Note **notes, int *n, Err *e) {
         const char *path = (const char *)sqlite3_column_text(st, 0);
         const char *body = (const char *)sqlite3_column_text(st, 2);
         int64_t off = sqlite3_column_int64(st, 1);
-        Note *next = realloc(rows, (size_t)(nr + 1) * sizeof(*rows));
+        if (off < 0 || off > UINT32_MAX || nr == INT_MAX ||
+            grow_alloc((void **)&rows, (size_t)nr + 1, sizeof *rows) != 0) {
+            sqlite3_finalize(st);
+            index_notes_free(rows, nr);
+            err_set(e, off < 0 || off > UINT32_MAX ? "note offset is out of range" : "out of memory");
+            return -1;
+        }
         char *pcopy = xstrdup(path ? path : "");
         char *bcopy = xstrdup(body ? body : "");
-        if (!next || !pcopy || !bcopy || off < 0 || off > UINT32_MAX) {
+        if (!pcopy || !bcopy) {
             free(pcopy);
             free(bcopy);
             sqlite3_finalize(st);
-            index_notes_free(next ? next : rows, nr);
+            index_notes_free(rows, nr);
             err_set(e, "out of memory");
             return -1;
         }
-        rows = next;
         rows[nr].path = pcopy;
         rows[nr].offset = (uint32_t)off;
         rows[nr].body = bcopy;
@@ -3615,12 +3640,10 @@ static void alert_files_free(AlertFile *files, int n) {
 
 static int alert_file_push(AlertFile **arr, int *n, int *cap, AlertFile *src) {
     if (*n == *cap) {
-        int nc = *cap ? *cap * 2 : 8;
-        AlertFile *p = realloc(*arr, (size_t)nc * sizeof(*p));
-        if (!p) {
+        int nc;
+        if (cap_grow(*cap, 8, &nc) != 0 || grow_alloc((void **)arr, (size_t)nc, sizeof **arr) != 0) {
             return -1;
         }
-        *arr = p;
         *cap = nc;
     }
     (*arr)[(*n)++] = *src;
@@ -4051,15 +4074,13 @@ int index_alerts_list(Index *ix, Alert **alerts, int *n, Err *e) {
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         char *copy = xstrdup(s ? s : "");
-        char **next = copy ? realloc(queries, (size_t)(nq + 1) * sizeof(*queries)) : NULL;
-        if (!copy || !next) {
+        if (!copy || nq == INT_MAX || grow_alloc((void **)&queries, (size_t)nq + 1, sizeof *queries) != 0) {
             free(copy);
             sqlite3_finalize(st);
             index_saved_free(queries, nq);
             err_set(e, "out of memory");
             return -1;
         }
-        queries = next;
         queries[nq++] = copy;
     }
     sqlite3_finalize(st);

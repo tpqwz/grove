@@ -64,7 +64,11 @@ static int has_nul(const unsigned char *s, size_t n) {
 /* map[i] is the output offset of input byte i, or UINT32_MAX if that byte was
  * dropped. map[len] is the output length. */
 static int collapse_newlines(Buf *b, uint32_t **map_out) {
-    uint32_t *map = malloc((b->len + 1) * sizeof(uint32_t));
+    size_t map_bytes;
+    if (b->len > UINT32_MAX || size_add(b->len, 1, &map_bytes) != 0 || size_mul(map_bytes, sizeof(uint32_t), &map_bytes) != 0) {
+        return -1;
+    }
+    uint32_t *map = malloc(map_bytes);
     Buf o;
     buf_init(&o);
     if (!map) {
@@ -288,12 +292,10 @@ static int mark_add(MarkBuf *m, uint32_t off, uint8_t kind, uint8_t level, uint3
         return 0;
     }
     if (m->n == m->cap) {
-        int nc = m->cap ? m->cap * 2 : 16;
-        Mark *p = realloc(m->a, (size_t)nc * sizeof(Mark));
-        if (!p) {
+        int nc;
+        if (cap_grow(m->cap, 16, &nc) != 0 || grow_alloc((void **)&m->a, (size_t)nc, sizeof(Mark)) != 0) {
             return -1;
         }
-        m->a = p;
         m->cap = nc;
     }
     Mark *mk = &m->a[m->n];

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 typedef struct Buf {
     char *data;
@@ -16,7 +17,7 @@ typedef struct Err {
 } Err;
 
 void err_clear(Err *e);
-void err_set(Err *e, const char *fmt, ...);
+void err_set(Err *e, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 void buf_init(Buf *b);
 void buf_free(Buf *b);
@@ -25,7 +26,7 @@ int buf_reserve(Buf *b, size_t need);
 int buf_append(Buf *b, const void *p, size_t n);
 int buf_puts(Buf *b, const char *s);
 int buf_putc(Buf *b, int c);
-int buf_printf(Buf *b, const char *fmt, ...);
+int buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
@@ -49,5 +50,67 @@ int ascii_ieq(const char *a, const char *b);
 void ascii_lower_inplace(char *s);
 int starts_with(const char *s, const char *pfx);
 size_t utf8_prefix_bytes(const char *s, size_t n, size_t max_bytes);
+
+/* Sizes fail instead of wrapping. A failed grow leaves the old pointer in place. */
+static inline int size_add(size_t a, size_t b, size_t *out) {
+    if (a > SIZE_MAX - b) {
+        return -1;
+    }
+    *out = a + b;
+    return 0;
+}
+
+static inline int size_mul(size_t a, size_t b, size_t *out) {
+    if (b != 0 && a > SIZE_MAX / b) {
+        return -1;
+    }
+    *out = a * b;
+    return 0;
+}
+
+static inline int size_fits(size_t len, size_t off, size_t n) {
+    size_t end;
+    if (size_add(off, n, &end) != 0) {
+        return 0;
+    }
+    return end <= len;
+}
+
+static inline int cap_grow(int cap, int initial, int *out) {
+    if (cap < 0 || initial <= 0) {
+        return -1;
+    }
+    if (cap == 0) {
+        *out = initial;
+        return 0;
+    }
+    /* Half of INT_MAX. limits.h is not included here: it defines MAX_INPUT. */
+    if ((unsigned)cap > (((unsigned)-1) >> 1) / 2) {
+        return -1;
+    }
+    *out = cap * 2;
+    return 0;
+}
+
+static inline int cap_grow_size(size_t cap, size_t initial, size_t *out) {
+    if (cap == 0) {
+        *out = initial;
+        return 0;
+    }
+    return size_mul(cap, 2, out);
+}
+
+static inline int grow_alloc(void **ptr, size_t count, size_t elem) {
+    size_t bytes;
+    if (!ptr || count == 0 || elem == 0 || size_mul(count, elem, &bytes) != 0) {
+        return -1;
+    }
+    void *p = realloc(*ptr, bytes);
+    if (!p) {
+        return -1;
+    }
+    *ptr = p;
+    return 0;
+}
 
 #endif

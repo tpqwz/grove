@@ -1,9 +1,17 @@
 #include "zip.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <zlib.h>
+
+static int span_ok(const unsigned char *p, const unsigned char *end, size_t n) {
+    if (!p || !end || p > end) {
+        return 0;
+    }
+    return n <= (size_t)(end - p);
+}
 
 void zip_free(Zip *z) {
     if (!z) {
@@ -37,12 +45,25 @@ int zip_name_ends(const ZipFile *f, const char *suffix) {
 }
 
 static int inflate_raw(const unsigned char *src, size_t n, size_t expect, unsigned char **out, size_t *outn, Err *e) {
-    size_t cap = expect ? expect : (n * 4 + 64);
+    size_t cap;
+    if (n > (size_t)UINT_MAX) {
+        err_set(e, "zip member is too large");
+        return -1;
+    }
+    if (expect) {
+        cap = expect;
+    } else if (size_mul(n, 4, &cap) != 0 || size_add(cap, 64, &cap) != 0) {
+        err_set(e, "zip member is too large");
+        return -1;
+    }
     if (cap > 64u * 1024u * 1024u) {
         err_set(e, "zip member is too large");
         return -1;
     }
-    unsigned char *dst = malloc(cap ? cap : 1);
+    if (cap == 0) {
+        cap = 1;
+    }
+    unsigned char *dst = malloc(cap);
     if (!dst) {
         err_set(e, "out of memory");
         return -1;
@@ -65,7 +86,13 @@ static int inflate_raw(const unsigned char *src, size_t n, size_t expect, unsign
                 err_set(e, "zip member is too large");
                 return -1;
             }
-            size_t ncap = cap * 2;
+            size_t ncap;
+            if (size_mul(cap, 2, &ncap) != 0) {
+                inflateEnd(&strm);
+                free(dst);
+                err_set(e, "zip member is too large");
+                return -1;
+            }
             unsigned char *nd = realloc(dst, ncap);
             if (!nd) {
                 inflateEnd(&strm);
@@ -130,11 +157,16 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
             return -1;
         }
         uint64_t zoff = rd_u64(bytes + (size_t)eocd - 20 + 8);
-        if (zoff + 56 > len || memcmp(bytes + zoff, "PK\x06\x06", 4) != 0) {
+        if (zoff > len || len - zoff < 56 || memcmp(bytes + zoff, "PK\x06\x06", 4) != 0) {
             err_set(e, "zip64 directory is truncated");
             return -1;
         }
-        entries = (uint32_t)rd_u64(bytes + zoff + 32);
+        uint64_t ent64 = rd_u64(bytes + zoff + 32);
+        if (ent64 > 20000) {
+            err_set(e, "zip has too many members");
+            return -1;
+        }
+        entries = (uint32_t)ent64;
         cd_size = rd_u64(bytes + zoff + 40);
         cd_off = rd_u64(bytes + zoff + 48);
     }
@@ -150,7 +182,7 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
     const unsigned char *end = p + cd_size;
     size_t total = 0;
     for (uint32_t ei = 0; ei < entries; ei++) {
-        if (p + 46 > end || memcmp(p, "PK\x01\x02", 4) != 0) {
+        if (!span_ok(p, end, 46) || memcmp(p, "PK\x01\x02", 4) != 0) {
             zip_free(out);
             err_set(e, "zip directory entry is corrupt");
             return -1;
@@ -163,7 +195,9 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
         uint16_t extralen = rd_u16(p + 30);
         uint16_t commentlen = rd_u16(p + 32);
         uint32_t local = rd_u32(p + 42);
-        if (p + 46 + namelen + extralen + commentlen > end) {
+        size_t rec = 46;
+        if (size_add(rec, namelen, &rec) != 0 || size_add(rec, extralen, &rec) != 0 ||
+            size_add(rec, commentlen, &rec) != 0 || !span_ok(p, end, rec)) {
             zip_free(out);
             err_set(e, "zip directory entry is truncated");
             return -1;
@@ -173,17 +207,17 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
             const unsigned char *ep = extra;
             const unsigned char *ee = extra + extralen;
             int found = 0;
-            while (ep + 4 <= ee) {
+            while (span_ok(ep, ee, 4)) {
                 uint16_t id = rd_u16(ep);
                 uint16_t sz = rd_u16(ep + 2);
                 ep += 4;
-                if (ep + sz > ee) {
+                if (!span_ok(ep, ee, sz)) {
                     break;
                 }
                 if (id == 1) {
                     const unsigned char *zp = ep;
                     if (uncomp == 0xffffffffu) {
-                        if (zp + 8 > ep + sz) {
+                        if (!span_ok(zp, ep + sz, 8)) {
                             break;
                         }
                         uint64_t v = rd_u64(zp);
@@ -196,7 +230,7 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
                         uncomp = (uint32_t)v;
                     }
                     if (comp == 0xffffffffu) {
-                        if (zp + 8 > ep + sz) {
+                        if (!span_ok(zp, ep + sz, 8)) {
                             break;
                         }
                         uint64_t v = rd_u64(zp);
@@ -209,7 +243,7 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
                         comp = (uint32_t)v;
                     }
                     if (local == 0xffffffffu) {
-                        if (zp + 8 > ep + sz) {
+                        if (!span_ok(zp, ep + sz, 8)) {
                             break;
                         }
                         uint64_t v = rd_u64(zp);
@@ -232,7 +266,7 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
             }
         }
         char *name = xstrndup((const char *)(p + 46), namelen);
-        p += 46 + namelen + extralen + commentlen;
+        p += rec;
         if (!name) {
             zip_free(out);
             err_set(e, "out of memory");
@@ -248,7 +282,8 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
             err_set(e, "encrypted zip members are not supported");
             return -1;
         }
-        if (local + 30 > len) {
+        size_t data_off;
+        if (!size_fits(len, local, 30)) {
             free(name);
             zip_free(out);
             err_set(e, "zip local header is out of range");
@@ -263,8 +298,8 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
         }
         uint16_t lname = rd_u16(lh + 26);
         uint16_t lextra = rd_u16(lh + 28);
-        size_t data_off = (size_t)local + 30u + lname + lextra;
-        if (data_off + comp > len) {
+        if (size_add(local, 30, &data_off) != 0 || size_add(data_off, lname, &data_off) != 0 ||
+            size_add(data_off, lextra, &data_off) != 0 || !size_fits(len, data_off, comp)) {
             free(name);
             zip_free(out);
             err_set(e, "zip member data is truncated");
@@ -273,7 +308,14 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
         unsigned char *data = NULL;
         size_t dlen = 0;
         if (method == 0) {
-            data = malloc(comp + 1);
+            size_t alloc;
+            if (size_add(comp, 1, &alloc) != 0) {
+                free(name);
+                zip_free(out);
+                err_set(e, "a zip member is too large");
+                return -1;
+            }
+            data = malloc(alloc);
             if (!data) {
                 free(name);
                 zip_free(out);
@@ -289,32 +331,45 @@ int zip_read(const unsigned char *bytes, size_t len, Zip *out, Err *e) {
                 zip_free(out);
                 return -1;
             }
-            unsigned char *nd = realloc(data, dlen + 1);
-            if (nd) {
-                data = nd;
+            size_t alloc;
+            if (size_add(dlen, 1, &alloc) != 0) {
+                free(name);
+                free(data);
+                zip_free(out);
+                err_set(e, "a zip member is too large");
+                return -1;
             }
+            unsigned char *nd = realloc(data, alloc);
+            if (!nd) {
+                free(name);
+                free(data);
+                zip_free(out);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            data = nd;
             data[dlen] = 0;
         } else {
             free(name);
             continue;
         }
-        if (total + dlen > 128u * 1024u * 1024u) {
+        size_t sum;
+        if (size_add(total, dlen, &sum) != 0 || sum > 128u * 1024u * 1024u) {
             free(name);
             free(data);
             zip_free(out);
             err_set(e, "uncompressed zip is too large");
             return -1;
         }
-        total += dlen;
-        ZipFile *nf = realloc(out->files, (out->n + 1) * sizeof(ZipFile));
-        if (!nf) {
+        total = sum;
+        size_t nn;
+        if (size_add(out->n, 1, &nn) != 0 || grow_alloc((void **)&out->files, nn, sizeof(ZipFile)) != 0) {
             free(name);
             free(data);
             zip_free(out);
             err_set(e, "out of memory");
             return -1;
         }
-        out->files = nf;
         out->files[out->n].name = name;
         out->files[out->n].data = data;
         out->files[out->n].len = dlen;

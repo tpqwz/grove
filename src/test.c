@@ -4,6 +4,8 @@
 #include "zip.h"
 
 #include <fcntl.h>
+#include <ftw.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -461,13 +463,77 @@ static Hit *do_search(Index *ix, const char *q, const char *at, int *n) {
     return h;
 }
 
-static void rm_rf(const char *path) {
-    char cmd[1200];
-    int n = snprintf(cmd, sizeof cmd, "rm -rf -- %s", path);
-    if (n > 0 && (size_t)n < sizeof cmd) {
-        int rc = system(cmd);
-        (void)rc;
+static int rm_one(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
+    (void)sb;
+    (void)ftwbuf;
+    if (typeflag == FTW_DP) {
+        rmdir(fpath);
+    } else {
+        unlink(fpath);
     }
+    return 0;
+}
+
+static void rm_rf(const char *path) {
+    if (path && path[0]) {
+        nftw(path, rm_one, 16, FTW_DEPTH | FTW_PHYS);
+    }
+}
+
+static void test_bounds(void) {
+    size_t n = 1;
+    CHECK(size_add(SIZE_MAX, 1, &n) != 0);
+    CHECK(size_add(3, 4, &n) == 0 && n == 7);
+    CHECK(size_mul(SIZE_MAX, 2, &n) != 0);
+    CHECK(size_mul(0, 5, &n) == 0 && n == 0);
+    CHECK(size_fits(10, 8, 2));
+    CHECK(!size_fits(10, 8, 3));
+    CHECK(!size_fits(10, SIZE_MAX, 1));
+    int cap = 0;
+    CHECK(cap_grow(0, 16, &cap) == 0 && cap == 16);
+    CHECK(cap_grow(INT_MAX / 2 + 1, 16, &cap) != 0);
+    void *block = NULL;
+    CHECK(grow_alloc(&block, 3, sizeof(int)) == 0 && block);
+    int *nums = block;
+    nums[0] = 1;
+    CHECK(grow_alloc(&block, SIZE_MAX, sizeof(int)) != 0);
+    CHECK(nums[0] == 1);
+    free(block);
+
+    uint32_t v = 0;
+    const unsigned char *next = NULL;
+    const unsigned char fit[] = {0xff, 0xff, 0xff, 0xff, 0x0f};
+    CHECK(varint_get(fit, fit + 5, &v, &next) == 0 && v == 0xffffffffu);
+    const unsigned char over[] = {0x80, 0x80, 0x80, 0x80, 0x10};
+    CHECK(varint_get(over, over + 5, &v, &next) != 0);
+
+    char dir[] = "/tmp/grove-safe-XXXXXX";
+    if (!mkdtemp(dir)) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *path = path_join(dir, "note.txt");
+    char *link = path_join(dir, "link.txt");
+    Err e;
+    err_clear(&e);
+    if (!path || !link || write_file_atomic(path, "kelp", 4, &e) != 0) {
+        fprintf(stderr, "FAIL write_file_atomic %s\n", e.msg);
+        fails++;
+    } else {
+        unsigned char *buf = NULL;
+        size_t got = 0;
+        CHECK(read_entire_file(path, &buf, &got, 32, &e) == 0);
+        CHECK(buf && got == 4 && memcmp(buf, "kelp", 4) == 0 && buf[4] == 0);
+        free(buf);
+        buf = NULL;
+        CHECK(symlink(path, link) == 0);
+        CHECK(read_entire_file(link, &buf, &got, 32, &e) != 0);
+        free(buf);
+    }
+    free(path);
+    free(link);
+    rm_rf(dir);
 }
 
 static int test_corpus(const char *root) {
@@ -816,27 +882,27 @@ static int test_corpus(const char *root) {
         CHECK(h[0].more == 1);
         CHECK(h[0].nmatches == NLATE);
         uint32_t prev = h[0].passages[h[0].npassages - 1].offset;
-        int pages = 0;
+        int page_fetches = 0;
         int more = 1;
-        while (more && pages < 20) {
+        while (more && page_fetches < 20) {
             Passage *ps = NULL;
-            int np = 0;
+            int nmore = 0;
             err_clear(&e);
-            CHECK(index_more(ix, "late", h[0].path, prev, &ps, &np, &more, &e) == 0);
-            CHECK(np >= 1);
-            if (np >= 1 && ps) {
+            CHECK(index_more(ix, "late", h[0].path, prev, &ps, &nmore, &more, &e) == 0);
+            CHECK(nmore >= 1);
+            if (nmore >= 1 && ps) {
                 CHECK(ps[0].offset > prev);
                 CHECK(ps[0].text && strstr(ps[0].text, "<<late>>"));
-                for (int i = 1; i < np; i++) {
+                for (int i = 1; i < nmore; i++) {
                     CHECK(ps[i].offset > ps[i - 1].offset);
                 }
-                prev = ps[np - 1].offset;
+                prev = ps[nmore - 1].offset;
             }
-            pages++;
-            passages_free(ps, np);
+            page_fetches++;
+            passages_free(ps, nmore);
         }
         CHECK(more == 0);
-        CHECK(pages >= 1);
+        CHECK(page_fetches >= 1);
         Passage *none = NULL;
         int nn = 0;
         int extra = 1;
@@ -2058,6 +2124,7 @@ done:
 }
 
 int main(void) {
+    test_bounds();
     test_tokens();
     test_query_shape();
     test_zip();

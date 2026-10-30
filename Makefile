@@ -1,7 +1,10 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2
+CFLAGS = -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2 \
+	-fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+	-Wformat=2 -Wno-format-nonliteral -Wnull-dereference -Wshadow
 SAN = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 LIBS = -lz -lm -pthread -ldl
+LDFLAGS = -Wl,-z,relro,-z,now
 INCLUDES = -Ithird_party/sqlite
 
 # sqlite3.c is compiled on its own. -Werror and ASan stay off that file.
@@ -25,12 +28,12 @@ $(SQLITE_OBJ): third_party/sqlite/sqlite3.c
 	$(CC) $(SQLITE_CFLAGS) -c -o $@ third_party/sqlite/sqlite3.c
 
 grove: $(SRCS) $(SQLITE_OBJ)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(SRCS) $(SQLITE_OBJ) $(LIBS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(SRCS) $(SQLITE_OBJ) $(LIBS) $(LDFLAGS)
 
 test: $(SQLITE_OBJ)
-	$(CC) $(CFLAGS) $(SAN) $(INCLUDES) -o grove-test $(CORE) src/test.c $(SQLITE_OBJ) $(LIBS)
+	$(CC) $(CFLAGS) $(SAN) $(INCLUDES) -o grove-test $(CORE) src/test.c $(SQLITE_OBJ) $(LIBS) $(LDFLAGS)
 	./grove-test
-	$(CC) $(CFLAGS) $(INCLUDES) -o grove $(SRCS) $(SQLITE_OBJ) $(LIBS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o grove $(SRCS) $(SQLITE_OBJ) $(LIBS) $(LDFLAGS)
 	tests/integration.sh
 
 clean:

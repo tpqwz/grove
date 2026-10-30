@@ -1,6 +1,9 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2
+CFLAGS = -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2 \
+	-fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+	-Wformat=2 -Wno-format-nonliteral -Wnull-dereference -Wshadow
 LIBS = -lz -lm -pthread -ldl
+LDFLAGS = -Wl,-z,relro,-z,now
 
 ROOT = ..
 CORE = $(ROOT)/src/util.c $(ROOT)/src/text.c $(ROOT)/src/zip.c $(ROOT)/src/pdf.c \
@@ -39,7 +42,7 @@ $(MOD): main.c page.h mod.h
 $(ROOT)/grove-ui: host.c mod.h $(WEBUI_LIB) $(CORE) $(SQLITE_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ host.c $(CORE) $(SQLITE_OBJ) \
 		-Wl,--whole-archive $(WEBUI_LIB) -Wl,--no-whole-archive \
-		$(LIBS) -Wl,--export-dynamic
+		$(LIBS) -Wl,--export-dynamic $(LDFLAGS)
 
 # OUT is an absolute path. The running host calls this when main.c is saved.
 live-mod:

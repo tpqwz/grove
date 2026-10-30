@@ -181,16 +181,20 @@ static int compile_mod(const char *ui_dir, const char *out, const char *err_path
         return -1;
     }
     if (pid == 0) {
-        int fd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            if (fd > 2) {
-                close(fd);
-            }
+        int fd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            _exit(127);
+        }
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd > 2) {
+            close(fd);
         }
         char outarg[PATH_MAX];
-        snprintf(outarg, sizeof outarg, "OUT=%s", out);
+        int nw = snprintf(outarg, sizeof outarg, "OUT=%s", out);
+        if (nw < 0 || (size_t)nw >= sizeof outarg) {
+            _exit(127);
+        }
         execlp("make", "make", "-C", ui_dir, "live-mod", outarg, (char *)NULL);
         _exit(127);
     }
@@ -313,7 +317,13 @@ static void *c_watch(void *arg) {
         pthread_mutex_lock(&swap_mu);
         if (!c_stop) {
             char out[PATH_MAX];
-            snprintf(out, sizeof out, "%s/live/module-%d.so", ui_dir, ++mod_seq);
+            int nw = snprintf(out, sizeof out, "%s/live/module-%d.so", ui_dir, ++mod_seq);
+            if (nw < 0 || (size_t)nw >= sizeof out) {
+                fprintf(stderr, "grove-ui: module path is too long\n");
+                fflush(stderr);
+                pthread_mutex_unlock(&swap_mu);
+                continue;
+            }
             fprintf(stderr, "grove-ui: building %s\n", main_c);
             fflush(stderr);
             if (compile_mod(ui_dir, out, err_path) != 0) {
@@ -413,7 +423,11 @@ int main(int argc, char **argv) {
     char mod_path[PATH_MAX];
     mod_path[0] = 0;
     if (ui_dir) {
-        snprintf(mod_path, sizeof mod_path, "%s/live/module.so", ui_dir);
+        int nw = snprintf(mod_path, sizeof mod_path, "%s/live/module.so", ui_dir);
+        if (nw < 0 || (size_t)nw >= sizeof mod_path) {
+            fprintf(stderr, "grove-ui: module path is too long\n");
+            mod_path[0] = 0;
+        }
         err_path = path_join(ui_dir, "live/build.err");
         char *main_c = path_join(ui_dir, "main.c");
         struct stat src, so;

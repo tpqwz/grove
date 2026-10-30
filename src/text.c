@@ -236,12 +236,10 @@ static int tokens_push(Tokens *t, uint32_t off, uint32_t len, uint32_t pos, uint
         return 0;
     }
     if (t->n == t->cap) {
-        size_t cap = t->cap ? t->cap * 2 : 64;
-        Token *p = realloc(t->toks, cap * sizeof(Token));
-        if (!p) {
+        size_t cap;
+        if (cap_grow_size(t->cap, 64, &cap) != 0 || grow_alloc((void **)&t->toks, cap, sizeof(Token)) != 0) {
             return -1;
         }
-        t->toks = p;
         t->cap = cap;
     }
     t->toks[t->n].off = off;
@@ -256,6 +254,9 @@ static int tokens_push(Tokens *t, uint32_t off, uint32_t len, uint32_t pos, uint
 static int emit_bytes(Tokens *t, const char *s, size_t n, uint32_t *pos, uint32_t start, uint32_t end) {
     if (n > 64) {
         n = 64;
+    }
+    if (t->arena.len > UINT32_MAX || n > UINT32_MAX) {
+        return -1;
     }
     uint32_t off = (uint32_t)t->arena.len;
     if (buf_append(&t->arena, s, n) != 0) {
@@ -902,12 +903,10 @@ int query_parse(const char *s, ParsedQuery *out, Err *e) {
 
 static int qterms_push(QTerm **arr, int *n, int *cap, const char *s, size_t len, int prefix, int phrase) {
     if (*n == *cap) {
-        int c = *cap ? *cap * 2 : 8;
-        QTerm *p = realloc(*arr, (size_t)c * sizeof(QTerm));
-        if (!p) {
+        int c;
+        if (cap_grow(*cap, 8, &c) != 0 || grow_alloc((void **)arr, (size_t)c, sizeof(QTerm)) != 0) {
             return -1;
         }
-        *arr = p;
         *cap = c;
     }
     char *copy = xstrndup(s, len);
@@ -1008,16 +1007,23 @@ static int fold_text(const char *s, size_t n, Buf *cf, uint32_t **src_at) {
             return -1;
         }
         if (cf->len > mapcap) {
-            size_t nc = mapcap ? mapcap * 2 : 64;
-            while (nc < cf->len) {
-                nc *= 2;
-            }
-            uint32_t *nm = realloc(map, nc * sizeof(uint32_t));
-            if (!nm) {
+            size_t nc;
+            if (cap_grow_size(mapcap, 64, &nc) != 0) {
                 free(map);
                 return -1;
             }
-            map = nm;
+            while (nc < cf->len) {
+                size_t n2;
+                if (size_mul(nc, 2, &n2) != 0) {
+                    free(map);
+                    return -1;
+                }
+                nc = n2;
+            }
+            if (grow_alloc((void **)&map, nc, sizeof *map) != 0) {
+                free(map);
+                return -1;
+            }
             mapcap = nc;
         }
         for (int b = 0; b < k; b++) {

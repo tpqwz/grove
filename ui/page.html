@@ -105,12 +105,6 @@
     outline-offset: 1px;
     border-color: transparent;
   }
-  input.also {
-    margin-top: 0.45rem;
-    font-size: 1rem;
-    padding: 0.55rem 0.85rem;
-  }
-  input.also::placeholder { color: var(--muted); }
   .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 0; }
   .chips:empty { margin: 0; }
   .chips:not(:empty) { margin-top: 0.7rem; }
@@ -573,7 +567,6 @@
     <header id="search-head">
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
-        <input id="also" class="also" type="text" placeholder="Also" aria-label="Also containing" autocomplete="off" spellcheck="false">
         <button type="submit" class="go" tabindex="-1">Search</button>
       </form>
       <div class="chips" id="chips"></div>
@@ -642,7 +635,6 @@
   </div>
 <script>
 const q = document.getElementById("q");
-const also = document.getElementById("also");
 const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
@@ -823,14 +815,6 @@ function leafOf(value) {
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
-function combinedQuery() {
-  const a = q.value.trim();
-  const b = also.value.trim();
-  if (!a) return b;
-  if (!b) return a;
-  return "(" + a + ") AND (" + b + ")";
-}
-
 const NARROW_ORDER = ["language", "author", "form", "period", "genre"];
 const NARROW_LABEL = {
   language: "Language",
@@ -930,7 +914,7 @@ function narrowSuffix(sel) {
 }
 
 function shownQuery() {
-  const box = combinedQuery();
+  const box = q.value.trim();
   const suffix = narrowSuffix(searchNarrow);
   if (!box) return suffix;
   if (!suffix) return box;
@@ -1102,14 +1086,7 @@ function closeNarrowSheet() {
 
 
 function collectFilters() {
-  const out = [];
-  [{el: q, line: "q"}, {el: also, line: "also"}].forEach(function (row) {
-    parseFilters(row.el.value).forEach(function (f) {
-      f.line = row.line;
-      out.push(f);
-    });
-  });
-  return out;
+  return parseFilters(q.value);
 }
 
 function stripKind(el, kind) {
@@ -1124,7 +1101,6 @@ function stripKind(el, kind) {
 function addFilter(kind, value) {
   if (facetApplied(collectFilters(), kind, value)) return;
   stripKind(q, kind);
-  stripKind(also, kind);
   const token = kind + ":" + quoteFilter(value);
   const cur = q.value.trim();
   q.value = cur ? cur + " " + token : token;
@@ -1186,10 +1162,9 @@ function drawChips() {
     rm.textContent = "×";
     rm.setAttribute("aria-label", "Remove " + label.textContent);
     rm.addEventListener("click", function () {
-      const el = f.line === "also" ? also : q;
-      const cur = el.value;
-      el.value = (cur.slice(0, f.start) + " " + cur.slice(f.end)).replace(/\s+/g, " ").trim();
-      el.focus();
+      const cur = q.value;
+      q.value = (cur.slice(0, f.start) + " " + cur.slice(f.end)).replace(/\s+/g, " ").trim();
+      q.focus();
       runSearch();
     });
     chip.append(label, rm);
@@ -1854,7 +1829,7 @@ function alertCount(query) {
 
 function drawSaved() {
   savedRow.replaceChildren();
-  const current = combinedQuery();
+  const current = q.value.trim();
   const watched = shownQuery();
   const watching = watched && alertCount(watched) >= 0;
   if (current && remembered.indexOf(current) < 0) {
@@ -1894,7 +1869,6 @@ function drawSaved() {
     label.title = query;
     label.addEventListener("click", function () {
       q.value = query;
-      also.value = "";
       q.focus();
       runSearch();
     });
@@ -2012,7 +1986,6 @@ async function unwatchQuery(query) {
 
 async function seenNew(query) {
   q.value = query;
-  also.value = "";
   q.focus();
   if (await watchQuery(query)) runSearch();
 }
@@ -2078,7 +2051,6 @@ function onQueryInput() {
   drawSaved();
 }
 q.addEventListener("input", onQueryInput);
-also.addEventListener("input", onQueryInput);
 
 async function loadInfo() {
   try {
@@ -2724,10 +2696,16 @@ function restoreQuery() {
   try {
     qv = sessionStorage.getItem("grove.q") || "";
     av = sessionStorage.getItem("grove.also") || "";
+    sessionStorage.removeItem("grove.also");
   } catch (e) {}
+  const b = av.trim();
+  if (b) {
+    const a = qv.trim();
+    qv = a ? "(" + a + ") AND (" + b + ")" : b;
+    try { sessionStorage.setItem("grove.q", qv); } catch (e) {}
+  }
   if (qv) q.value = qv;
-  if (av) also.value = av;
-  if (qv || av || narrowActive(searchNarrow)) runSearch();
+  if (qv || narrowActive(searchNarrow)) runSearch();
 }
 searchNarrow = readNarrow("grove.narrow.search");
 libraryNarrow = readNarrow("grove.narrow.library");

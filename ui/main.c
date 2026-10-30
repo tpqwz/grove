@@ -1250,9 +1250,7 @@ static void *live_watch(void *arg) {
                 /* Keep the query the way CToy keeps a registered block. */
                 webui_run(live_win,
                           "(function(){try{var q=document.getElementById('q');"
-                          "var a=document.getElementById('also');"
                           "if(q)sessionStorage.setItem('grove.q',q.value);"
-                          "if(a)sessionStorage.setItem('grove.also',a.value);"
                           "}catch(e){}location.reload();})()");
                 fprintf(stderr, "grove-ui: reloaded %s\n", live_path);
                 fflush(stderr);

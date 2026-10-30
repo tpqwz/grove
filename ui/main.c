@@ -1562,8 +1562,33 @@ static int jstr(Buf *b, const char *key, const char *val) {
     return jesc(b, val);
 }
 
+static int library_sort_col(const char *name) {
+    static const char *names[] = {"title",  "creator", "date",     "language",
+                                  "type",   "subject", "coverage", "source"};
+    if (!name || !name[0]) {
+        return LIB_SORT_TITLE;
+    }
+    for (int i = 0; i < LIB_SORT_SOURCE + 1; i++) {
+        if (strcmp(name, names[i]) == 0) {
+            return i;
+        }
+    }
+    return LIB_SORT_TITLE;
+}
+
+static const char *library_sort_name(int col) {
+    static const char *names[] = {"title",  "creator", "date",     "language",
+                                  "type",   "subject", "coverage", "source"};
+    if (col < LIB_SORT_TITLE || col > LIB_SORT_SOURCE) {
+        return names[LIB_SORT_TITLE];
+    }
+    return names[col];
+}
+
 static char *library_json(const char *filter, const char *language, const char *author, const char *form,
-                           const char *period, const char *genre) {
+                           const char *period, const char *genre, const char *sort_name, const char *sort_dir) {
+    int sort_col = library_sort_col(sort_name);
+    int sort_desc = sort_dir && strcmp(sort_dir, "desc") == 0;
     if (!ix) {
         return json_error(open_err[0] ? open_err : "no index");
     }
@@ -1574,13 +1599,14 @@ static char *library_json(const char *filter, const char *language, const char *
     memset(&lib, 0, sizeof lib);
     Err e;
     err_clear(&e);
-    if (index_library_narrow(ix, filter && filter[0] ? filter : NULL, language, author, form, period, genre, &lib,
-                             &e) != 0) {
+    if (index_library_sorted(ix, filter && filter[0] ? filter : NULL, language, author, form, period, genre, sort_col,
+                             sort_desc, &lib, &e) != 0) {
         return json_error(e.msg[0] ? e.msg : "could not read the library");
     }
     Buf b;
     buf_init(&b);
-    if (buf_printf(&b, "{\"total\":%d,\"shown\":%d,\"roots\":[", lib.total, lib.n) != 0) {
+    if (buf_printf(&b, "{\"total\":%d,\"shown\":%d,\"sort\":", lib.total, lib.n) != 0 ||
+        jesc(&b, library_sort_name(sort_col)) != 0 || buf_printf(&b, ",\"desc\":%d,\"roots\":[", sort_desc) != 0) {
         goto fail;
     }
     for (int i = 0; i < lib.nroots; i++) {
@@ -1657,10 +1683,11 @@ static const char *arg_at(webui_event_t *e, size_t i) {
 }
 
 static void on_library(webui_event_t *e) {
-    char *field[6];
+    enum { LIB_ARGS = 8 };
+    char *field[LIB_ARGS];
     int n = 0;
     char *json = NULL;
-    for (size_t i = 0; i < 6; i++) {
+    for (size_t i = 0; i < LIB_ARGS; i++) {
         field[i] = xstrdup(arg_at(e, i));
         if (!field[i]) {
             for (int j = 0; j < n; j++) {
@@ -1672,9 +1699,9 @@ static void on_library(webui_event_t *e) {
         n++;
     }
     pthread_mutex_lock(&mu);
-    json = library_json(field[0], field[1], field[2], field[3], field[4], field[5]);
+    json = library_json(field[0], field[1], field[2], field[3], field[4], field[5], field[6], field[7]);
     pthread_mutex_unlock(&mu);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < LIB_ARGS; i++) {
         free(field[i]);
     }
     reply_owned(e, json);

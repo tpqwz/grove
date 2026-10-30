@@ -209,7 +209,8 @@ void index_alerts_free(Alert *alerts, int n);
  * the Dublin Core elements, kept beside the file. An empty element is unset.
  * title in the list is the record's title when one was saved, otherwise the
  * title from the file. At most LIBRARY_SHOW volumes are returned; total is
- * the whole match. */
+ * the whole match. index_library_list and index_library_narrow keep stored
+ * title order. index_library_sorted orders the whole match first. */
 #define LIBRARY_SHOW 300
 
 typedef struct Volume {
@@ -253,6 +254,22 @@ int index_library_list(Index *ix, const char *filter, Library *out, Err *e);
  * Empty means that group is open. Several names in one group match any of them. */
 int index_library_narrow(Index *ix, const char *filter, const char *language, const char *author, const char *form,
                          const char *period, const char *genre, Library *out, Err *e);
+/* sort_col is one of the LIB_SORT_* columns. A column outside that range is
+ * the title. sort_desc nonzero reverses the column. Empty fields sort last
+ * either way. Letters compare without case. The order is applied before
+ * LIBRARY_SHOW, so the rows are the first of the whole match. */
+enum {
+    LIB_SORT_TITLE = 0,
+    LIB_SORT_CREATOR,
+    LIB_SORT_DATE,
+    LIB_SORT_LANGUAGE,
+    LIB_SORT_TYPE,
+    LIB_SORT_SUBJECT,
+    LIB_SORT_COVERAGE,
+    LIB_SORT_SOURCE
+};
+int index_library_sorted(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                         const char *period, const char *genre, int sort_col, int sort_desc, Library *out, Err *e);
 void library_free(Library *lib);
 /* rec->path is the volume. The other fields are copied. A title updates the
  * title search uses. The file on disk is left where it is. */

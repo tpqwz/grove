@@ -5152,6 +5152,121 @@ static void shelf_rows_free(ShelfRow *rows, int n) {
     free(rows);
 }
 
+/* One passing row, ready for qsort. The strings are not owned. */
+typedef struct SortRef {
+    int index;
+    int empty;
+    int desc;
+    const char *key;
+    const char *tie_title;
+    const char *tie_path;
+} SortRef;
+
+static int text_blank(const char *s) {
+    size_t i = 0;
+    size_t n;
+    if (!s || !s[0]) {
+        return 1;
+    }
+    n = strlen(s);
+    while (i < n) {
+        uint32_t cp = 0;
+        utf8_next(s, n, &i, &cp);
+        if (cp != ' ' && cp != '\t' && cp != '\n' && cp != '\r' && cp != '\f' && cp != '\v') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int fold_cmp(const char *a, const char *b) {
+    const char *sa = a ? a : "";
+    const char *sb = b ? b : "";
+    size_t ia = 0;
+    size_t ib = 0;
+    size_t na = strlen(sa);
+    size_t nb = strlen(sb);
+    while (ia < na && ib < nb) {
+        uint32_t ca = 0;
+        uint32_t cb = 0;
+        utf8_next(sa, na, &ia, &ca);
+        utf8_next(sb, nb, &ib, &cb);
+        ca = casefold_cp(ca);
+        cb = casefold_cp(cb);
+        if (ca != cb) {
+            return ca < cb ? -1 : 1;
+        }
+    }
+    if (ia >= na && ib >= nb) {
+        return 0;
+    }
+    return ia < na ? 1 : -1;
+}
+
+static const char *row_shown_title(const ShelfRow *r) {
+    if (!r) {
+        return "";
+    }
+    if (r->cat && r->cat->field[CF_TITLE] && r->cat->field[CF_TITLE][0]) {
+        return r->cat->field[CF_TITLE];
+    }
+    return r->title ? r->title : "";
+}
+
+static const char *row_sort_text(const ShelfRow *r, int col) {
+    int cf = -1;
+    if (!r || col == LIB_SORT_TITLE) {
+        return row_shown_title(r);
+    }
+    switch (col) {
+    case LIB_SORT_CREATOR:
+        cf = CF_CREATOR;
+        break;
+    case LIB_SORT_DATE:
+        cf = CF_DATE;
+        break;
+    case LIB_SORT_LANGUAGE:
+        cf = CF_LANGUAGE;
+        break;
+    case LIB_SORT_TYPE:
+        cf = CF_TYPE;
+        break;
+    case LIB_SORT_SUBJECT:
+        cf = CF_SUBJECT;
+        break;
+    case LIB_SORT_COVERAGE:
+        cf = CF_COVERAGE;
+        break;
+    case LIB_SORT_SOURCE:
+        cf = CF_SOURCE;
+        break;
+    default:
+        return row_shown_title(r);
+    }
+    if (!r->cat || !r->cat->field[cf]) {
+        return "";
+    }
+    return r->cat->field[cf];
+}
+
+static int sortref_cmp(const void *va, const void *vb) {
+    const SortRef *a = va;
+    const SortRef *b = vb;
+    int cmp;
+    if (a->empty != b->empty) {
+        return a->empty - b->empty;
+    }
+    cmp = fold_cmp(a->key, b->key);
+    if (cmp != 0) {
+        return a->desc ? -cmp : cmp;
+    }
+    cmp = fold_cmp(a->tie_title, b->tie_title);
+    if (cmp != 0) {
+        return cmp;
+    }
+    return strcmp(a->tie_path ? a->tie_path : "", b->tie_path ? b->tie_path : "");
+}
+
 static int library_fail(char *needle, NarrowSel *sel, Cat *cats, int ncats, ShelfRow *rows, int nrows, const Cat **of,
                         Volume *vols, int nvols, Narrow *built, sqlite3_stmt *st) {
     if (st) {
@@ -5167,8 +5282,8 @@ static int library_fail(char *needle, NarrowSel *sel, Cat *cats, int ncats, Shel
     return -1;
 }
 
-int index_library_narrow(Index *ix, const char *filter, const char *language, const char *author, const char *form,
-                         const char *period, const char *genre, Library *out, Err *e) {
+static int library_fill(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                        const char *period, const char *genre, int sort_col, int sort_desc, Library *out, Err *e) {
     char *needle = NULL;
     NarrowSel sel;
     Cat *cats = NULL;
@@ -5292,35 +5407,106 @@ int index_library_narrow(Index *ix, const char *filter, const char *language, co
     if (fill_narrow(of, nrows, &sel, &built, e) != 0) {
         return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
     }
-    for (int i = 0; i < nrows; i++) {
-        Volume one;
-        size_t bytes = 0;
-        Volume *grown;
-        if (!narrow_passes(rows[i].cat, &sel, -1)) {
-            continue;
+    if (sort_col < 0) {
+        for (int i = 0; i < nrows; i++) {
+            Volume one;
+            size_t bytes = 0;
+            Volume *grown;
+            if (!narrow_passes(rows[i].cat, &sel, -1)) {
+                continue;
+            }
+            total++;
+            if (nvols >= LIBRARY_SHOW) {
+                continue;
+            }
+            if (volume_push(&one, rows[i].path, rows[i].title, rows[i].ext, rows[i].mtime, rows[i].size,
+                            rows[i].cat) != 0) {
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            if (size_mul((size_t)nvols + 1, sizeof *vols, &bytes) != 0) {
+                volume_clear(&one);
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            grown = realloc(vols, bytes);
+            if (!grown) {
+                volume_clear(&one);
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            vols = grown;
+            vols[nvols++] = one;
         }
-        total++;
-        if (nvols >= LIBRARY_SHOW) {
-            continue;
+    } else {
+        /* Order every match, then keep the first LIBRARY_SHOW. */
+        SortRef *refs = NULL;
+        int nref = 0;
+        int take;
+        for (int i = 0; i < nrows; i++) {
+            if (narrow_passes(rows[i].cat, &sel, -1)) {
+                nref++;
+            }
         }
-        if (volume_push(&one, rows[i].path, rows[i].title, rows[i].ext, rows[i].mtime, rows[i].size, rows[i].cat) !=
-            0) {
-            err_set(e, "out of memory");
-            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        if (nref > 0) {
+            size_t bytes = 0;
+            int k = 0;
+            if (size_mul((size_t)nref, sizeof *refs, &bytes) != 0) {
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            refs = malloc(bytes);
+            if (!refs) {
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            for (int i = 0; i < nrows; i++) {
+                const char *key;
+                if (!narrow_passes(rows[i].cat, &sel, -1)) {
+                    continue;
+                }
+                key = row_sort_text(&rows[i], sort_col);
+                refs[k].index = i;
+                refs[k].empty = text_blank(key);
+                refs[k].desc = sort_desc ? 1 : 0;
+                refs[k].key = key ? key : "";
+                refs[k].tie_title = row_shown_title(&rows[i]);
+                refs[k].tie_path = rows[i].path ? rows[i].path : "";
+                k++;
+            }
+            qsort(refs, (size_t)k, sizeof *refs, sortref_cmp);
+            nref = k;
         }
-        if (size_mul((size_t)nvols + 1, sizeof *vols, &bytes) != 0) {
-            volume_clear(&one);
-            err_set(e, "out of memory");
-            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        total = nref;
+        take = nref < LIBRARY_SHOW ? nref : LIBRARY_SHOW;
+        for (int i = 0; i < take; i++) {
+            int ri = refs[i].index;
+            Volume one;
+            size_t bytes = 0;
+            Volume *grown;
+            if (volume_push(&one, rows[ri].path, rows[ri].title, rows[ri].ext, rows[ri].mtime, rows[ri].size,
+                            rows[ri].cat) != 0) {
+                free(refs);
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            if (size_mul((size_t)nvols + 1, sizeof *vols, &bytes) != 0) {
+                volume_clear(&one);
+                free(refs);
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            grown = realloc(vols, bytes);
+            if (!grown) {
+                volume_clear(&one);
+                free(refs);
+                err_set(e, "out of memory");
+                return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+            }
+            vols = grown;
+            vols[nvols++] = one;
         }
-        grown = realloc(vols, bytes);
-        if (!grown) {
-            volume_clear(&one);
-            err_set(e, "out of memory");
-            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
-        }
-        vols = grown;
-        vols[nvols++] = one;
+        free(refs);
     }
     out->volumes = vols;
     out->n = nvols;
@@ -5360,8 +5546,21 @@ int index_library_narrow(Index *ix, const char *filter, const char *language, co
     return 0;
 }
 
+int index_library_narrow(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                         const char *period, const char *genre, Library *out, Err *e) {
+    return library_fill(ix, filter, language, author, form, period, genre, -1, 0, out, e);
+}
+
 int index_library_list(Index *ix, const char *filter, Library *out, Err *e) {
     return index_library_narrow(ix, filter, NULL, NULL, NULL, NULL, NULL, out, e);
+}
+
+int index_library_sorted(Index *ix, const char *filter, const char *language, const char *author, const char *form,
+                         const char *period, const char *genre, int sort_col, int sort_desc, Library *out, Err *e) {
+    if (sort_col < LIB_SORT_TITLE || sort_col > LIB_SORT_SOURCE) {
+        sort_col = LIB_SORT_TITLE;
+    }
+    return library_fill(ix, filter, language, author, form, period, genre, sort_col, sort_desc ? 1 : 0, out, e);
 }
 
 int index_catalog_put(Index *ix, const Volume *rec, Err *e) {

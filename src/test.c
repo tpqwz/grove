@@ -2661,6 +2661,246 @@ done:
     rm_rf(root);
 }
 
+static int order_is(const Library *lib, const char *a, const char *b, const char *c, const char *d) {
+    const char *want[4];
+    if (!lib || lib->n != 4) {
+        return 0;
+    }
+    want[0] = a;
+    want[1] = b;
+    want[2] = c;
+    want[3] = d;
+    for (int i = 0; i < 4; i++) {
+        if (!lib->volumes[i].path || !strstr(lib->volumes[i].path, want[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int listed(const Library *lib, const char *suffix) {
+    for (int i = 0; i < (lib ? lib->n : 0); i++) {
+        if (lib->volumes[i].path && strstr(lib->volumes[i].path, suffix)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void put_sorted(Index *ix, const char *path, const char *creator, const char *date, const char *language,
+                       const char *type, const char *subject, const char *coverage, const char *source) {
+    Volume rec;
+    Err e;
+    err_clear(&e);
+    memset(&rec, 0, sizeof rec);
+    rec.path = (char *)path;
+    rec.title = "";
+    rec.creator = (char *)creator;
+    rec.date = (char *)date;
+    rec.language = (char *)language;
+    rec.type = (char *)type;
+    rec.subject = (char *)subject;
+    rec.coverage = (char *)coverage;
+    rec.source = (char *)source;
+    rec.description = "";
+    rec.publisher = "";
+    rec.contributor = "";
+    rec.format = "";
+    rec.identifier = "ITEM-1";
+    rec.relation = "";
+    rec.rights = "";
+    if (index_catalog_put(ix, &rec, &e) != 0) {
+        fprintf(stderr, "sort catalog %s: %s\n", path ? path : "", e.msg);
+        fails++;
+    }
+}
+
+static void test_library_sort(void) {
+    char tmpl[] = "/tmp/grove-sort-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = root ? path_join(root, "docs") : NULL;
+    char *idx = root ? path_join(root, "idx") : NULL;
+    const char *names[] = {"a.txt", "b.txt", "m.txt", "z.txt"};
+    const char *texts[] = {"alpha file\n", "Blank author\n", "Middling\n", "zebra file\n"};
+    char *paths[4];
+    Index *ix = NULL;
+    Library lib;
+    Err e;
+    memset(paths, 0, sizeof paths);
+    memset(&lib, 0, sizeof lib);
+    err_clear(&e);
+    if (!root || !docs || !idx || mkdir(docs, 0700) != 0) {
+        fprintf(stderr, "sort corpus\n");
+        fails++;
+        goto done;
+    }
+    for (int i = 0; i < 4; i++) {
+        paths[i] = path_join(docs, names[i]);
+        if (!paths[i] || write_file(paths[i], texts[i], strlen(texts[i])) != 0) {
+            fails++;
+            goto done;
+        }
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "sort open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "sort add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_library_list(ix, NULL, &lib, &e) == 0);
+    CHECK(lib.total == 4 && lib.n == 4);
+    CHECK(order_is(&lib, "/b.txt", "/m.txt", "/a.txt", "/z.txt"));
+    library_free(&lib);
+    put_sorted(ix, paths[0], "Ann", "", "", "Prose", "", "1900s", "");
+    put_sorted(ix, paths[1], "", "Ancient", "Latin", "", "Notes", "Rome", "Gutenberg");
+    put_sorted(ix, paths[2], "Plato", "1922", "English", "Prose", "Essay", "Athens", "Shelf");
+    put_sorted(ix, paths[3], "ann", "c. 340 BCE", "Greek", "Verse", "Poem", "", "Delphi");
+
+    CHECK(index_library_narrow(ix, NULL, NULL, NULL, NULL, NULL, NULL, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/b.txt", "/m.txt", "/a.txt", "/z.txt"));
+    library_free(&lib);
+
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_TITLE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/a.txt", "/b.txt", "/m.txt", "/z.txt"));
+    CHECK(lib.volumes && strcmp(lib.volumes[0].identifier, "ITEM-1") == 0);
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, 99, 2, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/z.txt", "/m.txt", "/b.txt", "/a.txt"));
+    library_free(&lib);
+
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/a.txt", "/z.txt", "/m.txt", "/b.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 1, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/m.txt", "/a.txt", "/z.txt", "/b.txt"));
+    library_free(&lib);
+
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_DATE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/m.txt", "/b.txt", "/z.txt", "/a.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_DATE, 1, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/z.txt", "/b.txt", "/m.txt", "/a.txt"));
+    library_free(&lib);
+
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_LANGUAGE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/m.txt", "/z.txt", "/b.txt", "/a.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_TYPE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/a.txt", "/m.txt", "/z.txt", "/b.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_SUBJECT, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/m.txt", "/b.txt", "/z.txt", "/a.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_COVERAGE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/a.txt", "/m.txt", "/b.txt", "/z.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_SOURCE, 0, &lib, &e) == 0);
+    CHECK(order_is(&lib, "/z.txt", "/b.txt", "/m.txt", "/a.txt"));
+    library_free(&lib);
+
+    CHECK(index_library_sorted(ix, NULL, "English", NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 0, &lib, &e) == 0);
+    CHECK(lib.total == 1 && lib.n == 1);
+    CHECK(lib.volumes && lib.volumes[0].path && strstr(lib.volumes[0].path, "/m.txt"));
+    library_free(&lib);
+
+done:
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    for (int i = 0; i < 4; i++) {
+        free(paths[i]);
+    }
+    free(docs);
+    free(idx);
+    rm_rf(root);
+
+    char cap_tmpl[] = "/tmp/grove-sortcap-XXXXXX";
+    char *cap_root = mkdtemp(cap_tmpl);
+    char *cap_docs = cap_root ? path_join(cap_root, "docs") : NULL;
+    char *cap_idx = cap_root ? path_join(cap_root, "idx") : NULL;
+    char *late = cap_docs ? path_join(cap_docs, "T300.txt") : NULL;
+    char *early = cap_docs ? path_join(cap_docs, "T000.txt") : NULL;
+    Index *cap = NULL;
+    if (!cap_root || !cap_docs || !cap_idx || !late || !early || mkdir(cap_docs, 0700) != 0) {
+        fprintf(stderr, "sort cap corpus\n");
+        fails++;
+        goto cap_done;
+    }
+    for (int i = 0; i < LIBRARY_SHOW + 1; i++) {
+        char name[32];
+        char body[64];
+        char *path;
+        int nw = snprintf(name, sizeof name, "T%03d.txt", i);
+        int nb = snprintf(body, sizeof body, "T%03d word\n", i);
+        if (nw < 0 || nb < 0 || (size_t)nw >= sizeof name || (size_t)nb >= sizeof body) {
+            fails++;
+            goto cap_done;
+        }
+        path = path_join(cap_docs, name);
+        if (!path || write_file(path, body, strlen(body)) != 0) {
+            free(path);
+            fails++;
+            goto cap_done;
+        }
+        free(path);
+    }
+    err_clear(&e);
+    cap = index_open(cap_idx, 1, &e);
+    if (!cap) {
+        fprintf(stderr, "sort cap open: %s\n", e.msg);
+        fails++;
+        goto cap_done;
+    }
+    memset(&st, 0, sizeof st);
+    if (index_add(cap, cap_docs, &st, &e) != 0) {
+        fprintf(stderr, "sort cap add: %s\n", e.msg);
+        fails++;
+        goto cap_done;
+    }
+    put_sorted(cap, early, "Zzz", "", "", "", "", "", "");
+    put_sorted(cap, late, "Aaa", "", "", "", "", "", "");
+    CHECK(index_library_list(cap, NULL, &lib, &e) == 0);
+    CHECK(lib.total == LIBRARY_SHOW + 1 && lib.n == LIBRARY_SHOW);
+    CHECK(lib.volumes && lib.volumes[0].path && strstr(lib.volumes[0].path, "/T000.txt"));
+    CHECK(!listed(&lib, "/T300.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(cap, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_TITLE, 0, &lib, &e) == 0);
+    CHECK(lib.n == LIBRARY_SHOW && lib.volumes && strstr(lib.volumes[0].path, "/T000.txt"));
+    CHECK(!listed(&lib, "/T300.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(cap, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 0, &lib, &e) == 0);
+    CHECK(lib.total == LIBRARY_SHOW + 1 && lib.n == LIBRARY_SHOW);
+    CHECK(lib.volumes && strstr(lib.volumes[0].path, "/T300.txt"));
+    CHECK(lib.n > 1 && strstr(lib.volumes[1].path, "/T000.txt"));
+    CHECK(!listed(&lib, "/T299.txt"));
+    CHECK(listed(&lib, "/T001.txt"));
+    library_free(&lib);
+    CHECK(index_library_sorted(cap, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 1, &lib, &e) == 0);
+    CHECK(lib.volumes && strstr(lib.volumes[0].path, "/T000.txt"));
+    CHECK(lib.n > 1 && strstr(lib.volumes[1].path, "/T300.txt"));
+    CHECK(!listed(&lib, "/T299.txt"));
+    library_free(&lib);
+
+cap_done:
+    library_free(&lib);
+    if (cap) {
+        index_close(cap);
+    }
+    free(late);
+    free(early);
+    free(cap_docs);
+    free(cap_idx);
+    rm_rf(cap_root);
+}
+
 static void test_pages(void) {
     Err e;
     err_clear(&e);
@@ -2852,6 +3092,7 @@ int main(void) {
     test_saved();
     test_notes();
     test_library();
+    test_library_sort();
     test_narrow();
     test_alerts();
     test_reader();

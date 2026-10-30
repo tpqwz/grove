@@ -197,10 +197,18 @@
   }
   .more:hover { text-decoration: underline; }
   #reader[hidden] { display: none; }
-  .reader-nav { display: flex; gap: 1rem; margin: 0.2rem 0 0; }
+  .reader-bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg);
+    padding: 0.45rem 0 0.55rem;
+  }
+  .reader-nav { display: flex; gap: 1rem; margin: 0; }
   .reader-nav button { color: var(--focus); font-size: 0.88rem; }
   .reader-nav button:hover { text-decoration: underline; }
   .reader-nav button:disabled { color: var(--line); text-decoration: none; cursor: default; }
+  #reader-where { margin: 0.35rem 0 0; }
   #reader-title {
     margin: 0.85rem 0 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
@@ -234,7 +242,7 @@
 </head>
 <body>
   <div class="wrap">
-    <header>
+    <header id="search-head">
       <p id="index"></p>
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
@@ -249,18 +257,19 @@
     </header>
     <main id="results"></main>
     <main id="reader" hidden>
-      <p class="reader-nav">
-        <button type="button" id="reader-back">Search</button>
-        <button type="button" id="reader-orig">Original file</button>
-      </p>
+      <div class="reader-bar">
+        <p class="reader-nav">
+          <button type="button" id="reader-back">Search</button>
+          <button type="button" id="reader-prev">Earlier</button>
+          <button type="button" id="reader-next">Later</button>
+          <button type="button" id="reader-orig">Original file</button>
+        </p>
+        <p id="reader-where" class="where"></p>
+        <p class="err" id="reader-err" hidden></p>
+      </div>
       <h1 id="reader-title"></h1>
-      <p id="reader-where" class="where"></p>
       <div id="reader-toc"></div>
       <article id="reader-body"></article>
-      <p class="reader-nav">
-        <button type="button" id="reader-prev">Earlier</button>
-        <button type="button" id="reader-next">Later</button>
-      </p>
     </main>
   </div>
 <script>
@@ -520,6 +529,11 @@ function drawChips() {
 function showError(message) {
   err.hidden = !message;
   err.textContent = message || "";
+  const re = document.getElementById("reader-err");
+  if (re) {
+    re.hidden = !message;
+    re.textContent = message || "";
+  }
 }
 
 function countLine(files, places) {
@@ -551,7 +565,7 @@ function addPassage(parent, hit, passage) {
   text.innerHTML = withMarks(passage.text || "");
   btn.append(text);
   btn.addEventListener("click", function () {
-    openRead(hit.path, passage.offset || 0, 0);
+    openRead(hit.path, passage.offset || 0, 0, markedWords(passage.text));
   });
   parent.append(btn);
   const slot = document.createElement("div");
@@ -780,8 +794,10 @@ let readSeq = 0;
 
 function closeReader() {
   readSeq++;
+  readPhrase = "";
   reader.hidden = true;
   results.hidden = false;
+  document.getElementById("search-head").hidden = false;
 }
 
 function utf8Index(text, byteOff) {
@@ -798,19 +814,36 @@ function utf8Index(text, byteOff) {
   return text.length;
 }
 
-function renderProse(text, focus, pages) {
-  readerBody.replaceChildren();
-  let markA = -1;
-  let markB = -1;
-  if (focus >= 0 && focus <= text.length) {
-    markA = text.lastIndexOf("\n", Math.max(0, focus - 1)) + 1;
-    markB = text.indexOf("\n", focus);
-    if (markB < 0) markB = text.length;
-    if (markB - markA > 700) {
-      markA = Math.max(markA, focus - 80);
-      markB = Math.min(markB, focus + 220);
-    }
+function markedWords(text) {
+  const m = /<<([\s\S]*?)>>/.exec(text || "");
+  if (!m) return "";
+  return m[1].replace(/\s+/g, " ").trim();
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function locatePhrase(text, focus, phrase) {
+  if (!phrase || focus < 0) return null;
+  const parts = phrase.split(" ").filter(function (w) { return w.length; });
+  if (!parts.length) return null;
+  const re = new RegExp(parts.map(escapeRegExp).join("\\s+"), "g");
+  let best = null;
+  let m;
+  while ((m = re.exec(text))) {
+    const cand = { a: m.index, b: m.index + m[0].length };
+    if (!best || Math.abs(cand.a - focus) < Math.abs(best.a - focus)) best = cand;
+    if (m.index >= focus) break;
+    if (m[0].length === 0) re.lastIndex++;
   }
+  return best;
+}
+
+function renderProse(text, span, pages) {
+  readerBody.replaceChildren();
+  const markA = span ? span.a : -1;
+  const markB = span ? span.b : -1;
   const points = [0, text.length];
   if (markA > 0) points.push(markA);
   if (markB > 0 && markB < text.length) points.push(markB);
@@ -839,10 +872,10 @@ function renderProse(text, focus, pages) {
     if (!slice) continue;
     const marked = markA >= 0 && a >= markA && b <= markB;
     if (marked) {
-      let mark = readerBody.lastChild && readerBody.lastChild.id === "here" ? readerBody.lastChild : null;
-      if (!mark || mark.tagName !== "MARK") {
+      let mark = readerBody.lastChild && readerBody.lastChild.tagName === "MARK" ? readerBody.lastChild : null;
+      if (!mark) {
         mark = document.createElement("mark");
-        mark.id = "here";
+        if (!readerBody.querySelector("mark")) mark.id = "here";
         readerBody.append(mark);
       }
       mark.append(document.createTextNode(slice));
@@ -852,16 +885,40 @@ function renderProse(text, focus, pages) {
   }
 }
 
+let readPhrase = "";
+
+function sectionAt(heads, at) {
+  const stack = [];
+  (heads || []).forEach(function (head) {
+    if ((head.at || 0) > at) return;
+    const lv = head.level || 1;
+    while (stack.length && (stack[stack.length - 1].level || 1) >= lv) stack.pop();
+    stack.push(head);
+  });
+  const parts = [];
+  stack.forEach(function (head) {
+    const text = (head.text || "").trim();
+    if (text) parts.push(text);
+  });
+  return parts.join(" · ");
+}
+
 function drawReader(data) {
+  document.getElementById("search-head").hidden = true;
   results.hidden = true;
   reader.hidden = false;
   readerTitle.textContent = data.title || baseName(data.path || "");
-  const parts = [];
-  if (data.section) parts.push(data.section);
-  if (data.page > 0) parts.push("p. " + data.page);
-  readerWhere.textContent = parts.join(" · ");
   readerToc.replaceChildren();
   const heads = data.heads || [];
+  let section = data.section || "";
+  if ((data.at || 0) >= (data.to || 0) && (data.from || 0) < (data.at || 0)) {
+    const atStart = sectionAt(heads, data.from || 0);
+    if (atStart) section = atStart;
+  }
+  const parts = [];
+  if (section) parts.push(section);
+  if (data.page > 0) parts.push("p. " + data.page);
+  readerWhere.textContent = parts.join(" · ");
   if (heads.length) {
     const details = document.createElement("details");
     details.className = "toc";
@@ -875,7 +932,7 @@ function drawReader(data) {
       btn.className = "lv" + lv;
       btn.textContent = head.text || "";
       btn.addEventListener("click", function () {
-        openRead(data.path, head.at || 0, 0);
+        openRead(data.path, head.at || 0, 0, "");
       });
       list.append(btn);
     });
@@ -888,7 +945,8 @@ function drawReader(data) {
   const pages = (data.pages || []).map(function (p) {
     return { index: utf8Index(text, Math.max(0, (p.at || 0) - (data.from || 0))), page: p.page };
   });
-  renderProse(text, focus, pages);
+  const span = readPhrase ? locatePhrase(text, focus, readPhrase) : null;
+  renderProse(text, span, pages);
   readerPrev.disabled = !data.from;
   readerNext.disabled = data.to >= data.length;
   readerPrev.onclick = function () { openRead(data.path, data.from, -1); };
@@ -899,7 +957,8 @@ function drawReader(data) {
   else reader.scrollIntoView({ block: "start" });
 }
 
-async function openRead(path, at, dir) {
+async function openRead(path, at, dir, phrase) {
+  if (arguments.length >= 4) readPhrase = phrase || "";
   const id = ++readSeq;
   showError("");
   try {

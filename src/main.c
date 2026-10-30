@@ -25,9 +25,11 @@ static void usage(FILE *out) {
         "  fetch URL...\n"
         "      Save each web page into this index and index its text.\n"
         "      The same address again replaces that page. http and https.\n"
-        "  search [--limit N] [--json] [--at SPEC] QUERY...\n"
+        "  search [--limit N] [--json] [--at SPEC] [--stem] [--fuzzy] [--concepts] QUERY...\n"
         "      QUERY words are ANDed. OR and NOT are uppercase. -term excludes.\n"
         "      \"quoted phrases\", trailing *, and ext: path: title: mtime: filters.\n"
+        "      --stem matches inflections. --fuzzy allows one edit on longer words.\n"
+        "      --concepts adds related words. A trailing ~ is one edit on its own.\n"
         "      language: author: form: period: genre: narrow by the record.\n"
         "      Several of one are OR. Those five combine. Author is the creator,\n"
         "      form the type, period the coverage, and genre the subject.\n"
@@ -266,6 +268,8 @@ static int cmd_search(Index *ix, int argc, char **argv) {
     int limit = 20;
     int json = 0;
     const char *at = NULL;
+    SearchModes modes;
+    memset(&modes, 0, sizeof modes);
     int i = 0;
     for (; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) {
@@ -274,6 +278,18 @@ static int cmd_search(Index *ix, int argc, char **argv) {
         }
         if (strcmp(argv[i], "--json") == 0) {
             json = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--stem") == 0) {
+            modes.stem = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--fuzzy") == 0) {
+            modes.fuzzy = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--concepts") == 0) {
+            modes.concept = 1;
             continue;
         }
         if (strcmp(argv[i], "--limit") == 0) {
@@ -320,7 +336,7 @@ static int cmd_search(Index *ix, int argc, char **argv) {
     int n = 0;
     Facets facets;
     memset(&facets, 0, sizeof facets);
-    int rc = index_search(ix, query, limit, at, &hits, &n, &facets, &e);
+    int rc = index_search(ix, query, limit, at, &hits, &n, &facets, &modes, &e);
     free(query);
     if (rc != 0) {
         facets_free(&facets);

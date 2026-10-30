@@ -14,7 +14,7 @@ SQLITE_CFLAGS = -std=c11 -O2 -DNDEBUG \
 	-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
 SQLITE_OBJ = third_party/sqlite/sqlite3.o
 
-CORE = src/util.c src/text.c src/zip.c src/pdf.c src/extract.c src/fetch.c src/index.c src/fts_tok.c
+CORE = src/util.c src/text.c src/expand.c src/zip.c src/pdf.c src/extract.c src/fetch.c src/index.c src/fts_tok.c
 SRCS = $(CORE) src/main.c
 
 .PHONY: all test clean ui

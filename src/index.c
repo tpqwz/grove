@@ -2353,8 +2353,20 @@ static int gather_cands(Index *ix, const ParsedQuery *pq, Cand **cands, int *nc,
     return rc;
 }
 
+static int parse_for_search(const char *query, const SearchModes *modes, ParsedQuery *pq, Err *e) {
+    if (query_parse(query ? query : "", pq, e) != 0) {
+        return -1;
+    }
+    if (query_expand(&pq->q, modes) != 0) {
+        parsed_free(pq);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    return 0;
+}
+
 int index_search(Index *ix, const char *query, int limit, const char *at, Hit **hits, int *nhits, Facets *facets,
-                 Err *e) {
+                 const SearchModes *modes, Err *e) {
     *hits = NULL;
     *nhits = 0;
     if (limit <= 0) {
@@ -2367,7 +2379,7 @@ int index_search(Index *ix, const char *query, int limit, const char *at, Hit **
         return -1;
     }
     ParsedQuery pq;
-    if (query_parse(query, &pq, e) != 0) {
+    if (parse_for_search(query, modes, &pq, e) != 0) {
         return -1;
     }
     if (at && *at && !strchr(at, '=') && ix->nroots > 1) {
@@ -2389,7 +2401,7 @@ int index_search(Index *ix, const char *query, int limit, const char *at, Hit **
 }
 
 int index_more(Index *ix, const char *query, const char *path, uint32_t after, Passage **out, int *nout, int *more,
-               Err *e) {
+               const SearchModes *modes, Err *e) {
     *out = NULL;
     *nout = 0;
     if (more) {
@@ -2400,7 +2412,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
         return -1;
     }
     ParsedQuery pq;
-    if (query_parse(query ? query : "", &pq, e) != 0) {
+    if (parse_for_search(query, modes, &pq, e) != 0) {
         return -1;
     }
     NarrowGate *gate = NULL;

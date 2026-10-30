@@ -1,3 +1,4 @@
+#include "expand.h"
 #include "extract.h"
 #include "fetch.h"
 #include "index.h"
@@ -128,6 +129,40 @@ static void test_query_shape(void) {
     parsed_free(&pq);
     CHECK(query_parse("text -blown", &pq, &e) == 0);
     CHECK(pq.q && pq.q->kind == Q_AND && pq.q->b && pq.q->b->kind == Q_NOT);
+    parsed_free(&pq);
+    CHECK(query_parse("azrue~", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->kind == Q_TERM && pq.q->fuzzy && pq.q->len == 5);
+    CHECK(pq.q->text && strcmp(pq.q->text, "azrue") == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("port*", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->prefix && !pq.q->fuzzy);
+    parsed_free(&pq);
+    char stemmed[32];
+    size_t sn = porter_stem("running", 7, stemmed);
+    CHECK(sn == 3 && memcmp(stemmed, "run", 3) == 0);
+    sn = porter_stem("love", 4, stemmed);
+    CHECK(sn == 4 && memcmp(stemmed, "love", 4) == 0);
+    SearchModes stem_on;
+    memset(&stem_on, 0, sizeof stem_on);
+    stem_on.stem = 1;
+    CHECK(query_parse("runs", &pq, &e) == 0);
+    CHECK(query_expand(&pq.q, &stem_on) == 0);
+    CHECK(pq.q && pq.q->kind == Q_OR);
+    QTerm *qt = NULL;
+    int nq = 0;
+    CHECK(query_positive_terms(pq.q, &qt, &nq) == 0);
+    int saw_running = 0;
+    for (int i = 0; i < nq; i++) {
+        if (qt[i].len == 7 && memcmp(qt[i].s, "running", 7) == 0 && !qt[i].kin) {
+            saw_running = 1;
+        }
+    }
+    CHECK(saw_running);
+    qterms_free(qt, nq);
+    parsed_free(&pq);
+    CHECK(query_parse("runs", &pq, &e) == 0);
+    CHECK(query_expand(&pq.q, NULL) == 0);
+    CHECK(pq.q && pq.q->kind == Q_TERM);
     parsed_free(&pq);
 }
 
@@ -468,7 +503,7 @@ static Hit *do_search(Index *ix, const char *q, const char *at, int *n) {
     Err e;
     err_clear(&e);
     Hit *h = NULL;
-    int rc = index_search(ix, q, 50, at, &h, n, NULL, &e);
+    int rc = index_search(ix, q, 50, at, &h, n, NULL, NULL, &e);
     if (rc != 0) {
         fprintf(stderr, "search [%s]: %s\n", q, e.msg);
         fails++;
@@ -903,7 +938,7 @@ static int test_corpus(const char *root) {
             Passage *ps = NULL;
             int nmore = 0;
             err_clear(&e);
-            CHECK(index_more(ix, "late", h[0].path, prev, &ps, &nmore, &more, &e) == 0);
+            CHECK(index_more(ix, "late", h[0].path, prev, &ps, &nmore, &more, NULL, &e) == 0);
             CHECK(nmore >= 1);
             if (nmore >= 1 && ps) {
                 CHECK(ps[0].offset > prev);
@@ -922,7 +957,7 @@ static int test_corpus(const char *root) {
         int nn = 0;
         int extra = 1;
         err_clear(&e);
-        CHECK(index_more(ix, "late", h[0].path, prev, &none, &nn, &extra, &e) == 0);
+        CHECK(index_more(ix, "late", h[0].path, prev, &none, &nn, &extra, NULL, &e) == 0);
         CHECK(nn == 0 && extra == 0);
         passages_free(none, nn);
     }
@@ -1485,7 +1520,7 @@ static void test_facets(void) {
     memset(&fac, 0, sizeof fac);
     Hit *h = NULL;
     int n = 0;
-    CHECK(index_search(ix, "widget", 1, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget", 1, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 1);
     CHECK(fac.nfiles == 7);
     CHECK(facet_n(fac.types, fac.ntypes, "txt") == 5);
@@ -1501,7 +1536,7 @@ static void test_facets(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     n = 0;
-    CHECK(index_search(ix, "widget path:shelf/", 1, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget path:shelf/", 1, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 1);
     CHECK(fac.nfiles == 3);
     CHECK(facet_n(fac.types, fac.ntypes, "txt") == 3);
@@ -1515,7 +1550,7 @@ static void test_facets(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     n = 0;
-    CHECK(index_search(ix, "widget ext:md", 50, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget ext:md", 50, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 2);
     CHECK(fac.nfiles == 2);
     CHECK(facet_n(fac.types, fac.ntypes, "md") == 2);
@@ -1528,7 +1563,7 @@ static void test_facets(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     n = 0;
-    CHECK(index_search(ix, "silent", 1, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "silent", 1, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(fac.nfiles == 1);
     CHECK(facet_n(fac.folders, fac.nfolders, "shelf/") == 1);
     CHECK(facet_n(fac.types, fac.ntypes, "txt") == 1);
@@ -1610,7 +1645,7 @@ static void test_mtime(void) {
     memset(&fac, 0, sizeof fac);
     Hit *h = NULL;
     int n = 0;
-    CHECK(index_search(ix, "widget", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget", 10, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 2);
     CHECK(fac.nfiles == 2);
     CHECK(facet_n(fac.months, fac.nmonths, "2026-10") == 1);
@@ -1621,7 +1656,7 @@ static void test_mtime(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     n = 0;
-    CHECK(index_search(ix, "widget mtime:2026-09", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget mtime:2026-09", 10, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 1);
     CHECK(fac.nfiles == 1);
     expect_hit(h, n, "/sep.txt", "september");
@@ -1634,7 +1669,7 @@ static void test_mtime(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     n = 0;
-    CHECK(index_search(ix, "mtime:2026-10", 10, NULL, &h, &n, &fac, &e) == 0);
+    CHECK(index_search(ix, "mtime:2026-10", 10, NULL, &h, &n, &fac, NULL, &e) == 0);
     CHECK(n == 1);
     CHECK(fac.nfiles == 1);
     expect_hit(h, n, "/oct.txt", "october only");
@@ -2450,7 +2485,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     Hit *h = NULL;
     int nh = 0;
-    CHECK(index_search(ix, "widget language:English", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "widget language:English", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(nh == 3 && fac.nfiles == 3);
     CHECK(facet_n(fac.types, fac.ntypes, "txt") == 3);
     CHECK(facet_n(fac.types, fac.ntypes, "md") == -1);
@@ -2467,7 +2502,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     nh = 0;
-    CHECK(index_search(ix, "language:English language:Greek", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "language:English language:Greek", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(fac.nfiles == 4);
     expect_miss(h, nh, "/d.txt", "either language");
     hits_free(h, nh);
@@ -2476,7 +2511,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     nh = 0;
-    CHECK(index_search(ix, "author:Freud author:Aristotle", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "author:Freud author:Aristotle", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(fac.nfiles == 3);
     expect_hit(h, nh, "/b.md", "or author");
     expect_miss(h, nh, "/e.txt", "or author");
@@ -2486,7 +2521,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     nh = 0;
-    CHECK(index_search(ix, "author:Jung language:Greek", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "author:Jung language:Greek", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(nh == 0 && fac.nfiles == 0);
     CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "Greek") == 0);
     CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "English") == 1);
@@ -2498,7 +2533,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     nh = 0;
-    CHECK(index_search(ix, "form:Prose", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "form:Prose", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(fac.nfiles == 2);
     expect_miss(h, nh, "/e.txt", "whole form");
     expect_hit(h, nh, "/a.txt", "whole form");
@@ -2508,7 +2543,7 @@ static void test_narrow(void) {
     memset(&fac, 0, sizeof fac);
     h = NULL;
     nh = 0;
-    CHECK(index_search(ix, "language:Latin", 10, NULL, &h, &nh, &fac, &e) == 0);
+    CHECK(index_search(ix, "language:Latin", 10, NULL, &h, &nh, &fac, NULL, &e) == 0);
     CHECK(nh == 1 && fac.nfiles == 1);
     expect_hit(h, nh, "/e.txt", "latin");
     CHECK(facet_n(fac.narrow.language, fac.narrow.nlanguage, "Latin") == 1);
@@ -3081,11 +3116,171 @@ done:
     rm_rf(root);
 }
 
+static Hit *search_mode(Index *ix, const char *q, const SearchModes *modes, int *n) {
+    Err e;
+    err_clear(&e);
+    Hit *h = NULL;
+    int rc = index_search(ix, q, 50, NULL, &h, n, NULL, modes, &e);
+    if (rc != 0) {
+        fprintf(stderr, "search [%s]: %s\n", q, e.msg);
+        fails++;
+        *n = 0;
+        return NULL;
+    }
+    return h;
+}
+
+static const char *snip_of(Hit *h, int n, const char *suffix) {
+    size_t sn = strlen(suffix);
+    for (int i = 0; i < n; i++) {
+        if (!h[i].path) {
+            continue;
+        }
+        size_t pn = strlen(h[i].path);
+        if (pn >= sn && memcmp(h[i].path + pn - sn, suffix, sn) == 0) {
+            return h[i].snippet ? h[i].snippet : "";
+        }
+    }
+    return NULL;
+}
+
+static void test_modes(void) {
+    char tmpl[] = "/tmp/grove-modes-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *docs = path_join(root, "docs");
+    char *idx = path_join(root, "idx");
+    char *wn = path_join(root, "wn.txt");
+    char *running = docs ? path_join(docs, "running.txt") : NULL;
+    char *run = docs ? path_join(docs, "run.txt") : NULL;
+    char *azure = docs ? path_join(docs, "azure.txt") : NULL;
+    char *eros = docs ? path_join(docs, "eros.txt") : NULL;
+    char *flag = docs ? path_join(docs, "flag.txt") : NULL;
+    Index *ix = NULL;
+    Alert *al = NULL;
+    int nal = 0;
+    Err e;
+    err_clear(&e);
+    if (!docs || !idx || !wn || !running || !run || !azure || !eros || !flag || mkdir(docs, 0755) != 0) {
+        fprintf(stderr, "modes corpus\n");
+        fails++;
+        goto done;
+    }
+    if (write_file(running, "the running horse\n", 18) != 0 || write_file(run, "run along the road\n", 19) != 0 ||
+        write_file(azure, "azure banner\n", 13) != 0 || write_file(eros, "only eros remains\n", 18) != 0 ||
+        write_file(flag, "raise the flag\n", 15) != 0 ||
+        write_file(wn, "banner\tflag,pennant\n", 20) != 0) {
+        fails++;
+        goto done;
+    }
+    if (setenv("GROVE_WORDNET", wn, 1) != 0) {
+        perror("setenv");
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix || add_tree(ix, docs, &e) != 0) {
+        fprintf(stderr, "modes index: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    SearchModes off;
+    memset(&off, 0, sizeof off);
+    SearchModes stem;
+    memset(&stem, 0, sizeof stem);
+    stem.stem = 1;
+    SearchModes fuzzy;
+    memset(&fuzzy, 0, sizeof fuzzy);
+    fuzzy.fuzzy = 1;
+    SearchModes concept;
+    memset(&concept, 0, sizeof concept);
+    concept.concept = 1;
+
+    int n = 0;
+    Hit *h = search_mode(ix, "runs", &off, &n);
+    expect_miss(h, n, "running.txt", "runs exact");
+    hits_free(h, n);
+    h = search_mode(ix, "runs", &stem, &n);
+    expect_hit(h, n, "running.txt", "runs stem");
+    const char *snip = snip_of(h, n, "running.txt");
+    CHECK(snip && strstr(snip, "<<running>>"));
+    CHECK(snip && !strstr(snip, "{{"));
+    hits_free(h, n);
+    h = search_mode(ix, "running", &stem, &n);
+    expect_hit(h, n, "run.txt", "running stem");
+    hits_free(h, n);
+    h = search_mode(ix, "\"runs horse\"", &stem, &n);
+    expect_miss(h, n, "running.txt", "phrase stem");
+    hits_free(h, n);
+    h = search_mode(ix, "runs horse", &stem, &n);
+    expect_hit(h, n, "running.txt", "and stem");
+    hits_free(h, n);
+
+    h = search_mode(ix, "azrue", &off, &n);
+    expect_miss(h, n, "azure.txt", "azrue exact");
+    hits_free(h, n);
+    h = search_mode(ix, "azrue", &fuzzy, &n);
+    expect_hit(h, n, "azure.txt", "azrue fuzzy");
+    snip = snip_of(h, n, "azure.txt");
+    CHECK(snip && strstr(snip, "<<azure>>"));
+    hits_free(h, n);
+    h = search_mode(ix, "azrue~", &off, &n);
+    expect_hit(h, n, "azure.txt", "azrue tilde");
+    hits_free(h, n);
+
+    h = search_mode(ix, "love", &off, &n);
+    expect_miss(h, n, "eros.txt", "love exact");
+    hits_free(h, n);
+    h = search_mode(ix, "love", &concept, &n);
+    expect_hit(h, n, "eros.txt", "love concept");
+    snip = snip_of(h, n, "eros.txt");
+    CHECK(snip && strstr(snip, "{{eros}}"));
+    CHECK(snip && !strstr(snip, "<<"));
+    hits_free(h, n);
+    h = search_mode(ix, "banner", &concept, &n);
+    expect_hit(h, n, "flag.txt", "banner concept");
+    snip = snip_of(h, n, "flag.txt");
+    CHECK(snip && strstr(snip, "{{flag}}"));
+    hits_free(h, n);
+    h = search_mode(ix, "banner", &off, &n);
+    expect_miss(h, n, "flag.txt", "banner exact");
+    hits_free(h, n);
+
+    if (index_alert_watch(ix, "runs", &e) != 0) {
+        fprintf(stderr, "modes watch: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_alerts_list(ix, &al, &nal, &e) == 0);
+    CHECK(alert_nfiles(al, nal, "runs") == 0);
+
+done:
+    index_alerts_free(al, nal);
+    if (ix) {
+        index_close(ix);
+    }
+    unsetenv("GROVE_WORDNET");
+    free(docs);
+    free(idx);
+    free(wn);
+    free(running);
+    free(run);
+    free(azure);
+    free(eros);
+    free(flag);
+    rm_rf(root);
+}
+
 int main(void) {
     test_bounds();
     test_cert();
     test_tokens();
     test_query_shape();
+    test_modes();
     test_zip();
     test_facets();
     test_mtime();

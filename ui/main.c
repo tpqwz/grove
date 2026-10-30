@@ -169,7 +169,11 @@ static int json_matchinfo(Buf *b, const MatchInfo *m) {
     return buf_puts(b, "]}");
 }
 
-static char *search_json(const char *query) {
+static int flag_on(const char *s) {
+    return s && s[0] == '1' && s[1] == 0;
+}
+
+static char *search_json(const char *query, const SearchModes *modes) {
     if (!query || blank_query(query)) {
         return xstrdup("[]");
     }
@@ -185,7 +189,7 @@ static char *search_json(const char *query) {
     int n = 0;
     Facets facets;
     memset(&facets, 0, sizeof facets);
-    if (index_search(ix, query, SEARCH_LIMIT, NULL, &hits, &n, &facets, &e) != 0) {
+    if (index_search(ix, query, SEARCH_LIMIT, NULL, &hits, &n, &facets, modes, &e) != 0) {
         facets_free(&facets);
         return json_error(e.msg[0] ? e.msg : "search failed");
     }
@@ -280,7 +284,7 @@ fail:
     return NULL;
 }
 
-static char *more_json(const char *query, const char *path, uint32_t after) {
+static char *more_json(const char *query, const char *path, uint32_t after, const SearchModes *modes) {
     if (!query || blank_query(query)) {
         return xstrdup("{\"passages\":[],\"more\":false}");
     }
@@ -295,7 +299,7 @@ static char *more_json(const char *query, const char *path, uint32_t after) {
     Passage *ps = NULL;
     int n = 0;
     int more = 0;
-    if (index_more(ix, query, path, after, &ps, &n, &more, &e) != 0) {
+    if (index_more(ix, query, path, after, &ps, &n, &more, modes, &e) != 0) {
         return json_error(e.msg[0] ? e.msg : "could not show more");
     }
     Buf b;
@@ -349,20 +353,28 @@ static char *info_json(void) {
     return b.data;
 }
 
-static void on_search(webui_event_t *e) {
-    const char *in = webui_get_string(e);
+static void on_search(webui_event_t *ev) {
+    const char *in = webui_get_string_at(ev, 0);
+    SearchModes modes;
+    modes.stem = flag_on(webui_get_string_at(ev, 1));
+    modes.fuzzy = flag_on(webui_get_string_at(ev, 2));
+    modes.concept = flag_on(webui_get_string_at(ev, 3));
     char *query = xstrdup(in ? in : "");
     pthread_mutex_lock(&mu);
-    char *json = query ? search_json(query) : NULL;
+    char *json = query ? search_json(query, &modes) : NULL;
     pthread_mutex_unlock(&mu);
     free(query);
-    reply_owned(e, json);
+    reply_owned(ev, json);
 }
 
-static void on_more(webui_event_t *e) {
-    const char *path_in = webui_get_string_at(e, 0);
-    long long after_in = webui_get_int_at(e, 1);
-    const char *query_in = webui_get_string_at(e, 2);
+static void on_more(webui_event_t *ev) {
+    const char *path_in = webui_get_string_at(ev, 0);
+    long long after_in = webui_get_int_at(ev, 1);
+    const char *query_in = webui_get_string_at(ev, 2);
+    SearchModes modes;
+    modes.stem = flag_on(webui_get_string_at(ev, 3));
+    modes.fuzzy = flag_on(webui_get_string_at(ev, 4));
+    modes.concept = flag_on(webui_get_string_at(ev, 5));
     char *path = xstrdup(path_in ? path_in : "");
     char *query = xstrdup(query_in ? query_in : "");
     int bad_after = after_in < 0 || (unsigned long long)after_in > UINT32_MAX;
@@ -376,12 +388,16 @@ static void on_more(webui_event_t *e) {
     } else if (!allow_has(path)) {
         json = json_error("that file is not in these results");
     } else {
-        json = more_json(query, path, after);
+        json = more_json(query, path, after, &modes);
     }
     pthread_mutex_unlock(&mu);
     free(path);
     free(query);
-    reply_owned(e, json);
+    reply_owned(ev, json);
+}
+
+static void on_modes(webui_event_t *ev) {
+    reply(ev, "{\"ok\":true}");
 }
 
 static int http_address(const char *s) {
@@ -1874,6 +1890,7 @@ static void on_shelf(webui_event_t *e) {
 
 GUARD(on_search)
 GUARD(on_more)
+GUARD(on_modes)
 GUARD(on_open)
 GUARD(on_read)
 GUARD(on_info)
@@ -1930,6 +1947,7 @@ int grove_ui_attach(const GroveUi *ui) {
     size_t win = ui->window;
     webui_bind(win, "grove_search", on_search_guard);
     webui_bind(win, "grove_more", on_more_guard);
+    webui_bind(win, "grove_modes", on_modes_guard);
     webui_bind(win, "grove_open", on_open_guard);
     webui_bind(win, "grove_read", on_read_guard);
     webui_bind(win, "grove_info", on_info_guard);

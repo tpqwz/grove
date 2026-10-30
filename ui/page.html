@@ -217,6 +217,27 @@
     padding: 0 0.12em;
     border-radius: 2px;
   }
+  mark.kin { background: #d5e4f4; }
+  .search-opts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.7rem;
+  }
+  .search-opts[hidden] { display: none; }
+  .search-opts button {
+    border: 1px solid #ddd4c8;
+    background: var(--paper);
+    border-radius: 999px;
+    padding: 0.18rem 0.75rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .search-opts button[aria-pressed="true"] {
+    background: var(--mark);
+    color: var(--ink);
+    border-color: transparent;
+  }
   .more {
     margin-top: 0.55rem;
     color: var(--focus);
@@ -569,8 +590,13 @@
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
         <button type="submit" class="go" tabindex="-1">Search</button>
       </form>
+      <div id="search-opts" class="search-opts" hidden>
+        <button type="button" id="opt-stem" aria-pressed="true">Stemming</button>
+        <button type="button" id="opt-fuzzy" aria-pressed="false">Fuzzy</button>
+        <button type="button" id="opt-concept" aria-pressed="false">Concepts</button>
+      </div>
       <div class="chips" id="chips"></div>
-      <p class="help">Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix.</p>
+      <p class="help">Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix, and ~ is one edit. Stemming matches inflections. Fuzzy allows one edit on longer words. Concepts adds related words and marks them in blue.</p>
       <div class="saved" id="saved"></div>
       <p class="count" id="count"></p>
       <p class="err" id="err" hidden></p>
@@ -635,6 +661,10 @@
   </div>
 <script>
 const q = document.getElementById("q");
+const searchOpts = document.getElementById("search-opts");
+const optStem = document.getElementById("opt-stem");
+const optFuzzy = document.getElementById("opt-fuzzy");
+const optConcept = document.getElementById("opt-concept");
 const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
@@ -688,7 +718,9 @@ function esc(s) {
 }
 
 function withMarks(s) {
-  return esc(s).replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
+  return esc(s)
+    .replace(/\{\{([\s\S]*?)\}\}/g, '<mark class="kin">$1</mark>')
+    .replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
 }
 
 function baseName(path) {
@@ -1365,7 +1397,8 @@ function walkPassages(art, hit, passages, query) {
     btn.disabled = true;
     const last = passages[passages.length - 1];
     try {
-      const raw = await grove_more(hit.path, last ? last.offset : 0, query);
+      const modes = searchModes();
+      const raw = await grove_more(hit.path, last ? last.offset : 0, query, modes[0], modes[1], modes[2]);
       if (generation !== seq) return;
       const data = JSON.parse(raw);
       if (data.error) {
@@ -1418,7 +1451,7 @@ function render(hits, query) {
       line.title = folder;
       art.append(line);
     }
-    const first = ((passages[0] && passages[0].text) || "").replace(/<<|>>/g, "");
+    const first = ((passages[0] && passages[0].text) || "").replace(/<<|>>|\{\{|\}\}/g, "");
     const titleShown = !fetched && title && title.toLowerCase() !== baseName(hit.path || "").toLowerCase() &&
       first.toLowerCase().indexOf(title.toLowerCase()) === -1;
     if (titleShown) {
@@ -1455,7 +1488,9 @@ function utf8Index(text, byteOff) {
 }
 
 function markedWords(text) {
-  const m = /<<([\s\S]*?)>>/.exec(text || "");
+  const raw = text || "";
+  let m = /<<([\s\S]*?)>>/.exec(raw);
+  if (!m) m = /\{\{([\s\S]*?)\}\}/.exec(raw);
   if (!m) return "";
   return m[1].replace(/\s+/g, " ").trim();
 }
@@ -2006,7 +2041,8 @@ async function runSearch() {
   count.textContent = "Searching…";
   let raw;
   try {
-    raw = await grove_search(query);
+    const modes = searchModes();
+    raw = await grove_search(query, modes[0], modes[1], modes[2]);
   } catch (e) {
     if (id !== seq) return;
     count.textContent = "";
@@ -2686,6 +2722,43 @@ document.addEventListener("keydown", function (ev) {
 });
 buildEditor();
 
+function modeOn(el) {
+  return !!(el && el.getAttribute("aria-pressed") === "true");
+}
+
+function searchModes() {
+  if (!searchOpts || searchOpts.hidden) return ["0", "0", "0"];
+  return [modeOn(optStem) ? "1" : "0", modeOn(optFuzzy) ? "1" : "0", modeOn(optConcept) ? "1" : "0"];
+}
+
+function storedMode(el, key, fallback) {
+  let v = null;
+  try { v = sessionStorage.getItem(key); } catch (e) {}
+  const on = v === "1" ? true : v === "0" ? false : fallback;
+  if (el) el.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+function bindMode(el, key) {
+  if (!el) return;
+  el.addEventListener("click", function () {
+    const on = el.getAttribute("aria-pressed") !== "true";
+    el.setAttribute("aria-pressed", on ? "true" : "false");
+    try { sessionStorage.setItem(key, on ? "1" : "0"); } catch (e) {}
+    if (shownQuery().trim()) runSearch();
+  });
+}
+
+function initSearchOpts() {
+  if (!searchOpts || typeof grove_modes !== "function") return;
+  storedMode(optStem, "grove.search.stem", true);
+  storedMode(optFuzzy, "grove.search.fuzzy", false);
+  storedMode(optConcept, "grove.search.concept", false);
+  searchOpts.hidden = false;
+  bindMode(optStem, "grove.search.stem");
+  bindMode(optFuzzy, "grove.search.fuzzy");
+  bindMode(optConcept, "grove.search.concept");
+}
+
 function whenReady(fn) {
   if (typeof grove_info === "function") fn();
   else setTimeout(function () { whenReady(fn); }, 40);
@@ -2723,6 +2796,7 @@ if (libNarrowOpen) {
 }
 if (narrowDone) narrowDone.addEventListener("click", closeNarrowSheet);
 whenReady(function () {
+  initSearchOpts();
   loadInfo();
   loadSaved();
   loadNotes();

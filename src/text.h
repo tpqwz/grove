@@ -28,11 +28,19 @@ int tokenize(Tokens *t, const char *s, size_t n);
 
 typedef enum QKind { Q_TERM, Q_PHRASE, Q_NOT, Q_AND, Q_OR } QKind;
 
+typedef struct SearchModes {
+    int stem;
+    int fuzzy;
+    int concept;
+} SearchModes;
+
 typedef struct Query {
     QKind kind;
     char *text;
     size_t len;
     int prefix;
+    int kin;   /* 1 when this word was added only as a related concept */
+    int fuzzy; /* 1 when the query wrote word~ */
     struct Query *a;
     struct Query *b;
     struct Query **kids;
@@ -63,11 +71,15 @@ typedef struct ParsedQuery {
 
 int query_parse(const char *s, ParsedQuery *out, Err *e);
 void parsed_free(ParsedQuery *p);
+/* Rewrites terms in place. NULL modes leaves the tree unchanged, except word~.
+ * Phrases and prefix terms stay as written. Returns -1 on allocation failure. */
+int query_expand(Query **q, const SearchModes *modes);
 
 typedef struct QTerm {
     char *s;
     size_t len;
     int prefix;
+    int kin;
     int phrase; /* 0 is a loose word. A positive id is one quoted phrase, in order. */
 } QTerm;
 

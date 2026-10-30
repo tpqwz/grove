@@ -1,0 +1,41 @@
+share/wordnet-syn.txt is a list of WordNet 3.1 synonyms: the closest
+senses only, eight words at most. WordNet is Copyright 2006 by Princeton
+University. The list is used by the Concepts search. The classical word
+families are Grove's own and are not part of WordNet.
+
+WordNet Release 3.1
+
+This software and database is being provided to you, the LICENSEE, by
+Princeton University under the following license. By obtaining, using
+and/or copying this software and database, you agree that you have
+read, understood, and will comply with these terms and conditions.:
+
+Permission to use, copy, modify and distribute this software and
+database and its documentation for any purpose and without fee or
+royalty is hereby granted, provided that you agree to all of the
+following terms and conditions:
+
+1. Redistributions of this software and database must retain the above
+copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. Neither the name of Princeton University nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE AND DATABASE IS PROVIDED "AS IS" AND PRINCETON
+UNIVERSITY MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED. BY WAY OF EXAMPLE, BUT NOT LIMITATION, PRINCETON UNIVERSITY
+MAKES NO REPRESENTATIONS OR WARRANTIES OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE LICENSED SOFTWARE,
+DATABASE OR DOCUMENTATION WILL NOT INFRINGE ANY THIRD PARTY PATENTS,
+COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+The name of Princeton University or Princeton may not be used in
+advertising or publicity pertaining to distribution of the software
+and/or database. Title to copyright in this software, database and any
+associated documentation shall at all times remain with Princeton
+University and LICENSEE agrees to preserve same.

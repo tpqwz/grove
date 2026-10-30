@@ -1,5 +1,7 @@
 #include "text.h"
 
+#include "expand.h"
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -544,6 +546,112 @@ static Query *q_or(Query *a, Query *b) {
     return q;
 }
 
+/* Pairwise, so a long OR of spellings stays shallow. nodes are consumed. */
+static Query *or_balanced(Query **nodes, int n) {
+    if (n <= 0) {
+        return NULL;
+    }
+    while (n > 1) {
+        int w = 0;
+        for (int i = 0; i < n;) {
+            if (i + 1 == n) {
+                nodes[w++] = nodes[i];
+                i++;
+                continue;
+            }
+            Query *o = q_or(nodes[i], nodes[i + 1]);
+            if (!o) {
+                for (int j = 0; j < w; j++) {
+                    query_free(nodes[j]);
+                }
+                for (int j = i + 2; j < n; j++) {
+                    query_free(nodes[j]);
+                }
+                return NULL;
+            }
+            nodes[w++] = o;
+            i += 2;
+        }
+        n = w;
+    }
+    return nodes[0];
+}
+
+static Query *forms_to_or(const WordForm *f, int n) {
+    Query **nodes = calloc((size_t)n, sizeof(Query *));
+    if (!nodes) {
+        return NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        char *s = xstrndup(f[i].s, f[i].len);
+        if (!s) {
+            for (int j = 0; j < i; j++) {
+                query_free(nodes[j]);
+            }
+            free(nodes);
+            return NULL;
+        }
+        nodes[i] = q_term_owned(s, f[i].len, 0);
+        if (!nodes[i]) {
+            for (int j = 0; j < i; j++) {
+                query_free(nodes[j]);
+            }
+            free(nodes);
+            return NULL;
+        }
+        nodes[i]->kin = f[i].kin ? 1 : 0;
+    }
+    Query *q = or_balanced(nodes, n);
+    free(nodes);
+    return q;
+}
+
+static int expand_node(Query **qp, const SearchModes *modes) {
+    Query *q = qp ? *qp : NULL;
+    if (!q) {
+        return 0;
+    }
+    if (q->kind == Q_AND || q->kind == Q_OR || q->kind == Q_NOT) {
+        if (expand_node(&q->a, modes) != 0) {
+            return -1;
+        }
+        return expand_node(&q->b, modes);
+    }
+    if (q->kind != Q_TERM || q->prefix) {
+        return 0;
+    }
+    SearchModes off;
+    memset(&off, 0, sizeof off);
+    const SearchModes *m = modes ? modes : &off;
+    if (!q->fuzzy && !m->stem && !m->fuzzy && !m->concept) {
+        return 0;
+    }
+    WordForm *forms = NULL;
+    int n = 0;
+    if (expand_word(q->text ? q->text : "", q->len, q->fuzzy, m, &forms, &n) != 0) {
+        return -1;
+    }
+    if (n <= 1) {
+        wordforms_free(forms, n);
+        return 0;
+    }
+    Query *rep = forms_to_or(forms, n);
+    wordforms_free(forms, n);
+    if (!rep) {
+        return -1;
+    }
+    query_free(q);
+    *qp = rep;
+    return 0;
+}
+
+int query_expand(Query **q, const SearchModes *modes) {
+    if (!q) {
+        return 0;
+    }
+    return expand_node(q, modes);
+}
+
 typedef struct Cur {
     const char *s;
     size_t n;
@@ -850,15 +958,23 @@ static Query *parse_primary(Cur *c, ParsedQuery *pq) {
     }
     size_t e = c->i;
     int prefix = 0;
+    int fuzzy = 0;
     if (e > b && c->s[e - 1] == '*') {
         prefix = 1;
+        e--;
+    } else if (e > b && c->s[e - 1] == '~') {
+        fuzzy = 1;
         e--;
     }
     if (e == b) {
         err_set(c->e, "empty search term");
         return NULL;
     }
-    return atom_from_raw(c->s + b, e - b, prefix);
+    Query *term = atom_from_raw(c->s + b, e - b, prefix);
+    if (term && term->kind == Q_TERM) {
+        term->fuzzy = fuzzy;
+    }
+    return term;
 }
 
 static Query *parse_unary(Cur *c, ParsedQuery *pq) {
@@ -1001,7 +1117,7 @@ int query_parse(const char *s, ParsedQuery *out, Err *e) {
     return 0;
 }
 
-static int qterms_push(QTerm **arr, int *n, int *cap, const char *s, size_t len, int prefix, int phrase) {
+static int qterms_push(QTerm **arr, int *n, int *cap, const char *s, size_t len, int prefix, int kin, int phrase) {
     if (*n == *cap) {
         int c;
         if (cap_grow(*cap, 8, &c) != 0 || grow_alloc((void **)arr, (size_t)c, sizeof(QTerm)) != 0) {
@@ -1016,6 +1132,7 @@ static int qterms_push(QTerm **arr, int *n, int *cap, const char *s, size_t len,
     (*arr)[*n].s = copy;
     (*arr)[*n].len = len;
     (*arr)[*n].prefix = prefix;
+    (*arr)[*n].kin = kin;
     (*arr)[*n].phrase = phrase;
     (*n)++;
     return 0;
@@ -1026,7 +1143,7 @@ static int qterms_collect(const Query *q, QTerm **arr, int *n, int *cap, int phr
         return 0;
     }
     if (q->kind == Q_TERM) {
-        return qterms_push(arr, n, cap, q->text, q->len, q->prefix, phrase);
+        return qterms_push(arr, n, cap, q->text, q->len, q->prefix, q->kin, phrase);
     }
     if (q->kind == Q_PHRASE) {
         int id = ++(*phrase_seq);
@@ -1187,6 +1304,7 @@ static int cp_is_word(uint32_t cp) {
 typedef struct Range {
     size_t a, b;
     int term;
+    int kin;
 } Range;
 
 static int range_cmp(const void *x, const void *y) {
@@ -1541,26 +1659,33 @@ static int render_window(const char *text, size_t n, size_t a, size_t b, const R
     int sp = 1;
     for (size_t i = a; i < b && sn.len < 8192; i++) {
         unsigned char ch = (unsigned char)text[i];
-        int hl = 0;
+        int cover = 0;
+        int plain = 0;
         for (int h = 0; h < nh; h++) {
             if (i >= hits[h].a && i < hits[h].b) {
-                hl = 1;
-                break;
+                cover = 1;
+                if (!hits[h].kin) {
+                    plain = 1;
+                }
             }
         }
-        if (hl && !open) {
-            if (buf_puts(&sn, "<<") != 0) {
+        /* {{ }} is a related word. An exact hit on the same letters stays << >>. */
+        int want = !cover ? 0 : (plain ? 1 : 2);
+        if (want != open) {
+            const char *mark = open == 2 ? "}}" : (open == 1 ? ">>" : "");
+            if (mark[0] && buf_puts(&sn, mark) != 0) {
                 buf_free(&sn);
                 return -1;
             }
-            open = 1;
-            sp = 0;
-        } else if (!hl && open) {
-            if (buf_puts(&sn, ">>") != 0) {
+            mark = want == 2 ? "{{" : (want == 1 ? "<<" : "");
+            if (mark[0] && buf_puts(&sn, mark) != 0) {
                 buf_free(&sn);
                 return -1;
             }
-            open = 0;
+            open = want;
+            if (want) {
+                sp = 0;
+            }
         }
         if (ch == '\n') {
             if (sp == 2) {
@@ -1589,7 +1714,7 @@ static int render_window(const char *text, size_t n, size_t a, size_t b, const R
             return -1;
         }
     }
-    if (open && buf_puts(&sn, ">>") != 0) {
+    if (open && buf_puts(&sn, open == 2 ? "}}" : ">>") != 0) {
         buf_free(&sn);
         return -1;
     }
@@ -1765,7 +1890,7 @@ static int farthest_hit(const Range *hits, int nh) {
 
 /* Count every place. Keep the earliest GROVE_OFFSET_MAX spans. */
 static void add_hit(Range *hits, int *nh, int *far, int *nmatches, const uint32_t *src_at, size_t cfn, size_t n,
-                    size_t start, size_t end, int term) {
+                    size_t start, size_t end, int term, int kin) {
     if (!src_at || end <= start) {
         return;
     }
@@ -1779,6 +1904,7 @@ static void add_hit(Range *hits, int *nh, int *far, int *nmatches, const uint32_
     r.a = sa;
     r.b = sb;
     r.term = term;
+    r.kin = kin;
     if (*nh < GROVE_OFFSET_MAX) {
         hits[*nh] = r;
         if (*nh == 0 || r.a >= hits[*far].a) {
@@ -1806,7 +1932,7 @@ static void add_term_hits(Range *hits, int *nh, int *far, int *nmatches, const c
         size_t start = (size_t)(p - cf);
         size_t end = 0;
         if (term_at(cf, cfn, src_at, text, n, start, term, &end)) {
-            add_hit(hits, nh, far, nmatches, src_at, cfn, n, start, end, term_i);
+            add_hit(hits, nh, far, nmatches, src_at, cfn, n, start, end, term_i, term->kin);
         }
         size_t step = (size_t)(p - from) + 1;
         if (step > left) {
@@ -1850,7 +1976,7 @@ static void add_phrase_hits(Range *hits, int *nh, int *far, int *nmatches, const
             end = e2;
         }
         if (ok) {
-            add_hit(hits, nh, far, nmatches, src_at, cfn, n, start, end, lo);
+            add_hit(hits, nh, far, nmatches, src_at, cfn, n, start, end, lo, 0);
         }
         size_t step = (size_t)(p - from) + 1;
         if (step > left) {

@@ -114,13 +114,14 @@ int index_info(Index *ix, IndexInfo *info, Err *e);
 /* at is NULL, a replacement root (one indexed root), or OLD=NEW.
  * facets may be NULL. When set, counts cover every matching file, before limit
  * drops the hit list. Pass a zeroed Facets; free it with facets_free. */
+/* modes NULL is an exact query, apart from a trailing ~ on a word. */
 int index_search(Index *ix, const char *query, int limit, const char *at, Hit **hits, int *nhits, Facets *facets,
-                 Err *e);
+                 const SearchModes *modes, Err *e);
 void facets_free(Facets *f);
 /* Next page of passages for one file already returned by index_search.
- * `after` is the offset of the last passage shown. */
+ * `after` is the offset of the last passage shown. modes matches that search. */
 int index_more(Index *ix, const char *query, const char *path, uint32_t after, Passage **out, int *nout, int *more,
-               Err *e);
+               const SearchModes *modes, Err *e);
 void hits_free(Hit *hits, int n);
 
 /* The indexed text of one file, which is the same record for every source

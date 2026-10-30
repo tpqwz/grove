@@ -233,16 +233,18 @@
     top: 0;
     z-index: 4;
     display: flex;
-    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 0.35rem 0.4rem;
     background: var(--bg);
     padding: 0.1rem 0 0.55rem;
-    overflow-x: auto;
   }
   .tabs button.tab {
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
-    max-width: 16rem;
+    max-width: min(16rem, 100%);
+    min-width: 0;
     flex: 0 0 auto;
     border: 1px solid #ddd4c8;
     background: transparent;
@@ -256,13 +258,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
   }
   .tabs .tab-x { color: var(--muted); padding: 0 0.15rem; line-height: 1; }
   .tabs button.tab.on .tab-x { color: var(--focus); }
   .reader[hidden] { display: none; }
   .reader-bar {
     position: sticky;
-    top: 2.35rem;
+    top: var(--tabs-h, 2.35rem);
     z-index: 3;
     background: var(--bg);
     padding: 0.45rem 0 0.55rem;
@@ -999,6 +1002,16 @@ function drawTabStrip() {
     btn.append(label, x);
     tabStrip.append(btn);
   });
+  requestAnimationFrame(syncTabHeight);
+}
+
+function syncTabHeight() {
+  const h = tabStrip.getBoundingClientRect().height;
+  if (h > 0) readerCol.style.setProperty("--tabs-h", h + "px");
+}
+
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(syncTabHeight).observe(tabStrip);
 }
 
 function setSplit(on) {

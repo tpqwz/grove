@@ -1018,6 +1018,14 @@ static int test_corpus(const char *root) {
     if (n == 1 && h && h[0].npassages >= 1) {
         CHECK(h[0].passages[0].page == 2);
         CHECK(h[0].passages[0].section && strcmp(h[0].passages[0].section, "Intro") == 0);
+        DocRead *rd = NULL;
+        err_clear(&e);
+        CHECK(index_read(ix, h[0].path, h[0].passages[0].offset, 0, &rd, &e) == 0);
+        CHECK(rd && rd->page == 2);
+        CHECK(rd && rd->text && strstr(rd->text, "second page dock"));
+        CHECK(rd && rd->from <= h[0].passages[0].offset && rd->to > h[0].passages[0].offset);
+        CHECK(rd && rd->section && strcmp(rd->section, "Intro") == 0);
+        docread_free(rd);
     }
     hits_free(h, n);
 
@@ -1061,6 +1069,16 @@ static int test_corpus(const char *root) {
     if (n == 1 && h && h[0].npassages >= 1) {
         CHECK(h[0].passages[0].section && strcmp(h[0].passages[0].section, "Adoc Title") == 0);
         CHECK(h[0].passages[0].page == 0);
+        DocRead *rd = NULL;
+        err_clear(&e);
+        CHECK(index_read(ix, h[0].path, h[0].passages[0].offset, 0, &rd, &e) == 0);
+        CHECK(rd && rd->text && strstr(rd->text, "adocmarker"));
+        CHECK(rd && rd->nheads >= 1 && rd->heads[0].text && strcmp(rd->heads[0].text, "Adoc Title") == 0);
+        CHECK(rd && rd->page == 0);
+        docread_free(rd);
+        err_clear(&e);
+        CHECK(index_read(ix, "/no/such/file", 0, 0, &rd, &e) != 0);
+        docread_free(rd);
     }
     hits_free(h, n);
 
@@ -1943,6 +1961,102 @@ done:
     rm_rf(root);
 }
 
+static void test_reader(void) {
+    char tmpl[] = "/tmp/grove-read-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *docs = path_join(root, "docs");
+    char *idx = path_join(root, "idx");
+    char *file = docs ? path_join(docs, "long.adoc") : NULL;
+    Index *ix = NULL;
+    char *body = NULL;
+    Err e;
+    err_clear(&e);
+    if (!docs || !idx || !file || mkdir(docs, 0755) != 0) {
+        fails++;
+        goto done;
+    }
+    size_t cap = 100 * 1024;
+    body = malloc(cap + 64);
+    if (!body) {
+        fails++;
+        goto done;
+    }
+    const char *head = "= Chapter\n";
+    size_t n = strlen(head);
+    memcpy(body, head, n);
+    const char *line = "alpha beta gamma delta epsilon zeta\n";
+    size_t ln = strlen(line);
+    while (n + ln + 16 < cap) {
+        memcpy(body + n, line, ln);
+        n += ln;
+    }
+    const char *mark = "\nuniquemarker\n";
+    memcpy(body + 50000, mark, strlen(mark));
+    body[n] = 0;
+    if (write_file(file, body, n) != 0) {
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "reader open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "reader add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    int nh = 0;
+    Hit *h = do_search(ix, "uniquemarker", NULL, &nh);
+    CHECK(nh == 1 && h && h[0].npassages >= 1);
+    if (nh == 1 && h && h[0].npassages >= 1) {
+        DocRead *rd = NULL;
+        err_clear(&e);
+        CHECK(index_read(ix, h[0].path, h[0].passages[0].offset, 0, &rd, &e) == 0);
+        CHECK(rd && rd->text && strstr(rd->text, "uniquemarker"));
+        CHECK(rd && rd->from <= h[0].passages[0].offset && rd->to > h[0].passages[0].offset);
+        CHECK(rd && rd->length > rd->to);
+        CHECK(rd && rd->to - rd->from <= 48u * 1024u + 512u);
+        CHECK(rd && rd->nheads >= 1 && strcmp(rd->heads[0].text, "Chapter") == 0);
+        uint32_t mid = rd->to;
+        uint32_t start = rd->from;
+        docread_free(rd);
+        rd = NULL;
+        err_clear(&e);
+        CHECK(index_read(ix, h[0].path, mid, 1, &rd, &e) == 0);
+        CHECK(rd && rd->from == mid);
+        CHECK(rd && rd->to > rd->from);
+        CHECK(rd && !strstr(rd->text, "uniquemarker"));
+        docread_free(rd);
+        rd = NULL;
+        err_clear(&e);
+        CHECK(index_read(ix, h[0].path, start, -1, &rd, &e) == 0);
+        CHECK(rd && rd->to == start);
+        CHECK(rd && rd->from < rd->to);
+        CHECK(rd && rd->text && strstr(rd->text, "= Chapter"));
+        docread_free(rd);
+    }
+    hits_free(h, nh);
+done:
+    if (ix) {
+        index_close(ix);
+    }
+    free(body);
+    free(file);
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
 int main(void) {
     test_tokens();
     test_query_shape();
@@ -1952,6 +2066,7 @@ int main(void) {
     test_saved();
     test_notes();
     test_alerts();
+    test_reader();
     char tmpl[] = "/tmp/grove-test-XXXXXX";
     char *root = mkdtemp(tmpl);
     if (!root) {

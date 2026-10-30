@@ -1229,9 +1229,102 @@ static void *live_watch(void *arg) {
         ui_leave();                                                                 \
     }
 
+static char *read_json(const char *path, uint32_t at, int dir) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    Err e;
+    err_clear(&e);
+    DocRead *rd = NULL;
+    if (index_read(ix, path, at, dir, &rd, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not open the text");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"format\":\"grove\",\"title\":") != 0 || jesc(&b, rd->title) != 0 ||
+        buf_puts(&b, ",\"section\":") != 0 || jesc(&b, rd->section) != 0 || buf_puts(&b, ",\"path\":") != 0 ||
+        jesc(&b, path) != 0) {
+        goto fail;
+    }
+    if (buf_printf(&b, ",\"from\":%u,\"to\":%u,\"at\":%u,\"length\":%u,\"page\":%d,\"text\":", rd->from, rd->to, rd->at,
+                   rd->length, rd->page) != 0 ||
+        jesc(&b, rd->text) != 0 || buf_puts(&b, ",\"heads\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < rd->nheads; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_printf(&b, "{\"at\":%u,\"level\":%d,\"text\":", rd->heads[i].at, rd->heads[i].level) != 0 ||
+            jesc(&b, rd->heads[i].text) != 0 || buf_putc(&b, '}') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "],\"pages\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < rd->npages; i++) {
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_printf(&b, "{\"at\":%u,\"page\":%d}", rd->pages[i].at, rd->pages[i].page) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    docread_free(rd);
+    return b.data;
+fail:
+    docread_free(rd);
+    buf_free(&b);
+    return NULL;
+}
+
+static void on_read(webui_event_t *e) {
+    const char *in = webui_get_string_at(e, 0);
+    char *path = xstrdup(in ? in : "");
+    const char *at_s = webui_get_string_at(e, 1);
+    const char *dir_s = webui_get_string_at(e, 2);
+    uint32_t at = 0;
+    int dir = 0;
+    if (at_s && at_s[0]) {
+        char *end = NULL;
+        unsigned long long v = strtoull(at_s, &end, 10);
+        if (end && *end == 0 && v <= UINT32_MAX) {
+            at = (uint32_t)v;
+        }
+    }
+    if (dir_s && dir_s[0] == '-') {
+        dir = -1;
+    } else if (dir_s && dir_s[0] == '1') {
+        dir = 1;
+    }
+    int allowed = 0;
+    if (path) {
+        pthread_mutex_lock(&mu);
+        allowed = allow_has(path);
+        pthread_mutex_unlock(&mu);
+    }
+    char *json = NULL;
+    if (!path) {
+        json = NULL;
+    } else if (!allowed) {
+        json = json_error("that file is not in these results");
+    } else {
+        pthread_mutex_lock(&mu);
+        json = read_json(path, at, dir);
+        pthread_mutex_unlock(&mu);
+    }
+    free(path);
+    reply_owned(e, json);
+}
+
 GUARD(on_search)
 GUARD(on_more)
 GUARD(on_open)
+GUARD(on_read)
 GUARD(on_info)
 GUARD(on_saved)
 GUARD(on_save)
@@ -1279,6 +1372,7 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_search", on_search_guard);
     webui_bind(win, "grove_more", on_more_guard);
     webui_bind(win, "grove_open", on_open_guard);
+    webui_bind(win, "grove_read", on_read_guard);
     webui_bind(win, "grove_info", on_info_guard);
     webui_bind(win, "grove_saved", on_saved_guard);
     webui_bind(win, "grove_save", on_save_guard);

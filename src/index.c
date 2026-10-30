@@ -2464,6 +2464,452 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
     return 0;
 }
 
+enum { READ_CAP = 48 * 1024 };
+
+static char *cut_dup(const char *s, size_t maxb) {
+    if (!s) {
+        s = "";
+    }
+    size_t n = strlen(s);
+    if (n > maxb) {
+        n = utf8_prefix_bytes(s, n, maxb);
+    }
+    return xstrndup(s, n);
+}
+
+static uint32_t boundary_down(const char *text, uint32_t pos) {
+    while (pos > 0 && ((unsigned char)text[pos] & 0xc0) == 0x80) {
+        pos--;
+    }
+    return pos;
+}
+
+static uint32_t boundary_up(const char *text, uint32_t n, uint32_t pos) {
+    while (pos < n && ((unsigned char)text[pos] & 0xc0) == 0x80) {
+        pos++;
+    }
+    return pos;
+}
+
+/* Move to a newline within 400 bytes, then sit on a character boundary. */
+static uint32_t snap_down(const char *text, uint32_t pos, uint32_t floor) {
+    if (pos < floor) {
+        pos = floor;
+    }
+    uint32_t lim = pos > 400 ? pos - 400 : 0;
+    if (lim < floor) {
+        lim = floor;
+    }
+    uint32_t i = pos;
+    while (i > lim) {
+        if (text[i - 1] == '\n') {
+            return i;
+        }
+        i--;
+    }
+    return boundary_down(text, pos);
+}
+
+static uint32_t snap_up(const char *text, uint32_t n, uint32_t pos, uint32_t ceil) {
+    if (ceil > n) {
+        ceil = n;
+    }
+    if (pos > ceil) {
+        pos = ceil;
+    }
+    uint32_t lim = pos + 400;
+    if (lim > ceil) {
+        lim = ceil;
+    }
+    uint32_t i = pos;
+    while (i < lim) {
+        if (text[i] == '\n') {
+            return i + 1 <= ceil ? i + 1 : ceil;
+        }
+        i++;
+    }
+    uint32_t b = boundary_up(text, n, pos);
+    return b > ceil ? ceil : b;
+}
+
+static int head_mark(const Mark *m) {
+    return m->kind == MARK_HEAD && m->text && m->text[0];
+}
+
+static void section_bounds(const char *text, uint32_t n, const Mark *marks, int nmarks, uint32_t at, int *have,
+                           uint32_t *hs, uint32_t *he, uint8_t *lv) {
+    *have = 0;
+    *hs = 0;
+    *he = n;
+    *lv = 1;
+    (void)text;
+    for (int i = 0; i < nmarks; i++) {
+        if (!head_mark(&marks[i]) || marks[i].offset > at) {
+            continue;
+        }
+        if (!*have || marks[i].offset >= *hs) {
+            *hs = marks[i].offset;
+            *lv = marks[i].level ? marks[i].level : 1;
+            *have = 1;
+        }
+    }
+    if (!*have) {
+        return;
+    }
+    for (int i = 0; i < nmarks; i++) {
+        if (!head_mark(&marks[i]) || marks[i].offset <= *hs) {
+            continue;
+        }
+        uint8_t level = marks[i].level ? marks[i].level : 1;
+        if (level <= *lv && marks[i].offset < *he) {
+            *he = marks[i].offset;
+        }
+    }
+}
+
+static void read_bounds(const char *text, uint32_t n, const Mark *marks, int nmarks, uint32_t at, int dir,
+                        uint32_t *from, uint32_t *to) {
+    if (n == 0) {
+        *from = 0;
+        *to = 0;
+        return;
+    }
+    if (at > n) {
+        at = n;
+    }
+    if (dir > 0) {
+        uint32_t b = at + READ_CAP;
+        if (b > n) {
+            b = n;
+        }
+        b = snap_up(text, n, b, n);
+        if (b < at) {
+            b = at;
+        }
+        *from = at;
+        *to = b;
+        return;
+    }
+    if (dir < 0) {
+        uint32_t a = at > (uint32_t)READ_CAP ? at - (uint32_t)READ_CAP : 0;
+        a = snap_down(text, a, 0);
+        if (a > at) {
+            a = at;
+        }
+        *from = a;
+        *to = at;
+        return;
+    }
+    int have = 0;
+    uint32_t hs = 0;
+    uint32_t he = n;
+    uint8_t lv = 1;
+    section_bounds(text, n, marks, nmarks, at, &have, &hs, &he, &lv);
+    if (have && he > hs && he - hs <= (uint32_t)READ_CAP && at >= hs && at <= he) {
+        *from = hs;
+        *to = he;
+        return;
+    }
+    uint32_t floor = have ? hs : 0;
+    uint32_t ceil = have ? he : n;
+    uint32_t back = (uint32_t)READ_CAP / 3;
+    uint32_t a = at > back ? at - back : 0;
+    if (a < floor) {
+        a = floor;
+    }
+    a = snap_down(text, a, floor);
+    uint32_t b = a + (uint32_t)READ_CAP;
+    if (b > ceil) {
+        b = ceil;
+    }
+    if (b < at) {
+        b = at <= ceil ? at : ceil;
+    }
+    b = snap_up(text, n, b, ceil);
+    if (a > at) {
+        a = at;
+    }
+    if (b < at) {
+        b = at <= n ? at : n;
+    }
+    *from = boundary_down(text, a);
+    *to = boundary_up(text, n, b);
+    if (*to < *from) {
+        *to = *from;
+    }
+}
+
+static char *section_at(const Mark *marks, int nmarks, uint32_t at) {
+    const char *stack[8];
+    uint8_t levels[8];
+    int sp = 0;
+    for (int i = 0; i < nmarks; i++) {
+        if (!head_mark(&marks[i]) || marks[i].offset > at) {
+            continue;
+        }
+        uint8_t lv = marks[i].level ? marks[i].level : 1;
+        while (sp > 0 && levels[sp - 1] >= lv) {
+            sp--;
+        }
+        if (sp == 8) {
+            memmove(stack, stack + 1, 7 * sizeof(char *));
+            memmove(levels, levels + 1, 7);
+            sp = 7;
+        }
+        stack[sp] = marks[i].text;
+        levels[sp] = lv;
+        sp++;
+    }
+    if (sp == 0) {
+        return NULL;
+    }
+    Buf b;
+    buf_init(&b);
+    for (int i = 0; i < sp; i++) {
+        if (i && buf_puts(&b, " · ") != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+        if (buf_puts(&b, stack[i]) != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+    }
+    if (b.len > 180) {
+        size_t keep = utf8_prefix_bytes(b.data, b.len, 180);
+        b.len = keep;
+        b.data[keep] = 0;
+    }
+    return b.data;
+}
+
+static int page_at_marks(const Mark *marks, int nmarks, uint32_t at) {
+    int page = 0;
+    for (int i = 0; i < nmarks; i++) {
+        if (marks[i].kind != MARK_PAGE || marks[i].offset > at || marks[i].page == 0) {
+            continue;
+        }
+        page = (int)marks[i].page;
+    }
+    return page;
+}
+
+static int count_pages(const Mark *marks, int nmarks) {
+    int n = 0;
+    for (int i = 0; i < nmarks; i++) {
+        if (marks[i].kind == MARK_PAGE && marks[i].page > 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static int lookup_path(Index *ix, const char *path, int64_t *id, char **title, char **ext, Err *e) {
+    *id = 0;
+    *title = NULL;
+    *ext = NULL;
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st, "SELECT docid, root_id, rel, title, ext FROM docs", e) != 0) {
+        return -1;
+    }
+    int step = 0;
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *rel = (const char *)sqlite3_column_text(st, 2);
+        char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
+        int eq = shown && strcmp(shown, path) == 0;
+        free(shown);
+        if (!eq) {
+            continue;
+        }
+        *id = sqlite3_column_int64(st, 0);
+        const char *t = (const char *)sqlite3_column_text(st, 3);
+        const char *ex = (const char *)sqlite3_column_text(st, 4);
+        *title = xstrdup(t ? t : "");
+        *ext = xstrdup(ex ? ex : "");
+        if (!*title || !*ext) {
+            sqlite3_finalize(st);
+            free(*title);
+            free(*ext);
+            *title = NULL;
+            *ext = NULL;
+            err_set(e, "out of memory");
+            return -1;
+        }
+        break;
+    }
+    sqlite3_finalize(st);
+    if (step != SQLITE_ROW && step != SQLITE_DONE) {
+        free(*title);
+        free(*ext);
+        *title = NULL;
+        *ext = NULL;
+        return db_fail(ix, e, "read");
+    }
+    if (!*id || !*title || !*ext) {
+        free(*title);
+        free(*ext);
+        *title = NULL;
+        *ext = NULL;
+        err_set(e, "that file is not in the index");
+        return -1;
+    }
+    return 0;
+}
+
+int index_read(Index *ix, const char *path, uint32_t at, int dir, DocRead **out, Err *e) {
+    *out = NULL;
+    if (!ix || !path || !path[0]) {
+        err_set(e, "missing file");
+        return -1;
+    }
+    if (dir > 1 || dir < -1) {
+        dir = 0;
+    }
+    int64_t id = 0;
+    char *title = NULL;
+    char *ext = NULL;
+    if (lookup_path(ix, path, &id, &title, &ext, e) != 0) {
+        return -1;
+    }
+    char *text = NULL;
+    Mark *marks = NULL;
+    int nmarks = 0;
+    if (load_body(ix, id, &text, &marks, &nmarks, e) != 0) {
+        free(title);
+        free(ext);
+        return -1;
+    }
+    uint32_t n = text ? (uint32_t)strlen(text) : 0;
+    if (at > n) {
+        at = n;
+    }
+    uint32_t from = 0;
+    uint32_t to = 0;
+    read_bounds(text ? text : "", n, marks, nmarks, at, dir, &from, &to);
+    DocRead *rd = calloc(1, sizeof *rd);
+    if (!rd) {
+        goto oom;
+    }
+    rd->title = title;
+    title = NULL;
+    rd->section = section_at(marks, nmarks, at);
+    rd->from = from;
+    rd->to = to;
+    rd->at = at;
+    rd->length = n;
+    rd->text = xstrndup(text && to >= from ? text + from : "", (size_t)(to - from));
+    if (!rd->text) {
+        goto oom;
+    }
+    int npage_marks = count_pages(marks, nmarks);
+    if (npage_marks > 0) {
+        rd->page = page_at_marks(marks, nmarks, at);
+    } else if (ext && ascii_ieq(ext, "pdf")) {
+        int page = 1;
+        for (uint32_t i = 0; i < at && text && text[i]; i++) {
+            if (text[i] == '\f') {
+                page++;
+            }
+        }
+        rd->page = page;
+    }
+    int nh = 0;
+    for (int i = 0; i < nmarks; i++) {
+        if (head_mark(&marks[i])) {
+            nh++;
+        }
+    }
+    if (nh > 0) {
+        rd->heads = calloc((size_t)nh, sizeof(DocHead));
+        if (!rd->heads) {
+            goto oom;
+        }
+        for (int i = 0; i < nmarks; i++) {
+            if (!head_mark(&marks[i])) {
+                continue;
+            }
+            rd->heads[rd->nheads].at = marks[i].offset;
+            rd->heads[rd->nheads].level = marks[i].level ? marks[i].level : 1;
+            rd->heads[rd->nheads].text = cut_dup(marks[i].text, 180);
+            if (!rd->heads[rd->nheads].text) {
+                goto oom;
+            }
+            rd->nheads++;
+        }
+    }
+    int np = 0;
+    for (int i = 0; i < nmarks; i++) {
+        if (marks[i].kind == MARK_PAGE && marks[i].page > 0 && marks[i].offset >= from && marks[i].offset < to) {
+            np++;
+        }
+    }
+    if (np == 0 && rd->page > 0 && npage_marks == 0 && text) {
+        for (uint32_t i = from; i < to; i++) {
+            if (text[i] == '\f') {
+                np++;
+            }
+        }
+    }
+    if (np > 0) {
+        rd->pages = calloc((size_t)np, sizeof(DocPage));
+        if (!rd->pages) {
+            goto oom;
+        }
+        if (npage_marks > 0) {
+            for (int i = 0; i < nmarks; i++) {
+                if (marks[i].kind != MARK_PAGE || marks[i].page == 0 || marks[i].offset < from ||
+                    marks[i].offset >= to) {
+                    continue;
+                }
+                rd->pages[rd->npages].at = marks[i].offset;
+                rd->pages[rd->npages].page = (int)marks[i].page;
+                rd->npages++;
+            }
+        } else if (text) {
+            int page = 1;
+            for (uint32_t i = 0; i < to && text[i]; i++) {
+                if (text[i] != '\f') {
+                    continue;
+                }
+                page++;
+                if (i >= from) {
+                    rd->pages[rd->npages].at = i;
+                    rd->pages[rd->npages].page = page;
+                    rd->npages++;
+                }
+            }
+        }
+    }
+    free(ext);
+    marks_free(marks, nmarks);
+    free(text);
+    *out = rd;
+    return 0;
+oom:
+    free(title);
+    free(ext);
+    marks_free(marks, nmarks);
+    free(text);
+    docread_free(rd);
+    err_set(e, "out of memory");
+    return -1;
+}
+
+void docread_free(DocRead *d) {
+    if (!d) {
+        return;
+    }
+    free(d->title);
+    free(d->section);
+    free(d->text);
+    for (int i = 0; i < d->nheads; i++) {
+        free(d->heads[i].text);
+    }
+    free(d->heads);
+    free(d->pages);
+    free(d);
+}
+
 void hits_free(Hit *hits, int n) {
     if (!hits) {
         return;

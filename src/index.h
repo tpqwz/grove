@@ -105,6 +105,40 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
                Err *e);
 void hits_free(Hit *hits, int n);
 
+/* The indexed text of one file, which is the same record for every source
+ * type: prose, heading marks, and page marks. dir 0 is the chapter around
+ * `at` (or a window of it, when the chapter is long). dir 1 starts at `at`.
+ * dir -1 ends at `at`. page is 0 when the file recorded none. heads lists
+ * every heading. pages lists page marks inside the slice. */
+typedef struct DocHead {
+    uint32_t at;
+    int level;
+    char *text;
+} DocHead;
+
+typedef struct DocPage {
+    uint32_t at;
+    int page;
+} DocPage;
+
+typedef struct DocRead {
+    char *title;
+    char *section;
+    char *text;
+    uint32_t from;
+    uint32_t to;
+    uint32_t at;
+    uint32_t length;
+    int page;
+    DocHead *heads;
+    int nheads;
+    DocPage *pages;
+    int npages;
+} DocRead;
+
+int index_read(Index *ix, const char *path, uint32_t at, int dir, DocRead **out, Err *e);
+void docread_free(DocRead *d);
+
 /* Remembered queries live in the same grove.db. The query text is the identity.
  * List is newest first. A missing table is an empty list. Put and drop open a
  * short write, so a read-only search connection can still remember one. At most

@@ -196,6 +196,40 @@
     font-size: 0.88rem;
   }
   .more:hover { text-decoration: underline; }
+  #reader[hidden] { display: none; }
+  .reader-nav { display: flex; gap: 1rem; margin: 0.2rem 0 0; }
+  .reader-nav button { color: var(--focus); font-size: 0.88rem; }
+  .reader-nav button:hover { text-decoration: underline; }
+  .reader-nav button:disabled { color: var(--line); text-decoration: none; cursor: default; }
+  #reader-title {
+    margin: 0.85rem 0 0;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.55rem;
+    font-weight: normal;
+    line-height: 1.25;
+  }
+  #reader-body {
+    margin-top: 1rem;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.12rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+  }
+  .page-label {
+    display: block;
+    margin: 1.15rem 0 0.35rem;
+    color: var(--muted);
+    font-family: system-ui, sans-serif;
+    font-size: 0.75rem;
+  }
+  .toc { margin-top: 0.7rem; }
+  .toc summary { color: var(--muted); cursor: pointer; font-size: 0.85rem; }
+  .toc div { max-height: 14rem; overflow: auto; margin-top: 0.3rem; }
+  .toc button { display: block; width: 100%; font-size: 0.92rem; padding: 0.12rem 0; }
+  .toc button.lv2 { padding-left: 0.9rem; }
+  .toc button.lv3 { padding-left: 1.8rem; }
+  .toc button:hover { background: #efe8dc; }
 </style>
 </head>
 <body>
@@ -214,6 +248,20 @@
       <p class="err" id="err" hidden></p>
     </header>
     <main id="results"></main>
+    <main id="reader" hidden>
+      <p class="reader-nav">
+        <button type="button" id="reader-back">Search</button>
+        <button type="button" id="reader-orig">Original file</button>
+      </p>
+      <h1 id="reader-title"></h1>
+      <p id="reader-where" class="where"></p>
+      <div id="reader-toc"></div>
+      <article id="reader-body"></article>
+      <p class="reader-nav">
+        <button type="button" id="reader-prev">Earlier</button>
+        <button type="button" id="reader-next">Later</button>
+      </p>
+    </main>
   </div>
 <script>
 const q = document.getElementById("q");
@@ -222,6 +270,13 @@ const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
 const results = document.getElementById("results");
+const reader = document.getElementById("reader");
+const readerTitle = document.getElementById("reader-title");
+const readerWhere = document.getElementById("reader-where");
+const readerToc = document.getElementById("reader-toc");
+const readerBody = document.getElementById("reader-body");
+const readerPrev = document.getElementById("reader-prev");
+const readerNext = document.getElementById("reader-next");
 const indexLine = document.getElementById("index");
 const savedRow = document.getElementById("saved");
 let seq = 0;
@@ -496,7 +551,7 @@ function addPassage(parent, hit, passage) {
   text.innerHTML = withMarks(passage.text || "");
   btn.append(text);
   btn.addEventListener("click", function () {
-    openPath(hit.path, passage.offset || 0, passage.page || 0, placeNeedle(passage.text));
+    openRead(hit.path, passage.offset || 0, 0);
   });
   parent.append(btn);
   const slot = document.createElement("div");
@@ -721,66 +776,145 @@ function render(hits, query) {
   return places;
 }
 
-function placeNeedle(text) {
-  const raw = String(text || "");
-  let focus = raw.indexOf("<<");
-  if (focus < 0) focus = 0;
-  let body = raw;
-  let cut = 0;
-  if (body.startsWith("... ")) {
-    body = body.slice(4);
-    cut = 4;
+let readSeq = 0;
+
+function closeReader() {
+  readSeq++;
+  reader.hidden = true;
+  results.hidden = false;
+}
+
+function utf8Index(text, byteOff) {
+  const enc = new TextEncoder();
+  let bytes = 0;
+  let index = 0;
+  for (const ch of text) {
+    const n = enc.encode(ch).length;
+    if (bytes >= byteOff) return index;
+    if (bytes + n > byteOff) return index;
+    bytes += n;
+    index += ch.length;
   }
-  if (body.endsWith(" ...")) body = body.slice(0, -4);
-  focus = Math.max(0, Math.min(body.length, focus - cut));
-  let flat = "";
-  let at = 0;
-  let sp = true;
-  for (let i = 0; i < body.length; i++) {
-    if (i === focus) at = flat.length;
-    const ch = body[i];
-    if (ch === "<" && body[i + 1] === "<") { i++; continue; }
-    if (ch === ">" && body[i + 1] === ">") { i++; continue; }
-    if (/\s/.test(ch)) {
-      if (sp) continue;
-      flat += " ";
-      sp = true;
+  return text.length;
+}
+
+function renderProse(text, focus, pages) {
+  readerBody.replaceChildren();
+  let markA = -1;
+  let markB = -1;
+  if (focus >= 0 && focus <= text.length) {
+    markA = text.lastIndexOf("\n", Math.max(0, focus - 1)) + 1;
+    markB = text.indexOf("\n", focus);
+    if (markB < 0) markB = text.length;
+    if (markB - markA > 700) {
+      markA = Math.max(markA, focus - 80);
+      markB = Math.min(markB, focus + 220);
+    }
+  }
+  const points = [0, text.length];
+  if (markA > 0) points.push(markA);
+  if (markB > 0 && markB < text.length) points.push(markB);
+  const pageAt = {};
+  pages.forEach(function (p) {
+    if (p.index > 0 && p.index < text.length) {
+      points.push(p.index);
+      pageAt[p.index] = p.page;
+    }
+  });
+  points.sort(function (a, b) { return a - b; });
+  const cuts = [];
+  points.forEach(function (p) {
+    if (!cuts.length || cuts[cuts.length - 1] !== p) cuts.push(p);
+  });
+  for (let k = 0; k < cuts.length - 1; k++) {
+    const a = cuts[k];
+    const b = cuts[k + 1];
+    if (pageAt[a]) {
+      const lab = document.createElement("div");
+      lab.className = "page-label";
+      lab.textContent = "p. " + pageAt[a];
+      readerBody.append(lab);
+    }
+    const slice = text.slice(a, b).replace(/\f/g, "\n");
+    if (!slice) continue;
+    const marked = markA >= 0 && a >= markA && b <= markB;
+    if (marked) {
+      let mark = readerBody.lastChild && readerBody.lastChild.id === "here" ? readerBody.lastChild : null;
+      if (!mark || mark.tagName !== "MARK") {
+        mark = document.createElement("mark");
+        mark.id = "here";
+        readerBody.append(mark);
+      }
+      mark.append(document.createTextNode(slice));
     } else {
-      flat += ch;
-      sp = false;
+      readerBody.append(document.createTextNode(slice));
     }
   }
-  if (focus >= body.length) at = flat.length;
-  flat = flat.trimEnd();
-  const lead = flat.length - flat.trimStart().length;
-  flat = flat.trimStart();
-  at = Math.max(0, Math.min(flat.length, at - lead));
-  // Okular keeps a line break as a newline, and find cannot cross it.
-  // A long passage never matches. A short run around the highlight does.
-  const MIN = 12;
-  const MAX = 22;
-  if (flat.length < MIN) return "";
-  if (flat.length <= MAX) return flat;
-  let a = Math.max(0, at - 4);
-  let b = Math.min(flat.length, a + MAX);
-  if (a > 0) {
-    const spc = flat.indexOf(" ", a);
-    if (spc !== -1 && spc <= a + 8 && spc < at) a = spc + 1;
+}
+
+function drawReader(data) {
+  results.hidden = true;
+  reader.hidden = false;
+  readerTitle.textContent = data.title || baseName(data.path || "");
+  const parts = [];
+  if (data.section) parts.push(data.section);
+  if (data.page > 0) parts.push("p. " + data.page);
+  readerWhere.textContent = parts.join(" · ");
+  readerToc.replaceChildren();
+  const heads = data.heads || [];
+  if (heads.length) {
+    const details = document.createElement("details");
+    details.className = "toc";
+    const summary = document.createElement("summary");
+    summary.textContent = "Contents";
+    const list = document.createElement("div");
+    heads.forEach(function (head) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const lv = Math.max(1, Math.min(3, head.level || 1));
+      btn.className = "lv" + lv;
+      btn.textContent = head.text || "";
+      btn.addEventListener("click", function () {
+        openRead(data.path, head.at || 0, 0);
+      });
+      list.append(btn);
+    });
+    details.append(summary, list);
+    readerToc.append(details);
   }
-  if (b < flat.length) {
-    const spc = flat.lastIndexOf(" ", b);
-    if (spc > a + MIN) b = spc;
-  }
-  if (at < a || at >= b) {
-    a = at;
-    b = Math.min(flat.length, a + MAX);
-    if (b < flat.length) {
-      const spc = flat.lastIndexOf(" ", b);
-      if (spc > a + MIN) b = spc;
+  const text = data.text || "";
+  const rel = data.at >= data.from && data.at < data.to ? data.at - data.from : -1;
+  const focus = rel >= 0 ? utf8Index(text, rel) : -1;
+  const pages = (data.pages || []).map(function (p) {
+    return { index: utf8Index(text, Math.max(0, (p.at || 0) - (data.from || 0))), page: p.page };
+  });
+  renderProse(text, focus, pages);
+  readerPrev.disabled = !data.from;
+  readerNext.disabled = data.to >= data.length;
+  readerPrev.onclick = function () { openRead(data.path, data.from, -1); };
+  readerNext.onclick = function () { openRead(data.path, data.to, 1); };
+  document.getElementById("reader-orig").onclick = function () { openPath(data.path); };
+  const here = document.getElementById("here");
+  if (here) here.scrollIntoView({ block: "center" });
+  else reader.scrollIntoView({ block: "start" });
+}
+
+async function openRead(path, at, dir) {
+  const id = ++readSeq;
+  showError("");
+  try {
+    const raw = await grove_read(path, String(at || 0), String(dir || 0));
+    if (id !== readSeq) return;
+    const data = JSON.parse(raw);
+    if (data.error) {
+      showError(data.error);
+      return;
     }
+    drawReader(data);
+  } catch (e) {
+    if (id !== readSeq) return;
+    showError("Could not open the text");
   }
-  const slice = flat.slice(a, b).trim();
-  return slice.length >= MIN ? slice : "";
 }
 
 async function openPath(path, at, page, needle) {
@@ -968,6 +1102,7 @@ async function seenNew(query) {
 }
 
 async function runSearch() {
+  closeReader();
   const id = ++seq;
   const query = combinedQuery();
   drawChips();
@@ -1056,6 +1191,7 @@ function restoreQuery() {
   if (av) also.value = av;
   runSearch();
 }
+document.getElementById("reader-back").addEventListener("click", closeReader);
 whenReady(function () {
   loadInfo();
   loadSaved();

@@ -16,6 +16,7 @@
     --mark: #f0e2b4;
     --focus: #8a4e22;
     --gutter: clamp(1.25rem, 3vw, 2.75rem);
+    --books-gap: clamp(1.15rem, 2.2vw, 2rem);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -44,14 +45,36 @@
     margin: 0 auto;
     padding: clamp(0.95rem, 2.8vh, 1.45rem) 0 0;
   }
-  .wrap {
+  .stage {
     width: calc(100% - var(--gutter));
     margin: 0 auto;
+  }
+  .wrap {
+    width: 100%;
+    margin: 0;
     padding: 1.15rem 0 4rem;
     container: page / inline-size;
   }
+  body.books-side .mast-in,
+  body.books-side .stage {
+    display: grid;
+    grid-template-columns: minmax(11.5rem, 16rem) minmax(0, 1fr);
+    column-gap: var(--books-gap);
+    align-items: start;
+  }
+  body.books-side #index { grid-column: 1 / -1; }
+  body.books-side .modes { grid-column: 2; min-width: 0; }
+  .open-books[hidden] { display: none; }
+  body.books-side .open-books {
+    position: sticky;
+    top: calc(var(--mast-h, 4.6rem) + 0.35rem);
+    align-self: start;
+    max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
+    overflow: auto;
+    min-width: 0;
+  }
   .wrap.wide {
-    width: calc(100% - var(--gutter));
+    width: 100%;
   }
   #search-col, #reader-col { min-width: 0; }
   #reader-col[hidden] { display: none; }
@@ -361,6 +384,22 @@
   }
   .tabs .tab-x { color: var(--muted); padding: 0 0.05rem; line-height: 1; font-family: system-ui, sans-serif; }
   .tabs button.tab.on .tab-x, .tabs button.tab:hover .tab-x { color: var(--focus); }
+  .tabs.stack {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.05rem;
+    min-width: 0;
+  }
+  .tabs.stack .tab-rule { display: none; }
+  .tabs.stack button.tab {
+    max-width: none;
+    width: 100%;
+    padding: 0.32rem 0.05rem 0.32rem 0.55rem;
+    font-size: 1rem;
+  }
+  .tabs.stack button.tab.on { box-shadow: inset 2px 0 0 var(--ink); }
+  .tabs.stack .tab-label { flex: 1 1 auto; }
   .reader[hidden] { display: none; }
   .reader-bar {
     position: sticky;
@@ -640,6 +679,8 @@
       min-width: 0;
     }
     .reader:has(.toc[open]) .toc div { max-height: none; overflow: visible; }
+    /* The contents grid outranks [hidden], so a closed book would show beside the open one. */
+    .reader[hidden]:has(.toc[open]) { display: none; }
   }
   @container page (min-width: 76rem) {
     .reader:not(:has(.toc[open])) {
@@ -696,7 +737,7 @@
   <header class="mast" id="mast">
     <div class="mast-in">
       <p id="index"></p>
-      <nav class="modes" aria-label="Views">
+      <nav class="modes" id="modes" aria-label="Views">
         <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
         <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
         <button type="button" id="mode-excerpts" class="mode" aria-pressed="false">Excerpts</button>
@@ -704,6 +745,8 @@
       </nav>
     </div>
   </header>
+  <div class="stage" id="stage">
+  <aside id="open-books" class="open-books" aria-label="Open books" hidden></aside>
   <div class="wrap" id="wrap">
     <div id="search-col">
     <div id="search-view">
@@ -769,6 +812,7 @@
       <div id="panes"></div>
     </div>
   </div>
+  </div>
   <form id="lib-edit" class="modal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="lib-edit-title" tabindex="-1">
       <h2 id="lib-edit-title" class="modal-title"></h2>
@@ -811,6 +855,8 @@ const err = document.getElementById("err");
 const results = document.getElementById("results");
 const wrap = document.getElementById("wrap");
 const mast = document.getElementById("mast");
+const modesNav = document.getElementById("modes");
+const openBooks = document.getElementById("open-books");
 const readerCol = document.getElementById("reader-col");
 const tabStrip = document.getElementById("tabs");
 const panes = document.getElementById("panes");
@@ -1850,9 +1896,26 @@ function markOpenPassages() {
   });
 }
 
+const wideBooks = window.matchMedia("(min-width: 56rem)");
+
+function placeTabs() {
+  const side = wideBooks.matches && tabs.length > 0;
+  const home = side ? openBooks : modesNav;
+  if (home && tabStrip.parentElement !== home) home.append(tabStrip);
+  if (openBooks) openBooks.hidden = !side;
+  document.body.classList.toggle("books-side", side);
+  if (tabStrip) tabStrip.classList.toggle("stack", side);
+  syncMast();
+}
+
+if (wideBooks.addEventListener) wideBooks.addEventListener("change", placeTabs);
+
 function drawTabStrip() {
   tabStrip.replaceChildren();
-  if (!tabs.length) return;
+  if (!tabs.length) {
+    placeTabs();
+    return;
+  }
   const rule = document.createElement("span");
   rule.className = "tab-rule";
   rule.setAttribute("aria-hidden", "true");
@@ -1878,6 +1941,7 @@ function drawTabStrip() {
     btn.append(label, x);
     tabStrip.append(btn);
   });
+  placeTabs();
 }
 
 function syncMast() {

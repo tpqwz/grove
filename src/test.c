@@ -2808,6 +2808,92 @@ static void put_sorted(Index *ix, const char *path, const char *creator, const c
     }
 }
 
+static const Volume *vol_by(const Library *lib, const char *suffix) {
+    for (int i = 0; i < (lib ? lib->n : 0); i++) {
+        if (lib->volumes[i].path && strstr(lib->volumes[i].path, suffix)) {
+            return &lib->volumes[i];
+        }
+    }
+    return NULL;
+}
+
+static void test_named_creator(void) {
+    char tmpl[] = "/tmp/grove-named-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = root ? path_join(root, "docs") : NULL;
+    char *idx = root ? path_join(root, "idx") : NULL;
+    const char *names[] = {"Rose \xE2\x80\x94 Ada.txt", "Pine \xE2\x80\x94 Bev.txt", "Plain.txt",
+                           "Oak \xE2\x80\x94 Ida.txt", "Pooh \xE2\x80\x94 A. A. Milne.txt", "Hyphen - Ann.txt"};
+    char *paths[6];
+    Index *ix = NULL;
+    Library lib;
+    Err e;
+    const Volume *v;
+    memset(paths, 0, sizeof paths);
+    memset(&lib, 0, sizeof lib);
+    err_clear(&e);
+    if (!root || !docs || !idx || mkdir(docs, 0700) != 0) {
+        fprintf(stderr, "named corpus\n");
+        fails++;
+        goto done;
+    }
+    for (int i = 0; i < 6; i++) {
+        paths[i] = path_join(docs, names[i]);
+        if (!paths[i] || write_file(paths[i], "named shelf\n", 12) != 0) {
+            fails++;
+            goto done;
+        }
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "named open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "named add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    put_sorted(ix, paths[3], "Zed", "", "", "", "", "", "");
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 0, &lib, &e) == 0);
+    CHECK(lib.total == 6 && lib.n == 6);
+    CHECK(lib.volumes && strstr(lib.volumes[0].path, "Pooh"));
+    CHECK(lib.volumes[1].path && strstr(lib.volumes[1].path, "Rose"));
+    CHECK(lib.volumes[2].path && strstr(lib.volumes[2].path, "Pine"));
+    CHECK(lib.volumes[3].path && strstr(lib.volumes[3].path, "Oak"));
+    CHECK(lib.volumes[4].path && strstr(lib.volumes[4].path, "Hyphen"));
+    CHECK(lib.volumes[5].path && strstr(lib.volumes[5].path, "Plain"));
+    v = vol_by(&lib, "Pooh");
+    CHECK(v && strcmp(v->creator, "A. A. Milne") == 0);
+    v = vol_by(&lib, "Rose");
+    CHECK(v && strcmp(v->creator, "Ada") == 0);
+    v = vol_by(&lib, "Oak");
+    CHECK(v && strcmp(v->creator, "Zed") == 0);
+    v = vol_by(&lib, "Plain");
+    CHECK(v && v->creator && v->creator[0] == 0);
+    v = vol_by(&lib, "Hyphen");
+    CHECK(v && v->creator && v->creator[0] == 0);
+    library_free(&lib);
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 1, &lib, &e) == 0);
+    CHECK(lib.volumes && strstr(lib.volumes[0].path, "Oak"));
+    CHECK(lib.volumes[3].path && strstr(lib.volumes[3].path, "Pooh"));
+    CHECK(lib.volumes[5].path && strstr(lib.volumes[5].path, "Plain"));
+done:
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    for (int i = 0; i < 6; i++) {
+        free(paths[i]);
+    }
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
 static void test_library_sort(void) {
     char tmpl[] = "/tmp/grove-sort-XXXXXX";
     char *root = mkdtemp(tmpl);
@@ -3345,6 +3431,7 @@ int main(void) {
     test_saved();
     test_notes();
     test_library();
+    test_named_creator();
     test_library_sort();
     test_narrow();
     test_alerts();

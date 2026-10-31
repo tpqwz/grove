@@ -4603,8 +4603,82 @@ static int shelf_match(const char *needle, const char *path, const char *title, 
     return 0;
 }
 
+static int text_blank(const char *s);
+
+/* A file named "Title — Author.ext" carries the creator in its name when the
+ * record has none. The mark is a space, an em dash (U+2014), and a space.
+ * out is NULL when the name has no author. -1 is out of memory. */
+static int creator_in_name(const char *path, char **out) {
+    const char *base;
+    const char *hit;
+    const char *p;
+    const char *who;
+    const char *dot;
+    size_t n;
+    *out = NULL;
+    if (!path) {
+        return 0;
+    }
+    base = path;
+    for (p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            base = p + 1;
+        }
+    }
+    hit = NULL;
+    p = base;
+    while (*p) {
+        if (p[0] == ' ' && (unsigned char)p[1] == 0xE2 && (unsigned char)p[2] == 0x80 &&
+            (unsigned char)p[3] == 0x94 && p[4] == ' ') {
+            hit = p;
+            p += 5;
+            continue;
+        }
+        p++;
+    }
+    if (!hit) {
+        return 0;
+    }
+    who = hit + 5;
+    n = strlen(who);
+    dot = NULL;
+    for (p = who; *p; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (dot && dot != who) {
+        size_t extn = strlen(dot + 1);
+        int plain = extn >= 1 && extn <= 8;
+        for (size_t i = 0; plain && i < extn; i++) {
+            unsigned char c = (unsigned char)dot[1 + i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+                plain = 0;
+            }
+        }
+        if (plain) {
+            n = (size_t)(dot - who);
+        }
+    }
+    while (n > 0 && (who[0] == ' ' || who[0] == '\t')) {
+        who++;
+        n--;
+    }
+    while (n > 0 && (who[n - 1] == ' ' || who[n - 1] == '\t')) {
+        n--;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    if (n > 400) {
+        n = 400;
+    }
+    *out = xstrndup(who, n);
+    return *out ? 0 : -1;
+}
+
 static int volume_push(Volume *v, const char *path, const char *title, const char *ext, int64_t mtime, int64_t size,
-                       const Cat *cat) {
+                       const Cat *cat, const char *named) {
     memset(v, 0, sizeof *v);
     v->path = xstrdup(path ? path : "");
     v->ext = xstrdup(ext ? ext : "");
@@ -4618,6 +4692,9 @@ static int volume_push(Volume *v, const char *path, const char *title, const cha
     int ok = v->path && v->ext && v->title;
     for (int i = CF_CREATOR; ok && i < CF_N; i++) {
         const char *s = cat && cat->field[i] ? cat->field[i] : "";
+        if (i == CF_CREATOR && text_blank(s) && named && named[0]) {
+            s = named;
+        }
         char *copy = xstrdup(s);
         if (!copy) {
             ok = 0;
@@ -5147,6 +5224,7 @@ typedef struct ShelfRow {
     char *path;
     char *title;
     char *ext;
+    char *named;
     int64_t mtime;
     int64_t size;
     const Cat *cat;
@@ -5160,6 +5238,7 @@ static void shelf_rows_free(ShelfRow *rows, int n) {
         free(rows[i].path);
         free(rows[i].title);
         free(rows[i].ext);
+        free(rows[i].named);
     }
     free(rows);
 }
@@ -5232,6 +5311,10 @@ static const char *row_sort_text(const ShelfRow *r, int col) {
     }
     switch (col) {
     case LIB_SORT_CREATOR:
+        if (r->named && r->named[0] &&
+            !(r->cat && r->cat->field[CF_CREATOR] && !text_blank(r->cat->field[CF_CREATOR]))) {
+            return r->named;
+        }
         cf = CF_CREATOR;
         break;
     case LIB_SORT_DATE:
@@ -5390,9 +5473,15 @@ static int library_fill(Index *ix, const char *filter, const char *language, con
         rows[nrows].path = path;
         rows[nrows].title = title_copy;
         rows[nrows].ext = ext_copy;
+        rows[nrows].named = NULL;
         rows[nrows].mtime = mtime;
         rows[nrows].size = size;
         rows[nrows].cat = cat;
+        if (creator_in_name(path, &rows[nrows].named) != 0) {
+            nrows++;
+            err_set(e, "out of memory");
+            return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
+        }
         nrows++;
     }
     sqlite3_finalize(st);
@@ -5432,7 +5521,7 @@ static int library_fill(Index *ix, const char *filter, const char *language, con
                 continue;
             }
             if (volume_push(&one, rows[i].path, rows[i].title, rows[i].ext, rows[i].mtime, rows[i].size,
-                            rows[i].cat) != 0) {
+                            rows[i].cat, rows[i].named) != 0) {
                 err_set(e, "out of memory");
                 return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);
             }
@@ -5497,7 +5586,7 @@ static int library_fill(Index *ix, const char *filter, const char *language, con
             size_t bytes = 0;
             Volume *grown;
             if (volume_push(&one, rows[ri].path, rows[ri].title, rows[ri].ext, rows[ri].mtime, rows[ri].size,
-                            rows[ri].cat) != 0) {
+                            rows[ri].cat, rows[ri].named) != 0) {
                 free(refs);
                 err_set(e, "out of memory");
                 return library_fail(needle, &sel, cats, ncats, rows, nrows, of, vols, nvols, &built, st);

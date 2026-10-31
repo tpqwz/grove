@@ -209,9 +209,11 @@ void index_alerts_free(Alert *alerts, int n);
  * build of that list creates an index on those columns. A volume record is
  * the Dublin Core elements, kept beside the file. An empty element is unset.
  * title in the list is the record's title when one was saved, otherwise the
- * title from the file. At most LIBRARY_SHOW volumes are returned; total is
- * the whole match. index_library_list and index_library_narrow keep stored
- * title order. index_library_sorted orders the whole match first. */
+ * title from the file. A file named "Title — Author" supplies that author
+ * when the record's creator is empty. At most LIBRARY_SHOW volumes are
+ * returned; total is the whole match. index_library_list and
+ * index_library_narrow keep stored title order. index_library_sorted
+ * orders the whole match first. */
 #define LIBRARY_SHOW 300
 
 typedef struct Volume {

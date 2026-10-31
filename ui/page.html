@@ -74,9 +74,6 @@
     margin: 0 0 0.85rem;
     color: var(--muted);
     font-size: 0.82rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   header p.error { color: #8a2a1a; white-space: normal; }
   form { margin: 0; position: relative; }
@@ -388,6 +385,17 @@
     font-weight: 400;
   }
   .lib-table th { white-space: nowrap; }
+  .lib-table tr.lib-group th {
+    width: auto;
+    padding-top: 1.15rem;
+    border-bottom: 0;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.08rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+  }
+  .lib-table tbody tr.lib-group:first-child th { padding-top: 0.15rem; }
   .lib-sort {
     color: var(--muted);
     font-size: 0.78rem;
@@ -610,7 +618,7 @@
       <div class="shelf">
       <aside id="lib-narrow" class="narrow-aside"></aside>
       <div class="shelf-main">
-      <p class="help">Add a folder, a file, or a web page. Each volume is a Dublin Core record. Sort any column. Identifier and the rest of the record stay in Edit. The text stays on disk.</p>
+      <p class="help">Add a folder, a file, or a web page. Each volume is a Dublin Core record. The shelf groups by creator. A file named Title — Author shows that author until the record has one. Sort any column. Identifier and the rest of the record stay in Edit. The text stays on disk.</p>
       <div class="lib-tools">
         <button type="button" id="lib-folder">Add a folder</button>
         <button type="button" id="lib-file">Add a file</button>
@@ -2116,7 +2124,7 @@ const LIB_COLS = [
   ["coverage", "Coverage"],
   ["source", "Source"]
 ];
-let libSortKey = "title";
+let libSortKey = "creator";
 let libSortDesc = false;
 
 function loadLibSort() {
@@ -2341,9 +2349,25 @@ function drawLibrary(data) {
   headRow.append(act);
   head.append(headRow);
   const body = document.createElement("tbody");
-  (data.volumes || []).slice().sort(function (a, b) {
+  const volumes = (data.volumes || []).slice().sort(function (a, b) {
     return volumeCmp(a, b, libSortKey, libSortDesc);
-  }).forEach(function (vol) {
+  });
+  let groupLabel = null;
+  volumes.forEach(function (vol) {
+    if (libSortKey === "creator") {
+      const label = String(vol.creator || "").trim() || "No creator";
+      if (groupLabel === null || foldCmp(groupLabel, label) !== 0) {
+        const band = document.createElement("tr");
+        band.className = "lib-group";
+        const th = document.createElement("th");
+        th.colSpan = LIB_COLS.length + 1;
+        th.scope = "rowgroup";
+        th.textContent = label;
+        band.append(th);
+        body.append(band);
+        groupLabel = label;
+      }
+    }
     const tr = document.createElement("tr");
     LIB_COLS.forEach(function (col) {
       const td = document.createElement("td");

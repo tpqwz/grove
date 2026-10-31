@@ -55,24 +55,42 @@
     padding: 1.15rem 0 4rem;
     container: page / inline-size;
   }
-  body.books-side .mast-in,
   body.books-side .stage {
     display: grid;
-    grid-template-columns: minmax(11.5rem, 16rem) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
     column-gap: var(--books-gap);
     align-items: start;
   }
-  body.books-side #index { grid-column: 1 / -1; }
-  body.books-side .modes { grid-column: 2; min-width: 0; }
-  .open-books[hidden] { display: none; }
+  body.books-side .wrap { grid-column: 1; grid-row: 1; min-width: 0; }
+  .open-books[hidden],
+  body.books-side .open-books[hidden] { display: none; }
   body.books-side .open-books {
+    grid-column: 2;
+    grid-row: 1;
     position: sticky;
     top: calc(var(--mast-h, 4.6rem) + 0.35rem);
     align-self: start;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
     max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
     overflow: auto;
     min-width: 0;
+    padding-top: 1.15rem;
   }
+  body.books-side .open-books .tabs.stack {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg);
+    padding-bottom: 0.45rem;
+  }
+  body.books-side .open-books .toc-col {
+    border-top: 1px solid var(--line);
+    padding-top: 0.75rem;
+    min-width: 0;
+  }
+  body.books-side .open-books .toc div { max-height: none; overflow: visible; }
   .wrap.wide {
     width: 100%;
   }
@@ -687,6 +705,11 @@
       width: 72rem;
       margin-inline: auto;
     }
+  }
+  body.books-side .reader,
+  body.books-side .reader:not(:has(.toc[open])) {
+    width: 100%;
+    margin-inline: 0;
   }
   .narrow-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; }
   .narrow-title {
@@ -1898,6 +1921,13 @@ function markOpenPassages() {
 
 const wideBooks = window.matchMedia("(min-width: 56rem)");
 
+function parkToc(tab) {
+  if (!tab || !tab.tocEl || !tab.panel) return;
+  if (tab.tocEl.parentElement === tab.panel) return;
+  if (tab.bodyEl && tab.bodyEl.parentElement === tab.panel) tab.panel.insertBefore(tab.tocEl, tab.bodyEl);
+  else tab.panel.append(tab.tocEl);
+}
+
 function placeTabs() {
   const side = wideBooks.matches && tabs.length > 0;
   const home = side ? openBooks : modesNav;
@@ -1905,6 +1935,11 @@ function placeTabs() {
   if (openBooks) openBooks.hidden = !side;
   document.body.classList.toggle("books-side", side);
   if (tabStrip) tabStrip.classList.toggle("stack", side);
+  tabs.forEach(parkToc);
+  if (side && groveView === "read" && openBooks) {
+    const active = tabs.find(function (t) { return t.id === activeId; });
+    if (active && active.tocEl && active.tocEl.querySelector(".toc")) openBooks.append(active.tocEl);
+  }
   syncMast();
 }
 
@@ -1974,6 +2009,7 @@ function closeTab(tab) {
   const i = tabs.indexOf(tab);
   if (i < 0) return;
   tab.seq++;
+  parkToc(tab);
   tab.panel.remove();
   tabs.splice(i, 1);
   if (activeId === tab.id) {

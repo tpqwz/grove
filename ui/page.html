@@ -32,44 +32,27 @@
     cursor: pointer;
     text-align: left;
   }
-  .wrap {
-    width: min(40rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
-    margin: 0 auto;
-    padding: clamp(1.25rem, 4vh, 2.25rem) 0 4rem;
+  .mast {
+    position: sticky;
+    top: 0;
+    z-index: 6;
+    background: var(--bg);
   }
-  .wrap:not(.split):has(#library-view:not([hidden])) {
+  .mast-in {
+    width: min(40rem, calc(100% - clamp(1.25rem, 5vw, 3rem)));
+    margin: 0 auto;
+    padding: clamp(0.95rem, 2.8vh, 1.45rem) 0 0;
+  }
+  .wrap {
+    width: min(40rem, calc(100% - clamp(1.25rem, 5vw, 3rem)));
+    margin: 0 auto;
+    padding: 1.15rem 0 4rem;
+  }
+  .wrap.wide {
     width: min(76rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
   }
-  .wrap.split {
-    width: min(76rem, calc(100% - clamp(0.75rem, 2vw, 1.5rem)));
-    height: 100vh;
-    height: 100dvh;
-    display: grid;
-    grid-template-columns: minmax(min(100%, 16rem), 24rem) minmax(0, 1fr);
-    column-gap: clamp(0.8rem, 2vw, 1.75rem);
-    padding: 1.1rem 0 0;
-    overflow: hidden;
-  }
   #search-col, #reader-col { min-width: 0; }
-  .wrap.split #search-col,
-  .wrap.split #reader-col {
-    min-height: 0;
-    overflow: auto;
-    overscroll-behavior: contain;
-    padding-bottom: 3rem;
-  }
   #reader-col[hidden] { display: none; }
-  @media (max-width: 860px) {
-    .wrap.split {
-      height: auto;
-      overflow: visible;
-      grid-template-columns: 1fr;
-      row-gap: 1.5rem;
-      padding-bottom: 3rem;
-    }
-    .wrap.split #search-col,
-    .wrap.split #reader-col { overflow: visible; }
-  }
   header p {
     margin: 0 0 0.85rem;
     color: var(--muted);
@@ -93,7 +76,7 @@
     font-size: 1.15rem;
     padding: 0.72rem 0.85rem;
     border: 1px solid #d8d0c4;
-    border-radius: 10px;
+    border-radius: 2px;
     background: var(--paper);
     color: inherit;
   }
@@ -243,44 +226,40 @@
   .more:hover { text-decoration: underline; }
   .passage.open { box-shadow: inset 2px 0 0 #c4b8a8; }
   .passage.on { background: #efe8dc; }
-  .tabs {
-    position: sticky;
-    top: 0;
-    z-index: 4;
-    display: flex;
-    flex-wrap: wrap;
-    align-content: flex-start;
-    gap: 0.35rem 0.4rem;
-    background: var(--bg);
-    padding: 0.1rem 0 0.55rem;
+  .tabs { display: contents; }
+  .tab-rule {
+    width: 1px;
+    align-self: center;
+    height: 0.85rem;
+    margin: 0 0.15rem 0.45rem 0;
+    background: var(--line);
   }
   .tabs button.tab {
     display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    max-width: min(16rem, 100%);
+    align-items: baseline;
+    gap: 0.35rem;
+    max-width: min(14rem, 46vw);
     min-width: 0;
-    flex: 0 0 auto;
-    border: 1px solid #ddd4c8;
-    background: transparent;
-    border-radius: 999px;
-    padding: 0.16rem 0.4rem 0.16rem 0.7rem;
-    font-size: 0.82rem;
+    flex: 0 1 auto;
+    padding: 0.4rem 0 0.5rem;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.02rem;
     color: var(--muted);
   }
-  .tabs button.tab.on { color: var(--ink); background: var(--paper); }
+  .tabs button.tab.new { color: var(--ink); }
+  .tabs button.tab.on { color: var(--ink); box-shadow: inset 0 -1px 0 var(--ink); }
   .tabs .tab-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
   }
-  .tabs .tab-x { color: var(--muted); padding: 0 0.15rem; line-height: 1; }
-  .tabs button.tab.on .tab-x { color: var(--focus); }
+  .tabs .tab-x { color: var(--muted); padding: 0 0.05rem; line-height: 1; font-family: system-ui, sans-serif; }
+  .tabs button.tab.on .tab-x, .tabs button.tab:hover .tab-x { color: var(--focus); }
   .reader[hidden] { display: none; }
   .reader-bar {
     position: sticky;
-    top: var(--tabs-h, 2.35rem);
+    top: var(--mast-h, 4.6rem);
     z-index: 3;
     background: var(--bg);
     padding: 0.45rem 0 0.55rem;
@@ -329,17 +308,20 @@
   }
   #index.error { color: #8a2a1a; white-space: normal; }
   .modes {
-    position: sticky;
-    top: 0;
-    z-index: 2;
     display: flex;
-    gap: 0.9rem;
-    background: var(--bg);
-    margin: 0 0 0.85rem;
-    padding: 0.1rem 0 0.45rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0 1.25rem;
+    margin: 0.45rem 0 0;
+    border-bottom: 1px solid var(--line);
   }
-  .modes button { color: var(--muted); font-size: 0.95rem; }
-  .modes button.on { color: var(--ink); box-shadow: inset 0 -2px 0 var(--focus); }
+  .modes button.mode {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.15rem;
+    color: var(--muted);
+    padding: 0.4rem 0 0.5rem;
+  }
+  .modes button.mode.on { color: var(--ink); box-shadow: inset 0 -1px 0 var(--ink); }
   #search-view[hidden], #library-view[hidden] { display: none; }
   #library-view { container-type: inline-size; }
   .lib-tools {
@@ -511,10 +493,6 @@
     font-size: 0.78rem;
   }
   .page-field input { font-size: 1rem; padding: 0.5rem 0.7rem; }
-  .wrap:not(.split):has(#search-narrow:not([hidden])) {
-    width: min(58rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
-  }
-  #search-view { container-type: inline-size; }
   .narrow-open { color: var(--focus); font-size: 0.9rem; margin: 0.15rem 0 0.35rem; }
   .narrow-open[hidden] { display: none; }
   .narrow-aside { display: none; }
@@ -529,8 +507,8 @@
     .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
       display: block;
       position: sticky;
-      top: 0.25rem;
-      max-height: calc(100dvh - 1.5rem);
+      top: calc(var(--mast-h, 4.6rem) + 0.35rem);
+      max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
       overflow: auto;
     }
     .narrow-open { display: none; }
@@ -581,13 +559,18 @@
 </style>
 </head>
 <body>
+  <header class="mast" id="mast">
+    <div class="mast-in">
+      <p id="index"></p>
+      <nav class="modes" aria-label="Views">
+        <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
+        <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
+        <div class="tabs" id="tabs"></div>
+      </nav>
+    </div>
+  </header>
   <div class="wrap" id="wrap">
     <div id="search-col">
-    <p id="index"></p>
-    <div class="modes">
-      <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
-      <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
-    </div>
     <div id="search-view">
     <button type="button" id="search-narrow-open" class="narrow-open" hidden>Narrow</button>
     <div class="shelf">
@@ -635,7 +618,6 @@
     </div>
     </div>
     <div id="reader-col" hidden>
-      <div class="tabs" id="tabs"></div>
       <div id="panes"></div>
     </div>
   </div>
@@ -678,7 +660,7 @@ const count = document.getElementById("count");
 const err = document.getElementById("err");
 const results = document.getElementById("results");
 const wrap = document.getElementById("wrap");
-const searchCol = document.getElementById("search-col");
+const mast = document.getElementById("mast");
 const readerCol = document.getElementById("reader-col");
 const tabStrip = document.getElementById("tabs");
 const panes = document.getElementById("panes");
@@ -1608,7 +1590,7 @@ function markOpenPassages() {
     for (let i = 0; i < tabs.length; i++) {
       if (tabs[i].path !== btn.dataset.path || String(tabs[i].anchor) !== btn.dataset.offset) continue;
       open = true;
-      if (tabs[i].id === activeId) on = true;
+      if (groveView === "read" && tabs[i].id === activeId) on = true;
     }
     btn.classList.toggle("open", open);
     btn.classList.toggle("on", on);
@@ -1617,10 +1599,16 @@ function markOpenPassages() {
 
 function drawTabStrip() {
   tabStrip.replaceChildren();
+  if (!tabs.length) return;
+  const rule = document.createElement("span");
+  rule.className = "tab-rule";
+  rule.setAttribute("aria-hidden", "true");
+  tabStrip.append(rule);
   tabs.forEach(function (tab) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "tab" + (tab.id === activeId ? " on" : "");
+    const on = groveView === "read" && tab.id === activeId;
+    btn.className = "tab" + (on ? " on" : "") + (!tab.seen && !on ? " new" : "");
     const label = document.createElement("span");
     label.className = "tab-label";
     label.textContent = tabName(tab);
@@ -1637,38 +1625,32 @@ function drawTabStrip() {
     btn.append(label, x);
     tabStrip.append(btn);
   });
-  requestAnimationFrame(syncTabHeight);
 }
 
-function syncTabHeight() {
-  const h = tabStrip.getBoundingClientRect().height;
-  if (h > 0) readerCol.style.setProperty("--tabs-h", h + "px");
+function syncMast() {
+  if (!mast) return;
+  const h = mast.getBoundingClientRect().height;
+  if (h > 0) document.documentElement.style.setProperty("--mast-h", h + "px");
 }
 
-if (typeof ResizeObserver === "function") {
-  new ResizeObserver(syncTabHeight).observe(tabStrip);
+if (typeof ResizeObserver === "function" && mast) {
+  new ResizeObserver(syncMast).observe(mast);
 }
-
-function setSplit(on) {
-  const y = searchCol.scrollTop;
-  wrap.classList.toggle("split", on);
-  readerCol.hidden = !on;
-  if (on) searchCol.scrollTop = y;
-}
+syncMast();
 
 function showTab(tab, fresh) {
-  if (activeId && activeId !== tab.id) {
+  if (groveView === "read" && activeId && activeId !== tab.id) {
     const prev = tabs.find(function (t) { return t.id === activeId; });
-    if (prev) prev.scroll = readerCol.scrollTop;
+    if (prev) prev.scroll = window.scrollY;
   }
   activeId = tab.id;
+  tab.seen = true;
   tabs.forEach(function (t) { t.panel.hidden = t.id !== tab.id; });
-  setSplit(true);
-  drawTabStrip();
+  setView("read");
   markOpenPassages();
-  if (fresh) readerCol.scrollTop = 0;
+  if (fresh) window.scrollTo(0, 0);
   else if (tab.pendingMark) settleMark(tab);
-  else readerCol.scrollTop = tab.scroll || 0;
+  else window.scrollTo(0, tab.scroll || 0);
 }
 
 function closeTab(tab) {
@@ -1678,18 +1660,16 @@ function closeTab(tab) {
   tab.panel.remove();
   tabs.splice(i, 1);
   if (activeId === tab.id) {
-    const next = tabs[i] || tabs[i - 1];
-    if (next) showTab(next, false);
-    else {
-      activeId = 0;
-      setSplit(false);
-      drawTabStrip();
-      markOpenPassages();
+    const next = tabs[i] || tabs[i - 1] || null;
+    activeId = next ? next.id : 0;
+    if (groveView === "read") {
+      if (next) showTab(next, false);
+      else setView(shelfView);
+      return;
     }
-  } else {
-    drawTabStrip();
-    markOpenPassages();
   }
+  drawTabStrip();
+  markOpenPassages();
 }
 
 function makeTab(path, anchor, phrase) {
@@ -1735,6 +1715,7 @@ function makeTab(path, anchor, phrase) {
     section: "",
     seq: 0,
     scroll: 0,
+    seen: false,
     panel: panel,
     titleEl: title,
     whereEl: where,
@@ -1806,9 +1787,9 @@ function drawReader(tab, data) {
 function settleMark(tab) {
   const here = tab.bodyEl.querySelector("mark.here");
   if (here) here.scrollIntoView({ block: "center", inline: "nearest" });
-  else readerCol.scrollTop = 0;
+  else window.scrollTo(0, 0);
   tab.pendingMark = false;
-  tab.scroll = readerCol.scrollTop;
+  tab.scroll = window.scrollY;
 }
 
 async function loadTab(tab, at, dir) {
@@ -1846,7 +1827,8 @@ async function openTab(path, anchor, phrase) {
   } else if (phrase) {
     tab.phrase = phrase;
   }
-  showTab(tab, true);
+  markOpenPassages();
+  drawTabStrip();
   await loadTab(tab, anchor, 0);
 }
 
@@ -2175,6 +2157,8 @@ const LIB_FIELDS = [
   ["rights", "Rights", true]
 ];
 let groveView = "search";
+let shelfView = "search";
+const viewScroll = { search: 0, library: 0 };
 let editing = "";
 let editingLabel = "";
 let editReturn = null;
@@ -2503,22 +2487,37 @@ async function ensureShelf() {
 }
 
 function setView(name) {
-  const next = name === "library" ? "library" : "search";
+  const next = name === "library" ? "library" : name === "read" ? "read" : "search";
+  if (groveView === "search" || groveView === "library") viewScroll[groveView] = window.scrollY;
+  if (groveView === "read" && next !== "read" && activeId) {
+    const prev = tabs.find(function (t) { return t.id === activeId; });
+    if (prev) prev.scroll = window.scrollY;
+  }
   if (next !== "library") {
     closeEditor();
     closePageDialog();
   }
   closeNarrowSheet();
   groveView = next;
-  searchView.hidden = groveView !== "search";
-  libraryView.hidden = groveView !== "library";
-  modeSearch.classList.toggle("on", groveView === "search");
-  modeLibrary.classList.toggle("on", groveView === "library");
-  modeSearch.setAttribute("aria-pressed", groveView === "search" ? "true" : "false");
-  modeLibrary.setAttribute("aria-pressed", groveView === "library" ? "true" : "false");
-  try { sessionStorage.setItem("grove.view", groveView); } catch (e) {}
-  if (groveView === "library") ensureShelf();
-  else q.focus();
+  searchView.hidden = next !== "search";
+  libraryView.hidden = next !== "library";
+  readerCol.hidden = next !== "read";
+  wrap.classList.toggle("wide", next === "library");
+  modeSearch.classList.toggle("on", next === "search");
+  modeLibrary.classList.toggle("on", next === "library");
+  modeSearch.setAttribute("aria-pressed", next === "search" ? "true" : "false");
+  modeLibrary.setAttribute("aria-pressed", next === "library" ? "true" : "false");
+  if (next === "search" || next === "library") {
+    shelfView = next;
+    try { sessionStorage.setItem("grove.view", next); } catch (e) {}
+  }
+  drawTabStrip();
+  if (next === "library") ensureShelf();
+  else if (next === "search") q.focus();
+  if (next !== "read") {
+    const y = viewScroll[next] || 0;
+    requestAnimationFrame(function () { window.scrollTo(0, y); });
+  }
 }
 
 let pageReturn = null;

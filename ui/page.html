@@ -713,6 +713,61 @@ function withMarks(s) {
     .replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
 }
 
+/* The list shows the sentence around the match. The tab still opens the place. */
+function listSentence(raw) {
+  const text = String(raw || "");
+  const mark = /<<[\s\S]*?>>/.exec(text) || /\{\{[\s\S]*?\}\}/.exec(text);
+  if (!mark) return clipPlain(text);
+  const a = mark.index;
+  const b = a + mark[0].length;
+  let left = a;
+  for (let i = a - 1; i >= 0 && a - i <= 140; i--) {
+    const c = text[i];
+    if (c === "." || c === "?" || c === "!" || c === "\n") {
+      left = i + 1;
+      break;
+    }
+    if (i === 0) left = 0;
+  }
+  if (left === a && a > 0) {
+    const floor = Math.max(0, a - 120);
+    left = floor;
+    while (left < a && !/\s/.test(text[left])) left++;
+    while (left < a && /\s/.test(text[left])) left++;
+    if (left >= a) left = floor;
+  }
+  let right = b;
+  for (let i = b; i < text.length && i - b <= 180; i++) {
+    const c = text[i];
+    if (c === "." || c === "?" || c === "!" || c === "\n") {
+      right = i + 1;
+      break;
+    }
+  }
+  if (right === b && b < text.length) {
+    if (text.length - b <= 180) {
+      right = text.length;
+    } else {
+      const ceil = b + 160;
+      right = ceil;
+      while (right > b && !/\s/.test(text[right - 1])) right--;
+      if (right <= b) right = ceil;
+    }
+  }
+  let out = text.slice(left, right).replace(/^\s+/, "").replace(/\s+$/, "");
+  if (left > 0 && out.slice(0, 3) !== "...") out = "... " + out;
+  if (right < text.length && !/[.?!]$/.test(out) && !out.endsWith("...")) out += " ...";
+  return out;
+}
+
+function clipPlain(text) {
+  const clean = text.replace(/^\s+/, "").replace(/\s+$/, "");
+  if (clean.length <= 280) return clean;
+  let end = 240;
+  while (end > 160 && !/\s/.test(clean[end])) end--;
+  return clean.slice(0, end).replace(/\s+$/, "") + " ...";
+}
+
 function baseName(path) {
   const i = path.lastIndexOf("/");
   return i >= 0 ? path.slice(i + 1) : path;
@@ -1227,7 +1282,7 @@ function addPassage(parent, hit, passage) {
   }
   const text = document.createElement("p");
   text.className = "text";
-  text.innerHTML = withMarks(passage.text || "");
+  text.innerHTML = withMarks(listSentence(passage.text || ""));
   btn.append(text);
   btn.addEventListener("click", function () {
     openTab(hit.path, passage.offset || 0, markedWords(passage.text));

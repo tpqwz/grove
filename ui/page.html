@@ -713,11 +713,8 @@ function withMarks(s) {
     .replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
 }
 
-/* The list shows the sentence around the match. The tab still opens the place. */
-function listSentence(raw) {
-  const text = String(raw || "");
-  const mark = /<<[\s\S]*?>>/.exec(text) || /\{\{[\s\S]*?\}\}/.exec(text);
-  if (!mark) return clipPlain(text);
+/* The list shows the sentence around the match. The reader marks that same sentence. */
+function sentenceCore(text, mark) {
   const a = mark.index;
   const b = a + mark[0].length;
   let left = a;
@@ -754,10 +751,29 @@ function listSentence(raw) {
       if (right <= b) right = ceil;
     }
   }
-  let out = text.slice(left, right).replace(/^\s+/, "").replace(/\s+$/, "");
-  if (left > 0 && out.slice(0, 3) !== "...") out = "... " + out;
-  if (right < text.length && !/[.?!]$/.test(out) && !out.endsWith("...")) out += " ...";
+  return {
+    text: text.slice(left, right).replace(/^\s+/, "").replace(/\s+$/, ""),
+    cutL: left > 0,
+    cutR: right < text.length
+  };
+}
+
+function listSentence(raw) {
+  const text = String(raw || "");
+  const mark = /<<[\s\S]*?>>/.exec(text) || /\{\{[\s\S]*?\}\}/.exec(text);
+  if (!mark) return clipPlain(text);
+  const core = sentenceCore(text, mark);
+  let out = core.text;
+  if (core.cutL && out.slice(0, 3) !== "...") out = "... " + out;
+  if (core.cutR && !/[.?!]$/.test(out) && !out.endsWith("...")) out += " ...";
   return out;
+}
+
+function plainSnippet(raw) {
+  const text = String(raw || "");
+  const mark = /<<[\s\S]*?>>/.exec(text) || /\{\{[\s\S]*?\}\}/.exec(text);
+  const core = mark ? sentenceCore(text, mark).text : clipPlain(text).replace(/\s*\.\.\.$/, "");
+  return core.replace(/<<|>>|\{\{|\}\}/g, "").replace(/\s+/g, " ").trim();
 }
 
 function clipPlain(text) {
@@ -1285,7 +1301,7 @@ function addPassage(parent, hit, passage) {
   text.innerHTML = withMarks(listSentence(passage.text || ""));
   btn.append(text);
   btn.addEventListener("click", function () {
-    openTab(hit.path, passage.offset || 0, markedWords(passage.text));
+    openTab(hit.path, passage.offset || 0, markedWords(passage.text), plainSnippet(passage.text));
   });
   parent.append(btn);
   const slot = document.createElement("div");
@@ -1545,7 +1561,8 @@ function escapeRegExp(s) {
 }
 
 function locatePhrase(text, focus, phrase) {
-  if (!phrase || focus < 0) return null;
+  if (!phrase) return null;
+  if (focus < 0) focus = 0;
   const parts = phrase.split(" ").filter(function (w) { return w.length; });
   if (!parts.length) return null;
   const re = new RegExp(parts.map(escapeRegExp).join("\\s+"), "g");
@@ -1727,7 +1744,7 @@ function closeTab(tab) {
   markOpenPassages();
 }
 
-function makeTab(path, anchor, phrase) {
+function makeTab(path, anchor, phrase, snippet) {
   const panel = document.createElement("main");
   panel.className = "reader";
   panel.hidden = true;
@@ -1766,6 +1783,7 @@ function makeTab(path, anchor, phrase) {
     path: path,
     anchor: anchor,
     phrase: phrase || "",
+    snippet: snippet || "",
     book: "",
     section: "",
     seq: 0,
@@ -1813,6 +1831,7 @@ function drawReader(tab, data) {
       btn.textContent = head.text || "";
       btn.addEventListener("click", function () {
         tab.phrase = "";
+        tab.snippet = "";
         loadTab(tab, head.at || 0, 0);
       });
       list.append(btn);
@@ -1826,7 +1845,7 @@ function drawReader(tab, data) {
   const pages = (data.pages || []).map(function (p) {
     return { index: utf8Index(text, Math.max(0, (p.at || 0) - (data.from || 0))), page: p.page };
   });
-  const span = tab.phrase ? locatePhrase(text, focus, tab.phrase) : null;
+  const span = locatePhrase(text, focus, tab.snippet) || locatePhrase(text, focus, tab.phrase);
   renderProse(tab.bodyEl, text, span, pages);
   tab.prevEl.disabled = !data.from;
   tab.nextEl.disabled = data.to >= data.length;
@@ -1868,7 +1887,7 @@ async function loadTab(tab, at, dir) {
   }
 }
 
-async function openTab(path, anchor, phrase) {
+async function openTab(path, anchor, phrase, snippet) {
   let tab = null;
   for (let i = 0; i < tabs.length; i++) {
     if (tabs[i].path === path && tabs[i].anchor === anchor) {
@@ -1877,10 +1896,11 @@ async function openTab(path, anchor, phrase) {
     }
   }
   if (!tab) {
-    tab = makeTab(path, anchor, phrase || "");
+    tab = makeTab(path, anchor, phrase || "", snippet || "");
     tabs.push(tab);
-  } else if (phrase) {
-    tab.phrase = phrase;
+  } else {
+    if (phrase) tab.phrase = phrase;
+    if (snippet) tab.snippet = snippet;
   }
   markOpenPassages();
   drawTabStrip();

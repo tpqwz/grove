@@ -15,6 +15,7 @@
     --line: #e3dcd1;
     --mark: #f0e2b4;
     --focus: #8a4e22;
+    --gutter: clamp(1.25rem, 3vw, 2.75rem);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -39,17 +40,18 @@
     background: var(--bg);
   }
   .mast-in {
-    width: min(40rem, calc(100% - clamp(1.25rem, 5vw, 3rem)));
+    width: calc(100% - var(--gutter));
     margin: 0 auto;
     padding: clamp(0.95rem, 2.8vh, 1.45rem) 0 0;
   }
   .wrap {
-    width: min(40rem, calc(100% - clamp(1.25rem, 5vw, 3rem)));
+    width: calc(100% - var(--gutter));
     margin: 0 auto;
     padding: 1.15rem 0 4rem;
+    container: page / inline-size;
   }
   .wrap.wide {
-    width: min(76rem, calc(100% - clamp(1rem, 4vw, 2.5rem)));
+    width: calc(100% - var(--gutter));
   }
   #search-col, #reader-col { min-width: 0; }
   #reader-col[hidden] { display: none; }
@@ -107,6 +109,7 @@
     color: var(--muted);
     font-size: 0.85rem;
   }
+  .help { max-width: 46rem; }
   .saved { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; min-height: 0; }
   .saved:empty { margin: 0; }
   .saved:not(:empty) { margin-top: 0.45rem; }
@@ -158,7 +161,13 @@
     margin: 0.8rem 0 0;
     color: #8a2a1a;
   }
-  article { margin-top: 1.7rem; }
+  #results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 26rem), 1fr));
+    column-gap: clamp(1.5rem, 3vw, 3.25rem);
+    align-items: start;
+  }
+  article { margin-top: 1.7rem; min-width: 0; }
   .name {
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.28rem;
@@ -256,6 +265,13 @@
   #ex-filter { flex: 1 1 14rem; width: auto; min-width: 0; margin: 0; font-size: 1rem; padding: 0.55rem 0.75rem; }
   .ex-note { margin: 0.45rem 0 0; color: var(--muted); font-size: 0.78rem; }
   .ex-note[hidden] { display: none; }
+  #ex-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 28rem), 1fr));
+    column-gap: clamp(1.5rem, 3vw, 3rem);
+    align-items: start;
+  }
+  .ex-book, .ex-by { grid-column: 1 / -1; }
   .ex-book {
     margin: 1.45rem 0 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
@@ -280,6 +296,7 @@
   .ex-actions button.quiet:hover { color: var(--focus); }
   input.tag-in { width: 8.5rem; font-size: 0.85rem; padding: 0.28rem 0.5rem; }
   .ex-empty {
+    grid-column: 1 / -1;
     margin: 1.1rem 0 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.15rem;
@@ -483,7 +500,6 @@
   }
   .lib-title:hover { background: #efe8dc; }
   .lib-cell {
-    max-width: 12rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -586,20 +602,50 @@
   .narrow-aside { display: none; }
   .shelf { min-width: 0; }
   @container (min-width: 38rem) {
-    .shelf:has(> .narrow-aside:not([hidden])) {
+    #library-view .shelf:has(> .narrow-aside:not([hidden])) {
       display: grid;
       grid-template-columns: 15rem minmax(0, 1fr);
       column-gap: clamp(1.25rem, 3vw, 2.5rem);
       align-items: start;
     }
-    .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
+    #library-view .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
       display: block;
       position: sticky;
       top: calc(var(--mast-h, 4.6rem) + 0.35rem);
       max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
       overflow: auto;
     }
-    .narrow-open { display: none; }
+    #library-view .narrow-open { display: none; }
+  }
+  @container page (min-width: 56rem) {
+    .reader:has(.toc[open]) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
+      column-gap: clamp(1.5rem, 3vw, 3rem);
+      align-items: start;
+      width: min(92rem, 100%);
+      margin-inline: auto;
+    }
+    .reader:has(.toc[open]) .reader-bar { grid-column: 1; grid-row: 1; }
+    .reader:has(.toc[open]) .reader-title { grid-column: 1; grid-row: 2; }
+    .reader:has(.toc[open]) .reader-body { grid-column: 1; grid-row: 3; min-width: 0; }
+    .reader:has(.toc[open]) .toc-col {
+      grid-column: 2;
+      grid-row: 1 / span 3;
+      position: sticky;
+      top: calc(var(--mast-h, 4.6rem) + 0.35rem);
+      max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
+      overflow: auto;
+      align-self: start;
+      min-width: 0;
+    }
+    .reader:has(.toc[open]) .toc div { max-height: none; overflow: visible; }
+  }
+  @container page (min-width: 76rem) {
+    .reader:not(:has(.toc[open])) {
+      width: 72rem;
+      margin-inline: auto;
+    }
   }
   .narrow-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; }
   .narrow-title {
@@ -1909,6 +1955,7 @@ function makeTab(path, anchor, phrase, snippet) {
   title.className = "reader-title";
   title.textContent = stemName(path);
   const toc = document.createElement("div");
+  toc.className = "toc-col";
   const body = document.createElement("article");
   body.className = "reader-body";
   panel.append(bar, title, toc, body);
@@ -1955,6 +2002,7 @@ function drawReader(tab, data) {
   if (heads.length) {
     const details = document.createElement("details");
     details.className = "toc";
+    if (window.matchMedia("(min-width: 58rem)").matches) details.open = true;
     const summary = document.createElement("summary");
     summary.textContent = "Contents";
     const list = document.createElement("div");

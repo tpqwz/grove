@@ -3418,6 +3418,74 @@ done:
     rm_rf(root);
 }
 
+static void test_alias_root(void) {
+#if !defined(_WIN32)
+    char real_tmpl[] = "/tmp/grove-real-XXXXXX";
+    char via_tmpl[] = "/tmp/grove-via-XXXXXX";
+    char *real = mkdtemp(real_tmpl);
+    char *via = mkdtemp(via_tmpl);
+    char *docs = real ? path_join(real, "docs") : NULL;
+    char *note = docs ? path_join(docs, "a.txt") : NULL;
+    char *alias = via ? path_join(via, "tree") : NULL;
+    char *docs_alias = alias ? path_join(alias, "docs") : NULL;
+    char *note_alias = docs_alias ? path_join(docs_alias, "a.txt") : NULL;
+    char *idx = real ? path_join(real, "idx") : NULL;
+    char *docs2 = NULL;
+    Index *ix = NULL;
+    Library lib;
+    Err e;
+    memset(&lib, 0, sizeof lib);
+    err_clear(&e);
+    if (!real || !via || !docs || !note || !alias || !docs_alias || !note_alias || !idx || mkdir(docs, 0700) != 0 ||
+        symlink(real, alias) != 0 || write_file(note, "alias shelf\n", 12) != 0) {
+        fprintf(stderr, "alias corpus\n");
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "alias open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs_alias, &st, &e) != 0) {
+        fprintf(stderr, "alias add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    put_sorted(ix, note_alias, "Ann", "", "", "", "", "", "");
+    CHECK(index_library_sorted(ix, NULL, NULL, NULL, NULL, NULL, NULL, LIB_SORT_CREATOR, 0, &lib, &e) == 0);
+    CHECK(lib.n == 1 && lib.volumes && lib.volumes[0].creator && strcmp(lib.volumes[0].creator, "Ann") == 0);
+    CHECK(lib.n == 1 && lib.volumes && lib.volumes[0].path && strstr(lib.volumes[0].path, "/a.txt"));
+    library_free(&lib);
+    docs2 = path_join(real, "docs2");
+    CHECK(docs2 && rename(docs, docs2) == 0);
+    err_clear(&e);
+    CHECK(index_add(ix, docs_alias, NULL, &e) != 0);
+    CHECK(e.msg[0] && strstr(e.msg, "rebind") != NULL);
+    err_clear(&e);
+    CHECK(docs2 && index_rebind(ix, docs_alias, docs2, &e) == 0);
+done:
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    free(docs);
+    free(note);
+    free(alias);
+    free(docs_alias);
+    free(note_alias);
+    free(idx);
+    free(docs2);
+    rm_rf(real);
+    rm_rf(via);
+#else
+    (void)0;
+#endif
+}
+
 int main(void) {
     test_bounds();
     test_cert();
@@ -3432,6 +3500,7 @@ int main(void) {
     test_library();
     test_named_creator();
     test_library_sort();
+    test_alias_root();
     test_narrow();
     test_alerts();
     test_reader();

@@ -146,6 +146,123 @@ char *grove_realpath(const char *path, char *resolved) {
 #endif
 }
 
+#if !defined(_WIN32)
+static char *key_pop(char *base) {
+    char *slash = base ? strrchr(base, '/') : NULL;
+    if (!slash) {
+        free(base);
+        return NULL;
+    }
+    if (slash == base) {
+        base[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return base;
+}
+#endif
+
+char *grove_path_key(const char *path) {
+    if (!path || !path[0]) {
+        errno = EINVAL;
+        return NULL;
+    }
+#if defined(_WIN32)
+    char buf[4096];
+    DWORD n = GetFullPathNameA(path, (DWORD)sizeof buf, buf, NULL);
+    if (n == 0 || n >= sizeof buf) {
+        errno = n == 0 ? EINVAL : ENAMETOOLONG;
+        return NULL;
+    }
+    for (char *p = buf; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return xstrdup(buf);
+#else
+    char *direct = realpath(path, NULL);
+    if (direct) {
+        return direct;
+    }
+    char *copy = xstrdup(path);
+    if (!copy) {
+        return NULL;
+    }
+    size_t len = strlen(copy);
+    while (len > 1 && copy[len - 1] == '/') {
+        copy[--len] = '\0';
+    }
+    enum { TAIL_CAP = 128 };
+    char *tail[TAIL_CAP];
+    int nt = 0;
+    char *base = NULL;
+    int oom = 0;
+    while (nt < TAIL_CAP) {
+        base = realpath(copy, NULL);
+        if (base) {
+            break;
+        }
+        char *slash = strrchr(copy, '/');
+        if (!slash) {
+            break;
+        }
+        if (slash[1] != '\0') {
+            tail[nt] = xstrdup(slash + 1);
+            if (!tail[nt]) {
+                oom = 1;
+                break;
+            }
+            nt++;
+        }
+        if (slash == copy) {
+            copy[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+    free(copy);
+    if (oom || !base) {
+        for (int i = 0; i < nt; i++) {
+            free(tail[i]);
+        }
+        free(base);
+        if (oom) {
+            errno = ENOMEM;
+        }
+        return NULL;
+    }
+    for (int i = nt - 1; i >= 0; i--) {
+        if (strcmp(tail[i], ".") == 0) {
+            free(tail[i]);
+            continue;
+        }
+        if (strcmp(tail[i], "..") == 0) {
+            free(tail[i]);
+            base = key_pop(base);
+            if (!base) {
+                for (int j = i - 1; j >= 0; j--) {
+                    free(tail[j]);
+                }
+                return NULL;
+            }
+            continue;
+        }
+        char *next = path_join(base, tail[i]);
+        free(tail[i]);
+        free(base);
+        base = next;
+        if (!base) {
+            for (int j = i - 1; j >= 0; j--) {
+                free(tail[j]);
+            }
+            return NULL;
+        }
+    }
+    return base;
+#endif
+}
+
 #if defined(_WIN32)
 struct GroveSpawnAct {
     int kind;

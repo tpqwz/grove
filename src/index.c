@@ -134,6 +134,17 @@ static int path_within(const char *parent, const char *path) {
     return path[n] == 0 || path[n] == '/';
 }
 
+/* shown is the stored path. query_key is grove_path_key(query), or NULL. */
+static int path_is(const char *shown, const char *query, const char *query_key) {
+    if (!shown || !query) {
+        return 0;
+    }
+    if (strcmp(shown, query) == 0) {
+        return 1;
+    }
+    return query_key && query_key[0] && strcmp(shown, query_key) == 0;
+}
+
 static int file_there(const char *path) {
     return path && access(path, F_OK) == 0;
 }
@@ -831,10 +842,14 @@ static int walk(Index *ix, int64_t root, int slot, const char *rel, int depth, S
 static int add_inner(Index *ix, const char *path, IndexStats *st, Err *e) {
     char *canon = grove_realpath(path, NULL);
     if (!canon) {
-        if (root_exact(ix, path) >= 0) {
+        int saved = errno;
+        char *key = grove_path_key(path);
+        int known = (key && root_exact(ix, key) >= 0) || (path && root_exact(ix, path) >= 0);
+        free(key);
+        if (known) {
             err_set(e, "root %s is not available; rebind it if the drive moved", path);
         } else {
-            err_set(e, "cannot resolve %s: %s", path, strerror(errno));
+            err_set(e, "cannot resolve %s: %s", path, strerror(saved));
         }
         return -1;
     }
@@ -998,7 +1013,7 @@ int index_rebind(Index *ix, const char *from, const char *to, Err *e) {
         err_set(e, "cannot resolve %s: %s", to, strerror(errno));
         return -1;
     }
-    char *op = grove_realpath(from, NULL);
+    char *op = grove_path_key(from);
     const char *key = op ? op : from;
     int slot = root_exact(ix, key);
     if (slot < 0) {
@@ -2432,6 +2447,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
     int64_t found = 0;
     char *ext = NULL;
     int step = 0;
+    char *query_key = grove_path_key(path);
     while ((step = sqlite3_step(st)) == SQLITE_ROW) {
         const char *rel = (const char *)sqlite3_column_text(st, 2);
         const char *title = (const char *)sqlite3_column_text(st, 3);
@@ -2441,7 +2457,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
             continue;
         }
         char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
-        int eq = shown && strcmp(shown, path) == 0 && narrow_gate_ok(gate, shown);
+        int eq = shown && path_is(shown, path, query_key) && narrow_gate_ok(gate, shown);
         free(shown);
         if (eq) {
             found = sqlite3_column_int64(st, 0);
@@ -2449,6 +2465,7 @@ int index_more(Index *ix, const char *query, const char *path, uint32_t after, P
             break;
         }
     }
+    free(query_key);
     sqlite3_finalize(st);
     narrow_gate_close(gate);
     if (step != SQLITE_ROW && step != SQLITE_DONE) {
@@ -2754,10 +2771,11 @@ static int lookup_path(Index *ix, const char *path, int64_t *id, char **title, c
         return -1;
     }
     int step = 0;
+    char *query_key = grove_path_key(path);
     while ((step = sqlite3_step(st)) == SQLITE_ROW) {
         const char *rel = (const char *)sqlite3_column_text(st, 2);
         char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
-        int eq = shown && strcmp(shown, path) == 0;
+        int eq = shown && path_is(shown, path, query_key);
         free(shown);
         if (!eq) {
             continue;
@@ -2769,6 +2787,7 @@ static int lookup_path(Index *ix, const char *path, int64_t *id, char **title, c
         *ext = xstrdup(ex ? ex : "");
         if (!*title || !*ext) {
             sqlite3_finalize(st);
+            free(query_key);
             free(*title);
             free(*ext);
             *title = NULL;
@@ -2778,6 +2797,7 @@ static int lookup_path(Index *ix, const char *path, int64_t *id, char **title, c
         }
         break;
     }
+    free(query_key);
     sqlite3_finalize(st);
     if (step != SQLITE_ROW && step != SQLITE_DONE) {
         free(*title);
@@ -4480,10 +4500,11 @@ static int doc_by_path(Index *ix, sqlite3 *db, const char *path, int64_t *id, Er
         return saved_fail(db, e);
     }
     int step = SQLITE_DONE;
+    char *query_key = grove_path_key(path);
     while ((step = sqlite3_step(st)) == SQLITE_ROW) {
         const char *rel = (const char *)sqlite3_column_text(st, 2);
         char *shown = display_path(ix, sqlite3_column_int64(st, 1), rel, NULL);
-        int eq = shown && path && strcmp(shown, path) == 0;
+        int eq = shown && path_is(shown, path, query_key);
         free(shown);
         if (!eq) {
             continue;
@@ -4491,6 +4512,7 @@ static int doc_by_path(Index *ix, sqlite3 *db, const char *path, int64_t *id, Er
         *id = sqlite3_column_int64(st, 0);
         break;
     }
+    free(query_key);
     sqlite3_finalize(st);
     if (step != SQLITE_ROW && step != SQLITE_DONE) {
         return saved_fail(db, e);
@@ -5676,6 +5698,13 @@ int index_catalog_put(Index *ix, const Volume *rec, Err *e) {
     if (!path) {
         return -1;
     }
+    char *key = grove_path_key(path);
+    if (key && strlen(key) <= 4096) {
+        free(path);
+        path = key;
+    } else {
+        free(key);
+    }
     char *field[CF_N];
     memset(field, 0, sizeof field);
     for (int i = 0; i < CF_N; i++) {
@@ -5800,14 +5829,18 @@ int index_page_remember(Index *ix, const char *path, const char *url, Err *e) {
         err_set(e, "that address is not a web page");
         return -1;
     }
+    char *owned = grove_path_key(path);
+    const char *stored = owned && owned[0] ? owned : path;
     sqlite3 *db = NULL;
     sqlite3_stmt *st = NULL;
     int began = 0;
     if (write_db(ix, &db, 0, e) != 0) {
+        free(owned);
         return -1;
     }
     if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
         sqlite3_close(db);
+        free(owned);
         return -1;
     }
     began = 1;
@@ -5825,7 +5858,7 @@ int index_page_remember(Index *ix, const char *path, const char *url, Err *e) {
         saved_fail(db, e);
         goto fail;
     }
-    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 1, stored, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, url, -1, SQLITE_TRANSIENT);
     if (sqlite3_step(st) != SQLITE_DONE) {
         saved_fail(db, e);
@@ -5845,7 +5878,7 @@ int index_page_remember(Index *ix, const char *path, const char *url, Err *e) {
             saved_fail(db, e);
             goto fail;
         }
-        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 1, stored, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(st, 2, url, -1, SQLITE_TRANSIENT);
         if (sqlite3_step(st) != SQLITE_DONE) {
             saved_fail(db, e);
@@ -5857,9 +5890,11 @@ int index_page_remember(Index *ix, const char *path, const char *url, Err *e) {
     if (saved_exec(db, "COMMIT", e) != 0) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         sqlite3_close(db);
+        free(owned);
         return -1;
     }
     sqlite3_close(db);
+    free(owned);
     return 0;
 fail:
     if (st) {
@@ -5869,6 +5904,7 @@ fail:
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     }
     sqlite3_close(db);
+    free(owned);
     return -1;
 }
 
@@ -5883,26 +5919,31 @@ int index_page_url(Index *ix, const char *path, char **url, Err *e) {
     if (!ix || !path || !path[0]) {
         return 0;
     }
+    char *owned = grove_path_key(path);
+    const char *stored = owned && owned[0] ? owned : path;
     sqlite3_stmt *st = NULL;
     if (prep(ix, &st, "SELECT url FROM web WHERE path=?", e) != 0) {
+        free(owned);
         if (e->msg[0] && strstr(e->msg, "no such table")) {
             err_clear(e);
             return 0;
         }
         return -1;
     }
-    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 1, stored, -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(st);
     if (rc == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         *url = xstrdup(s ? s : "");
         if (!*url) {
             sqlite3_finalize(st);
+            free(owned);
             err_set(e, "out of memory");
             return -1;
         }
     }
     sqlite3_finalize(st);
+    free(owned);
     if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
         free(*url);
         *url = NULL;
@@ -5916,14 +5957,18 @@ int index_library_drop(Index *ix, const char *path, Err *e) {
         err_set(e, "that file is not in the library");
         return -1;
     }
+    char *owned = grove_path_key(path);
+    const char *stored = owned && owned[0] ? owned : path;
     sqlite3 *db = NULL;
     sqlite3_stmt *st = NULL;
     int began = 0;
     if (write_db(ix, &db, 1, e) != 0) {
+        free(owned);
         return -1;
     }
     if (saved_exec(db, "BEGIN IMMEDIATE", e) != 0) {
         sqlite3_close(db);
+        free(owned);
         return -1;
     }
     began = 1;
@@ -5963,11 +6008,12 @@ int index_library_drop(Index *ix, const char *path, Err *e) {
     sqlite3_finalize(st);
     st = NULL;
     if (has) {
-        if (sqlite3_prepare_v2(db, "DELETE FROM catalog WHERE path=?", -1, &st, NULL) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, "DELETE FROM catalog WHERE path=? OR path=?", -1, &st, NULL) != SQLITE_OK) {
             saved_fail(db, e);
             goto fail;
         }
-        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 1, stored, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, path, -1, SQLITE_TRANSIENT);
         if (sqlite3_step(st) != SQLITE_DONE) {
             saved_fail(db, e);
             goto fail;
@@ -5985,11 +6031,12 @@ int index_library_drop(Index *ix, const char *path, Err *e) {
     sqlite3_finalize(st);
     st = NULL;
     if (has) {
-        if (sqlite3_prepare_v2(db, "DELETE FROM web WHERE path=?", -1, &st, NULL) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, "DELETE FROM web WHERE path=? OR path=?", -1, &st, NULL) != SQLITE_OK) {
             saved_fail(db, e);
             goto fail;
         }
-        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 1, stored, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, path, -1, SQLITE_TRANSIENT);
         if (sqlite3_step(st) != SQLITE_DONE) {
             saved_fail(db, e);
             goto fail;
@@ -6000,9 +6047,11 @@ int index_library_drop(Index *ix, const char *path, Err *e) {
     if (saved_exec(db, "COMMIT", e) != 0) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         sqlite3_close(db);
+        free(owned);
         return -1;
     }
     sqlite3_close(db);
+    free(owned);
     return 0;
 fail:
     if (st) {
@@ -6012,5 +6061,6 @@ fail:
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     }
     sqlite3_close(db);
+    free(owned);
     return -1;
 }

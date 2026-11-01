@@ -67,8 +67,14 @@ char *grove_self_dir(void);
 /* Index directory from GROVE_INDEX, or the platform data directory. */
 char *grove_index_dir(void);
 
-/* Absolute path with forward slashes, or NULL. resolved may be NULL. */
+/* Absolute path with forward slashes, or NULL. resolved may be NULL.
+   Fails when the path does not exist. */
 char *grove_realpath(const char *path, char *resolved);
+
+/* Identity of a path. The caller frees it.
+   An existing path is its real path. A missing tail keeps the real
+   directory above it, so /tmp and /private/tmp stay the same place. */
+char *grove_path_key(const char *path);
 
 static inline int grove_lstat(const char *path, struct stat *st) {
 #if defined(_WIN32)

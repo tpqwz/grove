@@ -26,6 +26,6 @@ Delphi Classics lists a free collection at `https://www.delphiclassics.com/produ
 
 ```sh
 ./grove index --index samples/index samples/books
-./grove-ui --index samples/index
+./grove --index samples/index
 ./samples/check.sh
 ```

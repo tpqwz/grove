@@ -3,7 +3,14 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-GROVE=$ROOT/grove
+if [ -x "$ROOT/grove" ]; then
+  GROVE=$ROOT/grove
+elif [ -x "$ROOT/grove.exe" ]; then
+  GROVE=$ROOT/grove.exe
+else
+  echo "grove was not built" >&2
+  exit 1
+fi
 TMP=$(mktemp -d)
 HTTP_PID=
 cleanup() {

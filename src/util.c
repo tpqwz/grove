@@ -8,6 +8,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#include <direct.h>
+#include <io.h>
+#endif
 
 void err_clear(Err *e) {
     if (e) {
@@ -149,6 +153,22 @@ char *xstrndup(const char *s, size_t n) {
     return p;
 }
 
+static int path_sep(char c) {
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+static int mkdir_one(const char *path) {
+#if defined(_WIN32)
+    return _mkdir(path);
+#else
+    return mkdir(path, 0755);
+#endif
+}
+
 char *path_join(const char *a, const char *b) {
     if (!a || !b) {
         return NULL;
@@ -159,7 +179,7 @@ char *path_join(const char *a, const char *b) {
         b++;
         nb--;
     }
-    int slash = na && a[na - 1] != '/';
+    int slash = na && !path_sep(a[na - 1]);
     size_t alloc;
     if (size_add(na, nb, &alloc) != 0 || size_add(alloc, slash ? 2 : 1, &alloc) != 0) {
         return NULL;
@@ -189,17 +209,20 @@ int mkdir_p(const char *path) {
         return -1;
     }
     for (size_t i = 1; i < n; i++) {
-        if (tmp[i] != '/') {
+        if (!path_sep(tmp[i])) {
             continue;
         }
+        char saved = tmp[i];
         tmp[i] = 0;
-        if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        /* "C:" is a drive, not a directory this loop creates. */
+        int drive = i == 2 && tmp[1] == ':';
+        if (!drive && mkdir_one(tmp) != 0 && errno != EEXIST) {
             free(tmp);
             return -1;
         }
-        tmp[i] = '/';
+        tmp[i] = saved;
     }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    if (mkdir_one(tmp) != 0 && errno != EEXIST) {
         free(tmp);
         return -1;
     }
@@ -260,7 +283,11 @@ int write_file_atomic(const char *path, const void *data, size_t n, Err *e) {
         }
         got += (size_t)w;
     }
+#if defined(_WIN32)
+    while (_commit(fd) != 0) {
+#else
     while (fsync(fd) != 0) {
+#endif
         if (errno == EINTR) {
             continue;
         }
@@ -296,6 +323,16 @@ int read_entire_file(const char *path, unsigned char **out, size_t *n, size_t ca
         err_set(e, "missing path");
         return -1;
     }
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+#ifndef O_CLOEXEC
+#ifdef O_NOINHERIT
+#define O_CLOEXEC O_NOINHERIT
+#else
+#define O_CLOEXEC 0
+#endif
+#endif
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         err_set(e, "cannot read %s: %s", path, strerror(errno));

@@ -1,5 +1,6 @@
 #include "expand.h"
 
+#include "os.h"
 #include "util.h"
 
 #include <pthread.h>
@@ -685,12 +686,14 @@ static int wn_load_path(const char *path) {
 
 static int wn_from_exe(void) {
     char exe[4096];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n <= 0 || (size_t)n >= sizeof exe - 1) {
+    if (grove_self_path(exe, sizeof exe) != 0) {
         return -1;
     }
-    exe[n] = 0;
     char *slash = strrchr(exe, '/');
+    char *bslash = strrchr(exe, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
     if (!slash || slash == exe) {
         return -1;
     }

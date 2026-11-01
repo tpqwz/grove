@@ -1,4 +1,5 @@
 #include "expand.h"
+#include "os.h"
 #include "extract.h"
 #include "fetch.h"
 #include "index.h"
@@ -1304,10 +1305,8 @@ static int test_corpus(const char *root) {
     CHECK(strlen(zw) == strlen(keep_text));
     CHECK(write_file(keep, zw, strlen(zw)) == 0);
     struct timespec ts[2];
-    ts[0].tv_sec = keep_st.st_atim.tv_sec;
-    ts[0].tv_nsec = keep_st.st_atim.tv_nsec;
-    ts[1].tv_sec = keep_st.st_mtim.tv_sec;
-    ts[1].tv_nsec = keep_st.st_mtim.tv_nsec;
+    ts[0] = grove_atim(&keep_st);
+    ts[1] = grove_mtim(&keep_st);
     CHECK(utimensat(AT_FDCWD, keep, ts, 0) == 0);
     memset(&st, 0, sizeof st);
     CHECK(index_add(ix, docs, &st, &e) == 0);

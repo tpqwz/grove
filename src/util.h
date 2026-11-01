@@ -17,7 +17,12 @@ typedef struct Err {
 } Err;
 
 void err_clear(Err *e);
-void err_set(Err *e, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+#if defined(__MINGW32__)
+#define GROVE_PRINTF gnu_printf
+#else
+#define GROVE_PRINTF printf
+#endif
+void err_set(Err *e, const char *fmt, ...) __attribute__((format(GROVE_PRINTF, 2, 3)));
 
 void buf_init(Buf *b);
 void buf_free(Buf *b);
@@ -26,7 +31,7 @@ int buf_reserve(Buf *b, size_t need);
 int buf_append(Buf *b, const void *p, size_t n);
 int buf_puts(Buf *b, const char *s);
 int buf_putc(Buf *b, int c);
-int buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(GROVE_PRINTF, 2, 3)));
 
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);

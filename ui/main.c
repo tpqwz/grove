@@ -1,5 +1,6 @@
 #include "index.h"
 #include "mod.h"
+#include "os.h"
 #include "webui.h"
 
 #include <errno.h>
@@ -7,17 +8,21 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+#if !defined(_WIN32)
 #include <spawn.h>
+#include <sys/wait.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "page.h"
 
+#if !defined(_WIN32)
 extern char **environ;
+#endif
 
 enum { SEARCH_LIMIT = 40, ALLOW_MAX = 40, QUERY_MAX = 8192 };
 
@@ -425,12 +430,21 @@ static int http_address(const char *s) {
 
 static int spawn_open(const char *path) {
     pid_t pid = 0;
+    int rc;
+#if defined(__APPLE__)
+    char *argv[] = {"open", (char *)path, NULL};
+    rc = posix_spawnp(&pid, "open", NULL, NULL, argv, environ);
+#elif defined(_WIN32)
+    char *argv[] = {"cmd.exe", "/c", "start", "", (char *)path, NULL};
+    rc = posix_spawnp(&pid, "cmd.exe", NULL, NULL, argv, environ);
+#else
     char *argv[] = {"xdg-open", (char *)path, NULL};
-    int rc = posix_spawnp(&pid, "xdg-open", NULL, NULL, argv, environ);
+    rc = posix_spawnp(&pid, "xdg-open", NULL, NULL, argv, environ);
     if (rc != 0) {
         argv[0] = "/usr/bin/xdg-open";
         rc = posix_spawn(&pid, "/usr/bin/xdg-open", NULL, NULL, argv, environ);
     }
+#endif
     if (rc != 0) {
         return -1;
     }
@@ -454,6 +468,14 @@ static int open_saved(const char *path, const char *page_url) {
 /* The reader stays up. Detach so this process does not wait, and so the
  * child is not a zombie. */
 static int spawn_detached(char *const argv[]) {
+#if defined(_WIN32)
+    pid_t pid = 0;
+    if (posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ) != 0) {
+        return -1;
+    }
+    /* The reader stays open. Drop our handle so the table does not fill. */
+    return grove_disown(pid);
+#else
     pid_t mid = fork();
     if (mid < 0) {
         return -1;
@@ -477,6 +499,7 @@ static int spawn_detached(char *const argv[]) {
         return -1;
     }
     return 0;
+#endif
 }
 
 static int on_path(const char *name) {
@@ -493,7 +516,12 @@ static int on_path(const char *name) {
     size_t namelen = strlen(name);
     const char *p = env;
     while (*p) {
-        const char *colon = strchr(p, ':');
+    #if defined(_WIN32)
+        const char sep = ';';
+#else
+        const char sep = ':';
+#endif
+        const char *colon = strchr(p, sep);
         size_t n = colon ? (size_t)(colon - p) : strlen(p);
         if (n > 0 && n + 1 + namelen + 1 < 4096) {
             char buf[4096];
@@ -1259,19 +1287,22 @@ static void *live_watch(void *arg) {
     memset(&pending, 0, sizeof pending);
     while (!live_stop) {
         struct stat st;
-        if (stat(live_path, &st) == 0 && st.st_size > 0 && !mtim_eq(&st.st_mtim, &live_mtim)) {
-            if (have_pending && mtim_eq(&st.st_mtim, &pending)) {
-                live_mtim = st.st_mtim;
+        if (stat(live_path, &st) == 0 && st.st_size > 0) {
+            struct timespec now = grove_mtim(&st);
+            if (mtim_eq(&now, &live_mtim)) {
+                have_pending = 0;
+            } else if (have_pending && mtim_eq(&now, &pending)) {
+                live_mtim = now;
                 have_pending = 0;
                 /* Keep the query the way CToy keeps a registered block. */
                 webui_run(live_win,
                           "(function(){try{var q=document.getElementById('q');"
                           "if(q)sessionStorage.setItem('grove.q',q.value);"
                           "}catch(e){}location.reload();})()");
-                fprintf(stderr, "grove-ui: reloaded %s\n", live_path);
+                fprintf(stderr, "grove: reloaded %s\n", live_path);
                 fflush(stderr);
             } else {
-                pending = st.st_mtim;
+                pending = now;
                 have_pending = 1;
             }
         } else {
@@ -1969,19 +2000,19 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_pick", on_pick_guard);
     webui_bind(win, "grove_shelf", on_shelf_guard);
     if (!webui_show(win, live_name ? live_name : page_html)) {
-        fprintf(stderr, "grove-ui: could not open a browser window\n");
+        fprintf(stderr, "grove: could not open a browser window\n");
         return 1;
     }
     const char *url = webui_get_url(win);
-    fprintf(stderr, "grove-ui: %s\n", url ? url : "");
+    fprintf(stderr, "grove: %s\n", url ? url : "");
     if (live_path) {
-        fprintf(stderr, "grove-ui: watching %s\n", live_path);
+        fprintf(stderr, "grove: watching %s\n", live_path);
     }
     fflush(stderr);
 
     struct stat st;
     if (!ui->smoke && live_path && stat(live_path, &st) == 0) {
-        live_mtim = st.st_mtim;
+        live_mtim = grove_mtim(&st);
         live_stop = 0;
         watching = pthread_create(&watcher, NULL, live_watch, NULL) == 0;
     }
@@ -1995,7 +2026,7 @@ int grove_ui_attach(const GroveUi *ui) {
         buf_init(&js);
         if (buf_puts(&js, "grove_search(") != 0 || jesc(&js, ui->smoke) != 0 ||
             buf_puts(&js, ").then(function(r){ window.__groveSmoke = r; }); return 'kicked';") != 0) {
-            fprintf(stderr, "grove-ui: smoke setup failed\n");
+            fprintf(stderr, "grove: smoke setup failed\n");
             buf_free(&js);
             webui_exit();
             return 1;
@@ -2003,7 +2034,7 @@ int grove_ui_attach(const GroveUi *ui) {
         int ok = webui_script(win, js.data, 15, kicked, sizeof kicked) ? 1 : 0;
         buf_free(&js);
         if (!ok) {
-            fprintf(stderr, "grove-ui: smoke script failed\n");
+            fprintf(stderr, "grove: smoke script failed\n");
             webui_exit();
             return 1;
         }
@@ -2011,7 +2042,7 @@ int grove_ui_attach(const GroveUi *ui) {
             memset(buf, 0, sizeof buf);
             if (!webui_script(win, "return window.__groveSmoke ? String(window.__groveSmoke).slice(0, 1000) : '';", 10,
                               buf, sizeof buf)) {
-                fprintf(stderr, "grove-ui: smoke poll failed\n");
+                fprintf(stderr, "grove: smoke poll failed\n");
                 webui_exit();
                 return 1;
             }

@@ -4,7 +4,7 @@ grove 0.1.0-alpha is a local full-text search tool: one C binary and a directory
 
 The retrieval is in the style of Groonga's bigram tokenizer: words for alphabetic text, overlapping bigrams for CJK, with positions, phrases, prefixes, and BM25. grove is not a Groonga database. It does not read Groonga files, and it does not link libgroonga or Lucene.
 
-Search is SQLite FTS4, compiled into the binary. The binary does not dynamically link libsqlite. FTS4 is the module with `offsets()` and `matchinfo()`, which is what ranking and the place list use. zlib is still linked for archives and compressed PDF streams.
+Search is SQLite FTS4, compiled into the binary. The binary does not dynamically link libsqlite. FTS4 is the module with `offsets()` and `matchinfo()`, which is what ranking and the place list use. zlib is compiled into the Linux and Windows builds for archives and compressed PDF streams. The macOS build uses the zlib that ships with macOS.
 
 ## Build
 
@@ -13,7 +13,15 @@ make
 make test
 ```
 
-`make` writes `./grove`. `make test` builds the unit tests with address and undefined-behavior sanitizers, then builds `./grove` and runs `tests/integration.sh`. The build refuses a wrapped allocation size, checks format strings, and links with a guarded stack and full RELRO. Grove's own C follows the SEI CERT C Coding Standard: a conversion reports failure, a size that would wrap is refused, and a file is measured with `fstat` on the descriptor that was opened. Running `grove` or `grove-ui` does not need Python.
+`make` writes `./grove`, or `grove.exe` on Windows. That one program is the commands and the window. On Linux and macOS, `make test` builds the unit tests with address and undefined-behavior sanitizers, then builds `./grove` and runs `tests/integration.sh`. On Windows, `make test` builds `grove.exe` and checks `--version`. The build refuses a wrapped allocation size, checks format strings, and links with a guarded stack and, on Linux, full RELRO. Grove's own C follows the SEI CERT C Coding Standard: a conversion reports failure, a size that would wrap is refused, and a file is measured with `fstat` on the descriptor that was opened. Running `grove` does not need Python. The first build clones [WebUI](https://github.com/webui-dev/webui) and packs the page. A later run of the program does not. A Windows copy uses that packed page.
+
+GitHub Actions builds that same file on every push. Each artifact is one platform:
+
+- `grove-linux-x86_64` is the Linux x86_64 executable.
+- `grove-macos-arm64` or `grove-macos-x86_64` is the macOS executable for that Mac.
+- `grove-windows-x86_64` is the Windows x86_64 executable, named `grove.exe`.
+
+`PLATFORM.txt` in the artifact names that platform. A command does not need a browser. The window does.
 
 ## Index
 
@@ -22,7 +30,7 @@ grove index ~/notes
 grove search '"full text"'
 ```
 
-The index lives in `$GROVE_INDEX`, or `$XDG_DATA_HOME/grove`, or `~/.local/share/grove`. `--index DIR` points at another directory. That directory holds `grove.db`. Move it with the binary. An index from before this format has to be removed and indexed again.
+The index lives in `$GROVE_INDEX`, or `$XDG_DATA_HOME/grove`, or `~/.local/share/grove`. On Windows, with `GROVE_INDEX` unset, it lives in `%LOCALAPPDATA%\grove`. `--index DIR` points at another directory. That directory holds `grove.db`. Move it with the binary. An index from before this format has to be removed and indexed again.
 
 ```sh
 grove --index /media/usb/grove index ~/notes
@@ -42,7 +50,7 @@ grove search --at /old/notes=/new/notes portable
 
 `--rebind` rewrites a stored root. `--at` only changes paths printed by that search. With one root, `--at /new/notes` is enough. An `=` inside a path cannot be used as the separator.
 
-`grove compact` rebuilds the full-text index and vacuums the database. `grove status` prints roots, document count, and the size of the stored text. `grove ui` opens the window on this index. `grove-ui` with a command is the same tool, and that command can run while the window is open.
+`grove compact` rebuilds the full-text index and vacuums the database. `grove status` prints roots, document count, and the size of the stored text. `grove ui` opens the window in this same program. With no command, `grove` does that. A command does not open a window, and it can run while a window is already open.
 
 `grove save` remembers a query in that index. `grove saved` lists them, newest first. `grove forget` drops one. The same list is what the window shows. An older index gains the list on the first save. It does not need to be indexed again.
 
@@ -55,20 +63,19 @@ grove search --at /old/notes=/new/notes portable
 ## Window
 
 ```sh
-make ui
-./grove-ui
+./grove
 grove ui
 ```
 
-`grove ui` opens the window. `grove-ui` with a command is the same tool: `grove-ui status`, `grove-ui index PATH`, and `grove-ui search` do what `grove` does. A command can run while the window is open. Both use the one index.
+`grove` with no command opens the window. `grove ui` does the same. `grove status`, `grove index PATH`, and `grove search` do not open a window. They use the one index.
 
 With no command, the window opens the installed browser on this same index and the same query language. Stemming, Fuzzy, and Concepts sit under the box. Stemming starts on. A related word is marked in blue. A watch stays an exact query. Two passages are listed under each file. Show more continues through the rest of that file. A click on the file name opens it with the system. A fetched page opens at its address. The list shows the sentence around the matched words. A click on a passage opens that place in its own tab and leaves the search where it is. Choosing the tab reads the extracted text, the chapter, and the page when the file recorded one, and marks that same sentence. Selecting text there offers Copy, Copy citation, and Save excerpt. A saved passage stays underlined. Further passages open as more tabs. On a wide window those titles stack on the right, above the contents. On a narrow window they stay in the top row. Earlier and later move through that text. The original file is still opened from the reader. `ext:` and `path:` in the query show up as chips; removing a chip searches again. The file types, folders, and months in the whole match sit beside those chips, each with a file count. Choosing one adds that chip. `title:` stays in the query. Narrow opens over the results when a record has a language, creator, type, coverage, or subject. Several names in one group match any of them. The groups combine. Clear drops those five and leaves the other chips. Save keeps the query that is in the box. Remembered queries sit under the help line. Choosing one searches again, and × forgets it. Note, under a passage, keeps a line of text on that place. × removes it. The passage itself still opens in the reader. Watch, under the help line, keeps that query and the files it matches. A count on a remembered query is how many of those files are new or changed. Choosing the count marks them seen. Unwatch leaves the remembered query.
 
 Search, Library, and Excerpts are tabs at the top of the window. The page widens with the window and stays centered. On a wide window, results and excerpts run in more than one column, and a book's contents sit beside the text. Excerpts lists passages saved from the reader, grouped by book, with the wording, the place, and a citation. A tag filters that list. Open returns to the passage and marks it. Copy all, Text, and JSON take the whole collection. The wording is kept in this window. The books stay in the library. Library does not slide the page aside. On a wide window, open books stack on the right, above that book's contents, and the page sits beside them. Library is a table of the Dublin Core record: title, creator, date, language, type, subject, coverage, and source. The shelf opens grouped by creator. A file named Title — Author shows that author until the record has one. Sort any column. The title opens the volume. Identifier and the rest of the record stay in Edit. At most 300 volumes are shown, the first of that order. Add a folder or a file from the desktop chooser, or a web page by its address. The first time Library opens, grove prepares a list of titles and paths; search waits while that finishes. Edit opens the fifteen Dublin Core elements in a dialog. They describe the volume. The text stays in the file. Remove takes the volume off the shelf and leaves the file on disk. Indexing its folder puts it back. The same list sits beside the shelf when the window is wide, and opens from Narrow when it is not. It fills in from the record. Author is the creator, form the type, period the coverage, and genre the subject.
 
-`grove-ui` uses the same compiled-in SQLite and also links WebUI, which needs a browser at runtime. `--index DIR` selects the index, as it does for `grove`. Firefox opens with the profile Grove, stored in `~/.local/share/grove/firefox`, so another program can keep the WebUI profile. The window shows Grove's icon.
+The window is WebUI, linked into this same file. It needs a browser at runtime. `--index DIR` selects the index. Firefox opens with the profile Grove, stored in `~/.local/share/grove/firefox`, so another program can keep the WebUI profile. On Linux the window shows Grove's icon when X11 is present. A command does not load X11.
 
-Saving `ui/page.html` reloads the open window. Saving `ui/main.c` rebuilds that program and swaps it in. The process and the index stay up, and the query in the box is kept. A compile error keeps the previous program and prints the compiler output. That is the same split as CToy: the host stays, and the program is replaced when a file is saved. A copy that cannot see those files uses the page packed at build time. `$GROVE_PAGE` names a different page file. Changes under `src/` or in `ui/host.c` still need `make ui` and a new process.
+Saving `ui/page.html` reloads the open window when that file is beside the program. Saving `ui/main.c` rebuilds that program and swaps it in. The process and the index stay up, and the query in the box is kept. A compile error keeps the previous program and prints the compiler output. That is the same split as CToy: the host stays, and the program is replaced when a file is saved. A copy that cannot see those files uses the page packed at build time, which is already inside the executable. `$GROVE_PAGE` names a different page file. Changes under `src/` or in `ui/host.c` still need `make` and a new process.
 
 ## Samples
 
@@ -76,7 +83,7 @@ Saving `ui/page.html` reloads the open window. Saving `ui/main.c` rebuilds that 
 
 ```sh
 ./grove --index samples/index index samples/books
-./grove-ui --index samples/index
+./grove --index samples/index
 ```
 
 ## Query

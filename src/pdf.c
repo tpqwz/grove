@@ -10,6 +10,25 @@
 #include <string.h>
 #include <zlib.h>
 
+/* Same result as the library memmem. Windows does not provide that function. */
+static void *grove_memmem(const void *hay, size_t hlen, const void *needle, size_t nlen) {
+    if (nlen == 0) {
+        return (void *)hay;
+    }
+    if (!hay || !needle || hlen < nlen) {
+        return NULL;
+    }
+    const unsigned char *h = hay;
+    const unsigned char *n = needle;
+    size_t last = hlen - nlen;
+    for (size_t i = 0; i <= last; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return NULL;
+}
+
 enum { OUTLINE_SEEN_MAX = 128, OUTLINE_CAP = 256 };
 
 static int u_accum(unsigned *v, unsigned digit) {
@@ -892,7 +911,7 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
             if (have_len && size_fits(n, data, length)) {
                 slen = length;
             } else {
-                const unsigned char *ed = (const unsigned char *)memmem(stream, n - data, "endstream", 9);
+                const unsigned char *ed = (const unsigned char *)grove_memmem(stream, n - data, "endstream", 9);
                 if (!ed) {
                     continue;
                 }
@@ -921,7 +940,7 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
             }
             unsigned obj = obj_num_before(bytes, bytes + i);
             if (pass == 0) {
-                if (memmem(use, un, "beginbfchar", 11) || memmem(use, un, "beginbfrange", 12)) {
+                if (grove_memmem(use, un, "beginbfchar", 11) || grove_memmem(use, un, "beginbfrange", 12)) {
                     int matched = 0;
                     for (int s = 0; s < nslots; s++) {
                         if (slots[s].uni_obj == obj && !slots[s].ready) {
@@ -949,8 +968,8 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
                 }
                 /* Page contents only, once a page catalog exists. An image
                  * stream can contain the letters Tj and is not the book. */
-                int textual = memmem(use, un, " Tj", 3) || memmem(use, un, " TJ", 3) || memmem(use, un, "Tj", 2) ||
-                              memmem(use, un, "TJ", 2);
+                int textual = grove_memmem(use, un, " Tj", 3) || grove_memmem(use, un, " TJ", 3) || grove_memmem(use, un, "Tj", 2) ||
+                              grove_memmem(use, un, "TJ", 2);
                 if ((!nuses || is_content) && textual) {
                     /* One form feed per text stream after the first. A PDF that
                      * stores one stream per page then has a real page number. */
@@ -1015,7 +1034,7 @@ static const unsigned char *pdf_obj(const unsigned char *b, size_t n, unsigned n
     const unsigned char *p = b;
     size_t left = n;
     while (left >= (size_t)pn) {
-        const unsigned char *f = memmem(p, left, pat, (size_t)pn);
+        const unsigned char *f = grove_memmem(p, left, pat, (size_t)pn);
         if (!f) {
             return NULL;
         }
@@ -1024,7 +1043,7 @@ static const unsigned char *pdf_obj(const unsigned char *b, size_t n, unsigned n
             while (s < b + n && isspace(*s)) {
                 s++;
             }
-            const unsigned char *end = memmem(s, (size_t)(b + n - s), "endobj", 6);
+            const unsigned char *end = grove_memmem(s, (size_t)(b + n - s), "endobj", 6);
             if (!end) {
                 return NULL;
             }
@@ -1040,7 +1059,7 @@ static const unsigned char *pdf_obj(const unsigned char *b, size_t n, unsigned n
 
 static unsigned ref_after(const unsigned char *s, size_t n, const char *key) {
     size_t kn = strlen(key);
-    const unsigned char *p = memmem(s, n, key, kn);
+    const unsigned char *p = grove_memmem(s, n, key, kn);
     if (!p) {
         return 0;
     }
@@ -1434,7 +1453,7 @@ static int collect_font_uses(const unsigned char *b, size_t n, FontUse **uses, i
 }
 
 static char *outline_title(const unsigned char *s, size_t n) {
-    const unsigned char *p = memmem(s, n, "/Title", 6);
+    const unsigned char *p = grove_memmem(s, n, "/Title", 6);
     if (!p) {
         return NULL;
     }
@@ -1470,9 +1489,9 @@ static char *outline_title(const unsigned char *s, size_t n) {
 }
 
 static unsigned outline_dest_page(const unsigned char *s, size_t n) {
-    const unsigned char *p = memmem(s, n, "/Dest", 5);
+    const unsigned char *p = grove_memmem(s, n, "/Dest", 5);
     if (!p) {
-        p = memmem(s, n, "/D", 2);
+        p = grove_memmem(s, n, "/D", 2);
         if (p && p > s && !isspace(p[-1]) && p[-1] != '/') {
             p = NULL;
         }
@@ -1481,7 +1500,7 @@ static unsigned outline_dest_page(const unsigned char *s, size_t n) {
         return 0;
     }
     const unsigned char *end = s + n;
-    const unsigned char *br = memmem(p, (size_t)(end - p), "[", 1);
+    const unsigned char *br = grove_memmem(p, (size_t)(end - p), "[", 1);
     if (!br || br > p + 32) {
         return 0;
     }
@@ -1562,7 +1581,7 @@ int pdf_sections(const unsigned char *bytes, size_t n, PdfSection **out, int *no
     const unsigned char *p = bytes;
     size_t left = n;
     while (left >= 9) {
-        const unsigned char *f = memmem(p, left, "/Outlines", 9);
+        const unsigned char *f = grove_memmem(p, left, "/Outlines", 9);
         if (!f) {
             break;
         }

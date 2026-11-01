@@ -1,15 +1,21 @@
 #include "fetch.h"
+#include "os.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <spawn.h>
-#include <stdio.h>
-#include <string.h>
 #include <sys/wait.h>
+#endif
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
+#if !defined(_WIN32)
 extern char **environ;
+#endif
 
 /* One page, saved under the index so the HTML indexer can read it. curl is a
  * separate program and the address is one argument. The body is capped here
@@ -677,7 +683,7 @@ int fetch_save_cap(const char *index_dir, const char *raw, size_t cap, char **sa
     if (write_file_atomic(dest, body, body_n, e) != 0) {
         goto fail;
     }
-    char *canon = realpath(dest, NULL);
+    char *canon = grove_realpath(dest, NULL);
     if (!canon) {
         err_set(e, "cannot save that page");
         goto fail;
@@ -747,7 +753,7 @@ int grove_fetch_into(Index *ix, const char *index_dir, const char *raw, IndexSta
         rc = -1;
     }
     if (rc == 0) {
-        char *canon = realpath(saved, NULL);
+        char *canon = grove_realpath(saved, NULL);
         rc = index_page_remember(ix, canon ? canon : saved, page, e);
         free(canon);
     }

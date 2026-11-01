@@ -1,7 +1,9 @@
+#include "os.h"
 #include "window_icon.h"
 #include "util.h"
 #include "webui.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
@@ -15,6 +17,57 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+
+/* libX11 is loaded only when the window asks for an icon. A command does
+ * not need it, so the program still starts where X11 is not installed. */
+static Display *(*p_XOpenDisplay)(const char *);
+static int (*p_XCloseDisplay)(Display *);
+static XErrorHandler (*p_XSetErrorHandler)(XErrorHandler);
+static Atom (*p_XInternAtom)(Display *, const char *, Bool);
+static int (*p_XGetWindowProperty)(Display *, Window, Atom, long, long, Bool, Atom, Atom *, int *, unsigned long *,
+                                   unsigned long *, unsigned char **);
+static int (*p_XFree)(void *);
+static Status (*p_XGetClassHint)(Display *, Window, XClassHint *);
+static int (*p_XSetClassHint)(Display *, Window, XClassHint *);
+static Status (*p_XGetWindowAttributes)(Display *, Window, XWindowAttributes *);
+static int (*p_XChangeProperty)(Display *, Window, Atom, Atom, int, int, const unsigned char *, int);
+static int (*p_XFlush)(Display *);
+
+static int x11_bind(void) {
+    void *h = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (!h) {
+        return -1;
+    }
+    p_XOpenDisplay = dlsym(h, "XOpenDisplay");
+    p_XCloseDisplay = dlsym(h, "XCloseDisplay");
+    p_XSetErrorHandler = dlsym(h, "XSetErrorHandler");
+    p_XInternAtom = dlsym(h, "XInternAtom");
+    p_XGetWindowProperty = dlsym(h, "XGetWindowProperty");
+    p_XFree = dlsym(h, "XFree");
+    p_XGetClassHint = dlsym(h, "XGetClassHint");
+    p_XSetClassHint = dlsym(h, "XSetClassHint");
+    p_XGetWindowAttributes = dlsym(h, "XGetWindowAttributes");
+    p_XChangeProperty = dlsym(h, "XChangeProperty");
+    p_XFlush = dlsym(h, "XFlush");
+    if (!p_XOpenDisplay || !p_XCloseDisplay || !p_XSetErrorHandler || !p_XInternAtom || !p_XGetWindowProperty ||
+        !p_XFree || !p_XGetClassHint || !p_XSetClassHint || !p_XGetWindowAttributes || !p_XChangeProperty ||
+        !p_XFlush) {
+        return -1;
+    }
+    return 0;
+}
+
+#define XOpenDisplay p_XOpenDisplay
+#define XCloseDisplay p_XCloseDisplay
+#define XSetErrorHandler p_XSetErrorHandler
+#define XInternAtom p_XInternAtom
+#define XGetWindowProperty p_XGetWindowProperty
+#define XFree p_XFree
+#define XGetClassHint p_XGetClassHint
+#define XSetClassHint p_XSetClassHint
+#define XGetWindowAttributes p_XGetWindowAttributes
+#define XChangeProperty p_XChangeProperty
+#define XFlush p_XFlush
 
 /* WebUI launches Firefox and can only set a favicon, which this window
  * never shows. The frame reads _NET_WM_ICON. This dock groups by class
@@ -392,7 +445,7 @@ static void apply_once(Display *dpy, const char *token, const long *data, int nl
             XChangeProperty(dpy, w, icon, XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, nlong);
         }
         if (!icon_announced && (!class_ok || !icon_ok)) {
-            fprintf(stderr, "grove-ui: the window is using Grove's icon\n");
+            fprintf(stderr, "grove: the window is using Grove's icon\n");
             fflush(stderr);
             icon_announced = 1;
         }
@@ -537,7 +590,7 @@ static int write_if_new(const char *path, const void *data, size_t n) {
     }
     err_clear(&e);
     if (write_file_atomic(path, data, n, &e) != 0) {
-        fprintf(stderr, "grove-ui: %s\n", e.msg[0] ? e.msg : "could not write the icon");
+        fprintf(stderr, "grove: %s\n", e.msg[0] ? e.msg : "could not write the icon");
         fflush(stderr);
         return -1;
     }
@@ -558,10 +611,7 @@ static void publish_launcher(void) {
     char text[PATH_MAX * 2 + 256];
     unsigned char *png = NULL;
     size_t png_n = 0;
-    ssize_t en;
     int nw;
-    const char *gone = " (deleted)";
-    size_t gone_n = strlen(gone);
     if (xdg && xdg[0]) {
         root = xstrdup(xdg);
     } else if (home && home[0]) {
@@ -570,14 +620,9 @@ static void publish_launcher(void) {
     if (!root) {
         return;
     }
-    en = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (en <= 0 || (size_t)en >= sizeof exe) {
+    if (grove_self_path(exe, sizeof exe) != 0) {
         free(root);
         return;
-    }
-    exe[en] = '\0';
-    if ((size_t)en > gone_n && memcmp(exe + en - (ssize_t)gone_n, gone, gone_n) == 0) {
-        exe[en - (ssize_t)gone_n] = '\0';
     }
     if (strchr(exe, '\n') || strchr(exe, '\r')) {
         free(root);
@@ -595,7 +640,7 @@ static void publish_launcher(void) {
     }
     nw = snprintf(text, sizeof text,
                   "[Desktop Entry]\n"
-                  "# Written by grove-ui.\n"
+                  "# Written by grove.\n"
                   "Type=Application\n"
                   "Name=Grove\n"
                   "Exec=%s\n"
@@ -625,6 +670,9 @@ static void *icon_main(void *arg) {
     int nlong = 0;
     (void)arg;
     publish_launcher();
+    if (x11_bind() != 0) {
+        return NULL;
+    }
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
         return NULL;

@@ -1,22 +1,24 @@
 #include "cli.h"
 #include "fetch.h"
 #include "index.h"
+#include "os.h"
 
 #include <errno.h>
-#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define GROVE_VERSION "0.1.0-alpha"
 
-static void usage(FILE *out) {
+void grove_usage(FILE *out) {
     fputs(
         "grove " GROVE_VERSION " — local full-text search\n"
         "\n"
-        "usage: grove [--index DIR] [--quiet] [--help] [--version] COMMAND ...\n"
+        "usage: grove [--index DIR] [--quiet] [--help] [--version] [COMMAND ...]\n"
+        "\n"
+        "With no command, grove opens the window on this index. That needs a\n"
+        "browser. A command does not open a window.\n"
         "\n"
         "  index [--force] [--rebind OLD NEW] [PATH...]\n"
         "      Index each PATH. With no PATH, refresh every fully indexed root.\n"
@@ -63,12 +65,15 @@ static void usage(FILE *out) {
         "      List watched queries that have new or changed files.\n"
         "  status\n"
         "  ui [--port N]\n"
-        "      Open the window on this index. grove-ui with a command is the\n"
-        "      same tool, and it can run while the window is open.\n"
+        "      Open the window in this same program. With no command, grove\n"
+        "      does that. A command can run while the window is open. Both\n"
+        "      use the one index. Firefox keeps the profile Grove, in\n"
+        "      ~/.local/share/grove/firefox.\n"
         "  help\n"
         "\n"
         "The index is grove.db in $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
-        "or ~/.local/share/grove. Copy the binary and that directory together.\n"
+        "or ~/.local/share/grove. On Windows it is %LOCALAPPDATA%\\grove.\n"
+        "Copy the binary and that directory together.\n"
         "An older index has to be removed and indexed again.\n",
         out);
 }
@@ -87,22 +92,7 @@ static void json_matchinfo(FILE *out, const MatchInfo *m) {
 }
 
 static char *default_index_dir(void) {
-    const char *env = getenv("GROVE_INDEX");
-    if (env && *env) {
-        return xstrdup(env);
-    }
-    const char *xdg = getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) {
-        return path_join(xdg, "grove");
-    }
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        home = "/tmp";
-    }
-    char *base = path_join(home, ".local/share");
-    char *full = base ? path_join(base, "grove") : NULL;
-    free(base);
-    return full;
+    return grove_index_dir();
 }
 
 static void json_escape(FILE *out, const char *s) {
@@ -579,31 +569,26 @@ int grove_is_command(const char *s) {
     return 0;
 }
 
+/* Words after "ui" that still belong to the window, not to a command. */
+static int window_args(int argc, char **argv) {
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "--smoke") == 0 || strcmp(argv[i], "--index") == 0) {
+            if (i + 1 >= argc) {
+                return 1;
+            }
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 static int launch_ui(const char *index_dir, int argc, char **argv) {
-    char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n <= 0 || (size_t)n >= sizeof exe) {
-        fprintf(stderr, "grove: cannot find this program\n");
-        return 1;
-    }
-    exe[n] = 0;
-    char *slash = strrchr(exe, '/');
-    if (!slash) {
-        fprintf(stderr, "grove: cannot find this program\n");
-        return 1;
-    }
-    const char *leaf = "grove-ui";
-    size_t room = sizeof exe - (size_t)(slash + 1 - exe);
-    if (strlen(leaf) + 1 > room) {
-        fprintf(stderr, "grove: cannot open the window\n");
-        return 1;
-    }
-    memcpy(slash + 1, leaf, strlen(leaf) + 1);
-    if (access(exe, X_OK) != 0) {
-        fprintf(stderr, "grove: the window program is not beside this one (%s)\n", exe);
-        return 1;
-    }
-    if (argc < 0) {
+    if (argc < 0 || !index_dir) {
         return 1;
     }
     size_t narg = 0;
@@ -616,16 +601,16 @@ static int launch_ui(const char *index_dir, int argc, char **argv) {
         fprintf(stderr, "grove: out of memory\n");
         return 1;
     }
-    av[0] = exe;
+    av[0] = "grove";
     av[1] = "--index";
     av[2] = (char *)index_dir;
     for (int i = 0; i < argc; i++) {
         av[3 + i] = argv[i];
     }
-    execv(exe, av);
-    fprintf(stderr, "grove: cannot open the window: %s\n", strerror(errno));
+    int ac = argc + 3;
+    int rc = window_args(argc, argv) ? grove_open_window(ac, av) : grove_cli(ac, av);
     free(av);
-    return 1;
+    return rc;
 }
 
 static int cmd_status(Index *ix) {
@@ -652,7 +637,7 @@ int grove_cli(int argc, char **argv) {
     int i = 1;
     for (; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            usage(stdout);
+            grove_usage(stdout);
             return 0;
         }
         if (strcmp(argv[i], "--version") == 0) {
@@ -678,12 +663,12 @@ int grove_cli(int argc, char **argv) {
         break;
     }
     if (i >= argc) {
-        usage(stderr);
+        grove_usage(stderr);
         return 1;
     }
     const char *cmd = argv[i++];
     if (strcmp(cmd, "help") == 0) {
-        usage(stdout);
+        grove_usage(stdout);
         return 0;
     }
     char *owned = NULL;

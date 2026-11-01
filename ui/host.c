@@ -2,77 +2,58 @@
 #include "fetch.h"
 #include "index.h"
 #include "mod.h"
+#include "os.h"
 #include "webui.h"
 #include "window_icon.h"
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-static void usage(FILE *out) {
-    fputs(
-        "grove-ui — search window for a grove index\n"
-        "\n"
-        "usage: grove-ui [--index DIR] [--port N] [COMMAND ...]\n"
-        "\n"
-        "With no command, opens a browser window on the grove index. The\n"
-        "window shows Grove's icon. The query language matches grove\n"
-        "search. Library adds a folder, a file, or a web page and keeps a\n"
-        "record for each volume. Narrow lists language, author, form,\n"
-        "period, and genre from that record.\n"
-        "A click on the file name opens it with the system. A fetched page\n"
-        "opens at its address.\n"
-        "A click on a passage opens that place when the reader can take a\n"
-        "line, a PDF page, or a found line. Otherwise it opens the file.\n"
-        "Save remembers the current query on this index.\n"
-        "Watch remembers that query and the files that match it.\n"
-        "Note keeps text on one passage.\n"
-        "\n"
-        "A command runs in this same program and leaves an open window\n"
-        "alone. Both use the one index:\n"
-        "\n"
-        "  grove-ui [--index DIR] status\n"
-        "  grove-ui [--index DIR] index PATH...\n"
-        "  grove-ui [--index DIR] fetch URL...\n"
-        "  grove-ui [--index DIR] search QUERY...\n"
-        "\n"
-        "grove-ui help prints the command manual.\n"
-        "\n"
-        "The index directory is $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
-        "or ~/.local/share/grove.\n"
-        "\n"
-        "Saving ui/page.html reloads the open window. Saving ui/main.c\n"
-        "rebuilds that program and swaps it in. The process and the index\n"
-        "stay up, and the query stays too. A compile error keeps the previous\n"
-        "program. A copy that cannot see those files uses the packed page.\n",
-        out);
+#if defined(_WIN32)
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+static void *dlopen(const char *path, int flags) {
+    (void)path;
+    (void)flags;
+    return NULL;
 }
+static void *dlsym(void *handle, const char *name) {
+    (void)handle;
+    (void)name;
+    return NULL;
+}
+static int dlclose(void *handle) {
+    (void)handle;
+    return 0;
+}
+static char *dlerror(void) {
+    return "live reload is not built on Windows";
+}
+#else
+extern char **environ;
+#endif
+
+#if !defined(__linux__)
+void grove_window_icon_start(size_t window) {
+    (void)window;
+}
+void grove_window_icon_stop(void) {}
+#endif
 
 static char *default_index_dir(void) {
-    const char *env = getenv("GROVE_INDEX");
-    if (env && *env) {
-        return xstrdup(env);
-    }
-    const char *xdg = getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) {
-        return path_join(xdg, "grove");
-    }
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        home = "/tmp";
-    }
-    char *base = path_join(home, ".local/share");
-    char *full = base ? path_join(base, "grove") : NULL;
-    free(base);
-    return full;
+    return grove_index_dir();
 }
 
 static int mtim_eq(const struct timespec *a, const struct timespec *b) {
@@ -90,22 +71,11 @@ static char *absolute_file(const char *path) {
     if (!path || access(path, R_OK) != 0) {
         return NULL;
     }
-    return realpath(path, NULL);
+    return grove_realpath(path, NULL);
 }
 
 static char *exe_dir(void) {
-    char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n <= 0) {
-        return NULL;
-    }
-    exe[n] = 0;
-    char *slash = strrchr(exe, '/');
-    if (!slash) {
-        return NULL;
-    }
-    *slash = 0;
-    return xstrdup(exe);
+    return grove_self_dir();
 }
 
 /* Returns a malloc'd absolute path, or NULL. Sets *missing when GROVE_PAGE is unreadable. */
@@ -115,7 +85,7 @@ static char *find_live_page(int *missing) {
     if (env && *env) {
         char *abs = absolute_file(env);
         if (!abs) {
-            fprintf(stderr, "grove-ui: cannot read %s\n", env);
+            fprintf(stderr, "grove: cannot read %s\n", env);
             *missing = 1;
         }
         return abs;
@@ -159,6 +129,7 @@ static int split_page(char *abs, char **root, char **name) {
     return 0;
 }
 
+#if !defined(_WIN32)
 static char *find_ui_dir(void) {
     char *dir = exe_dir();
     if (dir) {
@@ -180,6 +151,7 @@ static char *find_ui_dir(void) {
     }
     return NULL;
 }
+#endif
 
 static void print_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -194,27 +166,31 @@ static void print_file(const char *path) {
 }
 
 static int compile_mod(const char *ui_dir, const char *out, const char *err_path) {
-    pid_t pid = fork();
-    if (pid < 0) {
+    int fd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
         return -1;
     }
-    if (pid == 0) {
-        int fd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (fd < 0) {
-            _exit(127);
-        }
-        dup2(fd, STDOUT_FILENO);
-        dup2(fd, STDERR_FILENO);
-        if (fd > 2) {
-            close(fd);
-        }
-        char outarg[PATH_MAX];
-        int nw = snprintf(outarg, sizeof outarg, "OUT=%s", out);
-        if (nw < 0 || (size_t)nw >= sizeof outarg) {
-            _exit(127);
-        }
-        execlp("make", "make", "-C", ui_dir, "live-mod", outarg, (char *)NULL);
-        _exit(127);
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa) != 0) {
+        close(fd);
+        return -1;
+    }
+    int act = 0;
+    act |= posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
+    act |= posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
+    act |= posix_spawn_file_actions_addclose(&fa, fd);
+    char outarg[PATH_MAX];
+    int nw = snprintf(outarg, sizeof outarg, "OUT=%s", out);
+    char *args[] = {"make", "-C", (char *)ui_dir, "live-mod", outarg, NULL};
+    pid_t pid = 0;
+    int rc = -1;
+    if (nw > 0 && (size_t)nw < sizeof outarg && act == 0) {
+        rc = posix_spawnp(&pid, "make", &fa, NULL, args, environ);
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    close(fd);
+    if (rc != 0) {
+        return -1;
     }
     int st = 0;
     if (waitpid(pid, &st, 0) < 0) {
@@ -237,13 +213,13 @@ static int load_mod(Mod *m, const char *path) {
     memset(m, 0, sizeof *m);
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!h) {
-        fprintf(stderr, "grove-ui: %s\n", dlerror());
+        fprintf(stderr, "grove: %s\n", dlerror());
         return -1;
     }
     attach_fn attach = (attach_fn)dlsym(h, "grove_ui_attach");
     detach_fn detach = (detach_fn)dlsym(h, "grove_ui_detach");
     if (!attach || !detach) {
-        fprintf(stderr, "grove-ui: %s\n", dlerror());
+        fprintf(stderr, "grove: %s\n", dlerror());
         dlclose(h);
         return -1;
     }
@@ -313,47 +289,53 @@ static void *c_watch(void *arg) {
     struct timespec seen;
     memset(&seen, 0, sizeof seen);
     if (stat(main_c, &st) == 0) {
-        seen = st.st_mtim;
+        seen = grove_mtim(&st);
     }
     struct timespec pending;
     int have_pending = 0;
     memset(&pending, 0, sizeof pending);
     while (!c_stop) {
-        if (stat(main_c, &st) != 0 || mtim_eq(&st.st_mtim, &seen)) {
+        if (stat(main_c, &st) != 0) {
             have_pending = 0;
             usleep(100000);
             continue;
         }
-        if (!(have_pending && mtim_eq(&st.st_mtim, &pending))) {
-            pending = st.st_mtim;
+        struct timespec now = grove_mtim(&st);
+        if (mtim_eq(&now, &seen)) {
+            have_pending = 0;
+            usleep(100000);
+            continue;
+        }
+        if (!(have_pending && mtim_eq(&now, &pending))) {
+            pending = now;
             have_pending = 1;
             usleep(100000);
             continue;
         }
-        seen = st.st_mtim;
+        seen = now;
         have_pending = 0;
         pthread_mutex_lock(&swap_mu);
         if (!c_stop) {
             char out[PATH_MAX];
             int nw = snprintf(out, sizeof out, "%s/live/module-%d.so", ui_dir, ++mod_seq);
             if (nw < 0 || (size_t)nw >= sizeof out) {
-                fprintf(stderr, "grove-ui: module path is too long\n");
+                fprintf(stderr, "grove: module path is too long\n");
                 fflush(stderr);
                 pthread_mutex_unlock(&swap_mu);
                 continue;
             }
-            fprintf(stderr, "grove-ui: building %s\n", main_c);
+            fprintf(stderr, "grove: building %s\n", main_c);
             fflush(stderr);
             if (compile_mod(ui_dir, out, err_path) != 0) {
-                fprintf(stderr, "grove-ui: build failed, keeping the running program\n");
+                fprintf(stderr, "grove: build failed, keeping the running program\n");
                 print_file(err_path);
                 fflush(stderr);
                 unlink(out);
             } else if (swap_in(out, 1) != 0) {
-                fprintf(stderr, "grove-ui: could not load the new program, keeping the previous one\n");
+                fprintf(stderr, "grove: could not load the new program, keeping the previous one\n");
                 fflush(stderr);
             } else {
-                fprintf(stderr, "grove-ui: updated %s\n", main_c);
+                fprintf(stderr, "grove: updated %s\n", main_c);
                 fflush(stderr);
             }
         }
@@ -515,17 +497,21 @@ int main(int argc, char **argv) {
     if (wants_cli(argc, argv)) {
         return grove_cli(argc, argv);
     }
+    return grove_open_window(argc, argv);
+}
+
+int grove_open_window(int argc, char **argv) {
     const char *index_arg = NULL;
     size_t port = 0;
     const char *smoke = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            usage(stdout);
+            grove_usage(stdout);
             return 0;
         }
         if (strcmp(argv[i], "--index") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "grove-ui: --index needs a directory\n");
+                fprintf(stderr, "grove: --index needs a directory\n");
                 return 1;
             }
             index_arg = argv[++i];
@@ -533,14 +519,14 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--port") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "grove-ui: --port needs a number\n");
+                fprintf(stderr, "grove: --port needs a number\n");
                 return 1;
             }
             errno = 0;
             char *end = NULL;
             unsigned long v = strtoul(argv[++i], &end, 10);
             if (!end || end == argv[i] || *end || errno != 0 || v < 1 || v > 65535) {
-                fprintf(stderr, "grove-ui: --port must be from 1 to 65535\n");
+                fprintf(stderr, "grove: --port must be from 1 to 65535\n");
                 return 1;
             }
             port = (size_t)v;
@@ -548,19 +534,19 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--smoke") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "grove-ui: --smoke needs a query\n");
+                fprintf(stderr, "grove: --smoke needs a query\n");
                 return 1;
             }
             smoke = argv[++i];
             continue;
         }
-        fprintf(stderr, "grove-ui: unknown option %s\n", argv[i]);
+        fprintf(stderr, "grove: unknown option %s\n", argv[i]);
         return 1;
     }
 
     char *index_dir = index_arg ? xstrdup(index_arg) : default_index_dir();
     if (!index_dir) {
-        fprintf(stderr, "grove-ui: out of memory\n");
+        fprintf(stderr, "grove: out of memory\n");
         return 1;
     }
     Err e;
@@ -570,7 +556,7 @@ int main(int argc, char **argv) {
     Index *ix = index_open(index_dir, 0, &e);
     if (!ix) {
         snprintf(open_err, sizeof open_err, "%s", e.msg[0] ? e.msg : "could not open the index");
-        fprintf(stderr, "grove-ui: %s\n", open_err);
+        fprintf(stderr, "grove: %s\n", open_err);
     }
 
     int page_missing = 0;
@@ -589,23 +575,38 @@ int main(int argc, char **argv) {
         page_path = NULL;
     }
 
+#if defined(_WIN32)
+    /* The page is linked in. Windows does not dlopen a side module. */
+    ui_dir = NULL;
+#else
     ui_dir = find_ui_dir();
+#endif
     char mod_path[PATH_MAX];
     mod_path[0] = 0;
     if (ui_dir) {
         int nw = snprintf(mod_path, sizeof mod_path, "%s/live/module.so", ui_dir);
         if (nw < 0 || (size_t)nw >= sizeof mod_path) {
-            fprintf(stderr, "grove-ui: module path is too long\n");
+            fprintf(stderr, "grove: module path is too long\n");
             mod_path[0] = 0;
         }
         err_path = path_join(ui_dir, "live/build.err");
         char *main_c = path_join(ui_dir, "main.c");
         struct stat src, so;
         int src_ok = main_c && stat(main_c, &src) == 0;
-        int so_ok = stat(mod_path, &so) == 0;
-        if (src_ok && (!so_ok || mtim_newer(&src.st_mtim, &so.st_mtim))) {
+        int so_ok = mod_path[0] && stat(mod_path, &so) == 0;
+        struct timespec src_m;
+        struct timespec so_m;
+        memset(&src_m, 0, sizeof src_m);
+        memset(&so_m, 0, sizeof so_m);
+        if (src_ok) {
+            src_m = grove_mtim(&src);
+        }
+        if (so_ok) {
+            so_m = grove_mtim(&so);
+        }
+        if (src_ok && (!so_ok || mtim_newer(&src_m, &so_m))) {
             if (!err_path || compile_mod(ui_dir, mod_path, err_path) != 0) {
-                fprintf(stderr, "grove-ui: could not build %s\n", main_c ? main_c : "ui/main.c");
+                fprintf(stderr, "grove: could not build %s\n", main_c ? main_c : "ui/main.c");
                 if (err_path) {
                     print_file(err_path);
                 }
@@ -624,18 +625,9 @@ int main(int argc, char **argv) {
         }
         free(main_c);
     }
+    int builtin = 0;
     if (!mod_path[0] || access(mod_path, R_OK) != 0) {
-        fprintf(stderr, "grove-ui: no program module. Run make ui from the source tree.\n");
-        if (ix) {
-            index_close(ix);
-        }
-        free(index_dir);
-        free(page_path);
-        free(page_root);
-        free(page_name);
-        free(ui_dir);
-        free(err_path);
-        return 1;
+        builtin = 1;
     }
 
     size_t win = webui_new_window();
@@ -645,6 +637,9 @@ int main(int argc, char **argv) {
      * program is open, and Firefox will not start a second copy of it. */
     char *ff_profile = NULL;
     const char *home = getenv("HOME");
+    if (!home || !*home) {
+        home = getenv("USERPROFILE");
+    }
     if (home && *home) {
         char *share = path_join(home, ".local/share/grove");
         ff_profile = share ? path_join(share, "firefox") : NULL;
@@ -655,11 +650,11 @@ int main(int argc, char **argv) {
         free(ff_profile);
     }
     if (port && !webui_set_port(win, port)) {
-        fprintf(stderr, "grove-ui: port %zu is not available\n", port);
+        fprintf(stderr, "grove: port %zu is not available\n", port);
         return 1;
     }
     if (page_root && !webui_set_root_folder(win, page_root)) {
-        fprintf(stderr, "grove-ui: could not serve %s\n", page_root);
+        fprintf(stderr, "grove: could not serve %s\n", page_root);
         free(page_path);
         free(page_root);
         free(page_name);
@@ -678,7 +673,21 @@ int main(int argc, char **argv) {
     host_ui.page_name = page_name;
     host_ui.smoke = smoke;
 
-    if (load_mod(&host_mod, mod_path) != 0 || host_mod.attach(&host_ui) != 0) {
+    if (builtin) {
+        if (grove_ui_attach(&host_ui) != 0) {
+            webui_clean();
+            if (ix) {
+                index_close(ix);
+            }
+            free(index_dir);
+            free(page_path);
+            free(page_root);
+            free(page_name);
+            free(ui_dir);
+            free(err_path);
+            return 1;
+        }
+    } else if (load_mod(&host_mod, mod_path) != 0 || host_mod.attach(&host_ui) != 0) {
         close_mod(&host_mod, 0);
         webui_clean();
         if (ix) {
@@ -695,9 +704,9 @@ int main(int argc, char **argv) {
 
     pthread_t cthread;
     int cwatching = 0;
-    char *main_c = ui_dir && !smoke ? path_join(ui_dir, "main.c") : NULL;
+    char *main_c = !builtin && ui_dir && !smoke ? path_join(ui_dir, "main.c") : NULL;
     if (main_c) {
-        fprintf(stderr, "grove-ui: watching %s\n", main_c);
+        fprintf(stderr, "grove: watching %s\n", main_c);
         fflush(stderr);
         cwatching = pthread_create(&cthread, NULL, c_watch, main_c) == 0;
     }
@@ -711,7 +720,11 @@ int main(int argc, char **argv) {
         pthread_mutex_unlock(&swap_mu);
         pthread_join(cthread, NULL);
     }
-    close_mod(&host_mod, 0);
+    if (builtin) {
+        grove_ui_detach();
+    } else {
+        close_mod(&host_mod, 0);
+    }
     webui_clean();
     if (ix) {
         index_close(ix);

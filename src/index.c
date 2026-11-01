@@ -1,4 +1,5 @@
 #include "index.h"
+#include "os.h"
 
 #include "extract.h"
 #include "fts_tok.h"
@@ -618,8 +619,9 @@ static int consider_file(Index *ix, int64_t root, const char *rel, const char *a
         return db_fail(ix, e, "index");
     }
     sqlite3_finalize(stq);
-    int64_t sec = (int64_t)stt.st_mtim.tv_sec;
-    int nsec = (int)stt.st_mtim.tv_nsec;
+    struct timespec mt = grove_mtim(&stt);
+    int64_t sec = (int64_t)mt.tv_sec;
+    int nsec = (int)mt.tv_nsec;
     int64_t size = (int64_t)stt.st_size;
     if (have && !ix->force && omtime == sec && onsec == nsec && osize == size && obytes > 0) {
         scope_keep(scope, rel);
@@ -805,7 +807,7 @@ static int walk(Index *ix, int64_t root, int slot, const char *rel, int depth, S
             break;
         }
         struct stat stt;
-        if (lstat(child, &stt) != 0 || S_ISLNK(stt.st_mode)) {
+        if (grove_lstat(child, &stt) != 0 || S_ISLNK(stt.st_mode)) {
             free(child);
             free(crel);
             continue;
@@ -827,7 +829,7 @@ static int walk(Index *ix, int64_t root, int slot, const char *rel, int depth, S
 }
 
 static int add_inner(Index *ix, const char *path, IndexStats *st, Err *e) {
-    char *canon = realpath(path, NULL);
+    char *canon = grove_realpath(path, NULL);
     if (!canon) {
         if (root_exact(ix, path) >= 0) {
             err_set(e, "root %s is not available; rebind it if the drive moved", path);
@@ -991,12 +993,12 @@ int index_rebind(Index *ix, const char *from, const char *to, Err *e) {
         err_set(e, "index is open read-only");
         return -1;
     }
-    char *np = realpath(to, NULL);
+    char *np = grove_realpath(to, NULL);
     if (!np) {
         err_set(e, "cannot resolve %s: %s", to, strerror(errno));
         return -1;
     }
-    char *op = realpath(from, NULL);
+    char *op = grove_realpath(from, NULL);
     const char *key = op ? op : from;
     int slot = root_exact(ix, key);
     if (slot < 0) {
@@ -1380,7 +1382,8 @@ static int parse_offsets(const char *s, MatchOff **out, int *nout, int *nmatches
         }
         p = end;
         total++;
-        if (start < 0 || len < 0 || start > UINT32_MAX || len > UINT32_MAX || n >= GROVE_OFFSET_MAX) {
+        if (start < 0 || len < 0 || (uint64_t)start > UINT32_MAX || (uint64_t)len > UINT32_MAX ||
+            n >= GROVE_OFFSET_MAX) {
             continue;
         }
         if (n == cap) {
@@ -1569,7 +1572,7 @@ void facets_free(Facets *f) {
 static int same_month(int64_t sec, int year, int mon) {
     time_t t = (time_t)sec;
     struct tm tm;
-    if (!localtime_r(&t, &tm)) {
+    if (!grove_localtime(&t, &tm)) {
         return 0;
     }
     return tm.tm_year + 1900 == year && tm.tm_mon + 1 == mon;
@@ -1578,7 +1581,7 @@ static int same_month(int64_t sec, int year, int mon) {
 static char *month_key(int64_t sec) {
     time_t t = (time_t)sec;
     struct tm tm;
-    if (!localtime_r(&t, &tm)) {
+    if (!grove_localtime(&t, &tm)) {
         return NULL;
     }
     char buf[32];
@@ -3074,7 +3077,7 @@ Index *index_open(const char *dir, int writable, Err *e) {
         index_close(ix);
         return NULL;
     }
-    char *real = realpath(dir, NULL);
+    char *real = grove_realpath(dir, NULL);
     ix->realdir = real ? real : xstrdup(dir);
     return ix;
 }

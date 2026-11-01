@@ -1,5 +1,7 @@
 grove
+grove.exe
 grove-test
+grove-test.exe
 grove-ui
 *.o
 *.tmp

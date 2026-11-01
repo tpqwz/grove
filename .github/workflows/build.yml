@@ -8,11 +8,104 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libx11-dev python3
       - name: Build and test
         run: make test
+      - name: Check the one executable
+        run: |
+          set -euo pipefail
+          ./grove --version
+          ./grove help >/dev/null
+          ./grove ui --help >/dev/null
+          nm -g grove | grep -q grove_ui_attach
+          nm -g grove | grep -q webui_show
+          if ldd grove | grep -E 'libz\.so|libX11'; then
+            echo "grove should not need libz or libX11 to start" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp grove dist/grove
+          printf '%s\n' 'grove 0.1.0-alpha' 'linux x86_64' 'This archive is the Linux x86_64 build.' > dist/PLATFORM.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grove-linux-x86_64
+          path: |
+            dist/grove
+            dist/PLATFORM.txt
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: make test
+      - name: Package this Mac
+        id: pack
+        run: |
+          set -euo pipefail
+          ./grove --version
+          ./grove help >/dev/null
+          ./grove ui --help >/dev/null
+          nm -g grove | grep -q grove_ui_attach
+          nm -g grove | grep -q webui_show
+          case "$(uname -m)" in
+            arm64|aarch64) arch=arm64 ;;
+            x86_64) arch=x86_64 ;;
+            *) arch="$(uname -m)" ;;
+          esac
+          mkdir -p dist
+          cp grove dist/grove
+          printf '%s\n' 'grove 0.1.0-alpha' "macos ${arch}" "This archive is the macOS ${arch} build." > dist/PLATFORM.txt
+          echo "arch=${arch}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grove-macos-${{ steps.pack.outputs.arch }}
+          path: |
+            dist/grove
+            dist/PLATFORM.txt
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            python
+            curl
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-zlib
+      - name: Build and smoke
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          make test
+          ./grove.exe --version
+          ./grove.exe help >/dev/null
+          ./grove.exe ui --help >/dev/null
+          d=$(mktemp -d)
+          printf '%s\n' 'portable search lives here' > "$d/note.txt"
+          ./grove.exe --index "$d/idx" index "$d"
+          ./grove.exe --index "$d/idx" search 'portable search' | grep -q 'note.txt'
+          rm -rf "$d"
+          mkdir -p dist
+          cp grove.exe dist/grove.exe
+          printf '%s\n' 'grove 0.1.0-alpha' 'windows x86_64' 'This archive is the Windows x86_64 build.' > dist/PLATFORM.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grove-windows-x86_64
+          path: |
+            dist/grove.exe
+            dist/PLATFORM.txt
+          if-no-files-found: error

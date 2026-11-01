@@ -22,8 +22,10 @@ jobs:
           ./grove --version
           ./grove help >/dev/null
           ./grove ui --help >/dev/null
-          nm -g grove | grep -q grove_ui_attach
-          nm -g grove | grep -q webui_show
+          # grep -q would close the pipe early. LLVM nm treats that as a fatal error.
+          syms=$(nm -g grove)
+          grep -q grove_ui_attach <<<"$syms"
+          grep -q webui_show <<<"$syms"
           if ldd grove | grep -E 'libz\.so|libX11'; then
             echo "grove should not need libz or libX11 to start" >&2
             exit 1
@@ -52,8 +54,10 @@ jobs:
           ./grove --version
           ./grove help >/dev/null
           ./grove ui --help >/dev/null
-          nm -g grove | grep -q grove_ui_attach
-          nm -g grove | grep -q webui_show
+          # grep -q would close the pipe early. LLVM nm treats that as a fatal error.
+          syms=$(nm -g grove)
+          grep -q grove_ui_attach <<<"$syms"
+          grep -q webui_show <<<"$syms"
           case "$(uname -m)" in
             arm64|aarch64) arch=arm64 ;;
             x86_64) arch=x86_64 ;;

@@ -4,8 +4,11 @@
 #include "fetch.h"
 #include "index.h"
 #include "pdf.h"
+#include "persona.h"
 #include "text.h"
 #include "zip.h"
+
+#include <dirent.h>
 
 #include "sqlite3.h"
 
@@ -2263,6 +2266,36 @@ static void test_cert(void) {
     buf_free(&fonts);
     free(title);
 
+    const char *split =
+        "%PDF-1.4\n"
+        "1 0 obj\n<< /Type /Page /Contents [2 0 R 3 0 R] >>\nendobj\n"
+        "2 0 obj\n<< /Length 12 >>\nstream\n(Alpha) Tj\nendstream\nendobj\n"
+        "3 0 obj\n<< /Length 11 >>\nstream\n(Beta) Tj\nendstream\nendobj\n"
+        "4 0 obj\n<< /Type /Page /Contents 5 0 R >>\nendobj\n"
+        "5 0 obj\n<< /Length 13 >>\nstream\n(Gamma) Tj\nendstream\nendobj\n";
+    buf_init(&text);
+    title = NULL;
+    err_clear(&e);
+    CHECK(pdf_extract((const unsigned char *)split, strlen(split), &text, &title, &e) == 0);
+    CHECK(text.data && strstr(text.data, "Alpha") && strstr(text.data, "Beta") && strstr(text.data, "Gamma"));
+    {
+        int feeds = 0;
+        const char *ff = NULL;
+        if (text.data) {
+            for (size_t i = 0; text.data[i]; i++) {
+                if (text.data[i] == '\f') {
+                    feeds++;
+                    ff = text.data + i;
+                }
+            }
+        }
+        const char *alpha = text.data ? strstr(text.data, "Alpha") : NULL;
+        const char *beta = text.data ? strstr(text.data, "Beta") : NULL;
+        CHECK(feeds == 1 && ff && alpha && beta && alpha < ff && beta < ff && strstr(ff, "Gamma"));
+    }
+    buf_free(&text);
+    free(title);
+
     Buf doc;
     buf_init(&doc);
     CHECK(buf_puts(&doc, "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n") == 0);
@@ -2893,6 +2926,484 @@ done:
     rm_rf(root);
 }
 
+static void put_persona(Index *ix, const char *path, const char *title, const char *creator, const char *date,
+                        const char *source, const char *contributor) {
+    Volume rec;
+    Err e;
+    err_clear(&e);
+    memset(&rec, 0, sizeof rec);
+    rec.path = (char *)path;
+    rec.title = (char *)(title ? title : "");
+    rec.creator = (char *)(creator ? creator : "");
+    rec.date = (char *)(date ? date : "");
+    rec.language = "";
+    rec.type = "";
+    rec.subject = "";
+    rec.coverage = "";
+    rec.source = (char *)(source ? source : "");
+    rec.description = "";
+    rec.publisher = "";
+    rec.contributor = (char *)(contributor ? contributor : "");
+    rec.format = "";
+    rec.identifier = "";
+    rec.relation = "";
+    rec.rights = "";
+    if (index_catalog_put(ix, &rec, &e) != 0) {
+        fprintf(stderr, "persona catalog %s: %s\n", path ? path : "", e.msg);
+        fails++;
+    }
+}
+
+static int persona_is(const Personas *p, const char *name, const char *role, const char *title) {
+    int i;
+    for (i = 0; i < (p ? p->n : 0); i++) {
+        if (p->links[i].name && strcmp(p->links[i].name, name) == 0 && p->links[i].role &&
+            strcmp(p->links[i].role, role) == 0 &&
+            (!title || (p->links[i].title && strcmp(p->links[i].title, title) == 0))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int persona_name_n(const Personas *p, const char *name) {
+    int i;
+    int n = 0;
+    for (i = 0; i < (p ? p->n : 0); i++) {
+        if (p->links[i].name && strcmp(p->links[i].name, name) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void test_personas(void) {
+    char tmpl[] = "/tmp/grove-persona-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = root ? path_join(root, "docs") : NULL;
+    char *idx = root ? path_join(root, "idx") : NULL;
+    const char *names[] = {"Iliad \xE2\x80\x94 Not Homer.txt", "Essay.txt", "Poem \xE2\x80\x94 Sappho.txt", "Paine.txt",
+                           "Ellis.txt"};
+    char *paths[5];
+    Index *ix = NULL;
+    Library lib;
+    Personas people;
+    Err e;
+    int i;
+    const PersonaLink *homer = NULL;
+    memset(paths, 0, sizeof paths);
+    memset(&lib, 0, sizeof lib);
+    memset(&people, 0, sizeof people);
+    err_clear(&e);
+    if (!root || !docs || !idx || mkdir(docs, 0700) != 0) {
+        fprintf(stderr, "persona corpus\n");
+        fails++;
+        goto done;
+    }
+    for (i = 0; i < 5; i++) {
+        paths[i] = path_join(docs, names[i]);
+        if (!paths[i] || write_file(paths[i], "a line of the book\n", 19) != 0) {
+            fails++;
+            goto done;
+        }
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "persona open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (index_add(ix, docs, &st, &e) != 0) {
+        fprintf(stderr, "persona add: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    put_persona(ix, paths[0], "The Iliad", "Homer", "c. 8th century BCE", "Translated by Samuel Butler, 1900",
+                "Author: Homer");
+    put_persona(ix, paths[1], "", "Plato ; Aristotle", "", "Project Gutenberg",
+                "Editor: Ada Lovelace; editor: ada lovelace; Speaker: Grace Hopper; Illustrator: Mary Beale");
+    put_persona(ix, paths[3], "", "Thomas Paine", "", "Edited by Merwin Roe, 1907",
+                "Read by Claire Danes; Spoken by Mark Rylance");
+    put_persona(ix, paths[4], "", "", "", "Translated by William Ellis.", "Translator: J. Solomon.");
+    CHECK(index_personas(ix, &people, &e) == 0);
+    CHECK(people.truncated == 0);
+    CHECK(people.n == 14);
+    CHECK(people.links && strcmp(people.links[0].name, "Ada Lovelace") == 0);
+    CHECK(people.links && strcmp(people.links[0].role, "Editor") == 0);
+    CHECK(persona_name_n(&people, "Homer") == 1);
+    CHECK(persona_is(&people, "Homer", "Author", "The Iliad"));
+    CHECK(!persona_is(&people, "Not Homer", "Author", NULL));
+    CHECK(persona_is(&people, "Samuel Butler", "Translator", "The Iliad"));
+    CHECK(persona_is(&people, "Plato", "Author", NULL));
+    CHECK(persona_is(&people, "Aristotle", "Author", NULL));
+    CHECK(persona_is(&people, "Ada Lovelace", "Editor", NULL));
+    CHECK(persona_name_n(&people, "ada lovelace") == 0);
+    CHECK(persona_is(&people, "Grace Hopper", "Speaker", NULL));
+    CHECK(persona_is(&people, "Mary Beale", "Illustrator", NULL));
+    CHECK(!persona_is(&people, "Project Gutenberg", "Contributor", NULL));
+    CHECK(persona_name_n(&people, "Project Gutenberg") == 0);
+    CHECK(persona_is(&people, "Sappho", "Author", NULL));
+    CHECK(persona_is(&people, "Thomas Paine", "Author", NULL));
+    CHECK(persona_is(&people, "Merwin Roe", "Editor", NULL));
+    CHECK(persona_is(&people, "Claire Danes", "Speaker", NULL));
+    CHECK(persona_is(&people, "Mark Rylance", "Speaker", NULL));
+    CHECK(persona_is(&people, "William Ellis", "Translator", NULL));
+    CHECK(persona_is(&people, "J. Solomon", "Translator", NULL));
+    CHECK(persona_name_n(&people, "J. Solomon.") == 0);
+    for (i = 0; i < people.n; i++) {
+        if (people.links[i].name && strcmp(people.links[i].name, "Homer") == 0) {
+            homer = &people.links[i];
+        }
+    }
+    CHECK(homer && homer->date && strcmp(homer->date, "c. 8th century BCE") == 0);
+    CHECK(index_library_list(ix, "Butler", &lib, &e) == 0);
+    CHECK(listed(&lib, "Iliad"));
+    library_free(&lib);
+    CHECK(index_library_list(ix, "Claire", &lib, &e) == 0);
+    CHECK(listed(&lib, "Paine"));
+    library_free(&lib);
+    CHECK(index_library_list(ix, "Merwin", &lib, &e) == 0);
+    CHECK(listed(&lib, "Paine"));
+done:
+    personas_free(&people);
+    library_free(&lib);
+    if (ix) {
+        index_close(ix);
+    }
+    for (i = 0; i < 5; i++) {
+        free(paths[i]);
+    }
+    free(docs);
+    free(idx);
+    rm_rf(root);
+}
+
+static const char *persona_hosts[] = {"upload.wikimedia.org", "en.wikipedia.org", "www.wikidata.org", "query.wikidata.org"};
+
+static int persona_file(const char *dir, const char *suffix, char **out) {
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    *out = NULL;
+    if (!d) {
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        size_t n = strlen(de->d_name);
+        size_t sn = strlen(suffix);
+        if (n > sn && strcmp(de->d_name + n - sn, suffix) == 0) {
+            free(*out);
+            *out = path_join(dir, de->d_name);
+        }
+    }
+    closedir(d);
+    return *out ? 0 : -1;
+}
+
+static void test_persona_profile(void) {
+    Err e;
+    char *url = NULL;
+    PersonaProfile p;
+    char tmpl[] = "/tmp/grove-profile-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *people = root ? path_join(root, "personas") : NULL;
+    char *json = NULL;
+    char *marker = root ? path_join(root, "gotcha.json") : NULL;
+    char *secret = root ? path_join(root, "secret") : NULL;
+    const char *search =
+        "{\"search\":["
+        "{\"id\":\"Q84473023\",\"label\":\"Aristotle\",\"description\":\"male given name\"},"
+        "{\"id\":\"Q1191622\",\"label\":\"Aristotle\",\"description\":\"lunar crater\"},"
+        "{\"id\":\"Q868\",\"label\":\"Aristotle\",\"description\":\"Greek philosopher\"},"
+        "{\"id\":\"Q5\",\"label\":\"Not a person\",\"description\":\"writer\"}"
+        "]}";
+    const char *entity =
+        "{\"entities\":{\"Q868\":{"
+        "\"sitelinks\":{\"enwiki\":{\"title\":\"Aristotle\"}},"
+        "\"aliases\":{\"en\":[{\"value\":\"Aristotle\"},{\"value\":\"Aristoteles\"},{\"value\":\"The Stagirite\"}]}"
+        "}}}";
+    const char *summary =
+        "{\"extract\":\"Aristotle was an ancient Greek philosopher.\","
+        "\"description\":\"Ancient Greek philosopher and polymath (384–322 BC)\","
+        "\"thumbnail\":{\"source\":\"https://upload.wikimedia.org/wikipedia/commons/thumb/a/a4/Aristotle.jpg\"},"
+        "\"content_urls\":{\"desktop\":{\"page\":\"https://en.wikipedia.org/wiki/Aristotle\"}}}";
+    const char *sparql =
+        "{\"results\":{\"bindings\":["
+        "{\"birth\":{\"value\":\"-0384-01-01T00:00:00Z\"},\"death\":{\"value\":\"-0322-01-01T00:00:00Z\"},"
+        "\"occLabel\":{\"value\":\"philosopher\"},\"workLabel\":{\"value\":\"Poetics\"},"
+        "\"date\":{\"value\":\"-0335-01-01T00:00:00Z\"},"
+        "\"article\":{\"value\":\"https://en.wikipedia.org/wiki/Poetics_(Aristotle)\"}},"
+        "{\"occLabel\":{\"value\":\"philosopher\"},\"workLabel\":{\"value\":\"Poetics\"},"
+        "\"article\":{\"value\":\"https://en.wikipedia.org/wiki/Poetics_(Aristotle)\"}},"
+        "{\"occLabel\":{\"value\":\"Q12345\"},\"workLabel\":{\"value\":\"Q999\"},"
+        "\"article\":{\"value\":\"http://169.254.169.254/latest\"}},"
+        "{\"occLabel\":{\"value\":\"biologist\"},\"workLabel\":{\"value\":\"Metaphysics\"},"
+        "\"article\":{\"value\":\"https://evil.example/Metaphysics\"}}"
+        "]}}";
+    const char *bad_summary =
+        "{\"extract\":\"x\",\"description\":\"d\","
+        "\"thumbnail\":{\"source\":\"https://evil.example/a.jpg\"},"
+        "\"content_urls\":{\"desktop\":{\"page\":\"javascript:alert(1)\"}}}";
+    /* Live Wikipedia summaries put the portrait on thumb.wikimedia.org, with a
+     * campaign query. The same path on upload.wikimedia.org is the photograph. */
+    const char *thumb_summary =
+        "{\"extract\":\"Aristotle was an ancient Greek philosopher.\","
+        "\"thumbnail\":{\"source\":\"https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ae/"
+        "Aristotle_Altemps_Inv8575.jpg/330px-Aristotle_Altemps_Inv8575.jpg"
+        "?utm_source=en.wikipedia.org&utm_campaign=api&utm_content=thumbnail\"}}";
+    const char *thumb_port =
+        "{\"thumbnail\":{\"source\":\"https://THUMB.WIKIMEDIA.ORG:443/wikipedia/commons/thumb/a.jpg\"}}";
+    const char *thumb_evil =
+        "{\"thumbnail\":{\"source\":\"https://thumb.wikimedia.org.evil/wikipedia/commons/thumb/a.jpg\"}}";
+    const char *thumb_http =
+        "{\"thumbnail\":{\"source\":\"http://thumb.wikimedia.org/wikipedia/commons/thumb/a.jpg\"}}";
+    const char *thumb_user =
+        "{\"thumbnail\":{\"source\":\"https://user:pass@thumb.wikimedia.org/wikipedia/a.jpg\"}}";
+    const char *thumb_other =
+        "{\"thumbnail\":{\"source\":\"https://thumb.wikimedia.org/other/a.jpg\"}}";
+    const char *thumb_kept = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ae/"
+                             "Aristotle_Altemps_Inv8575.jpg/330px-Aristotle_Altemps_Inv8575.jpg";
+    const char *given = "{\"search\":[{\"id\":\"Q1\",\"label\":\"Homer\",\"description\":\"male given name\"}]}";
+    const char *crater = "{\"search\":[{\"id\":\"Q1\",\"label\":\"Aristotle\",\"description\":\"lunar crater\"}]}";
+    const char *contains =
+        "{\"search\":[{\"id\":\"Q5\",\"label\":\"Aristotle of Stageira\",\"description\":\"ancient writer\"}]}";
+    const char *kant =
+        "{\"results\":{\"bindings\":[{\"birth\":{\"value\":\"+1724-04-22T00:00:00Z\"},"
+        "\"workLabel\":{\"value\":\"Critique\"},\"date\":{\"value\":\"+0000-01-01T00:00:00Z\"}}]}}";
+    unsigned char *jpg = NULL;
+    PersonaProfile made;
+    PersonaProfile hippo;
+    PersonaProfile loaded;
+    char long_name[202];
+    memset(&p, 0, sizeof p);
+    memset(&made, 0, sizeof made);
+    memset(&hippo, 0, sizeof hippo);
+    memset(&loaded, 0, sizeof loaded);
+    err_clear(&e);
+    memset(long_name, 'a', 201);
+    long_name[201] = 0;
+
+    CHECK(fetch_https_allowed("https://upload.wikimedia.org/wikipedia/commons/thumb/a.jpg", persona_hosts, 4) == 1);
+    CHECK(fetch_https_allowed("https://upload.wikimedia.org:443/a.jpg", persona_hosts, 4) == 1);
+    CHECK(fetch_https_allowed("https://UPLOAD.WIKIMEDIA.ORG/a.jpg", persona_hosts, 4) == 1);
+    CHECK(fetch_https_allowed("http://upload.wikimedia.org/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://upload.wikimedia.org.evil/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://evil.upload.wikimedia.org/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://user:pass@upload.wikimedia.org/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://127.0.0.1/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://upload.wikimedia.org:444/a.jpg", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://169.254.169.254/", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("file:///etc/passwd", persona_hosts, 4) == 0);
+    CHECK(fetch_https_allowed("https://en.wikipedia.org/wiki/Aristotle", persona_hosts, 4) == 1);
+    CHECK(fetch_https_allowed("https://en.wikipedia.org.attacker.net/wiki/Aristotle", persona_hosts, 4) == 0);
+
+    CHECK(persona_lookup_url(PERSONA_FIND, "Aristotle&format=xml", &url, &e) == 0);
+    CHECK(url && strstr(url, "https://www.wikidata.org/w/api.php?action=wbsearchentities&search=Aristotle%26format%3Dxml&") == url);
+    free(url);
+    url = NULL;
+    CHECK(persona_lookup_url(PERSONA_FIND, "  ", &url, &e) != 0);
+    CHECK(url == NULL);
+    CHECK(persona_lookup_url(PERSONA_FIND, long_name, &url, &e) != 0);
+    CHECK(persona_lookup_url(PERSONA_ENTITY, "Q868", &url, &e) == 0);
+    CHECK(url && strstr(url, "https://www.wikidata.org/") == url);
+    CHECK(url && strstr(url, "ids=Q868") != NULL);
+    free(url);
+    url = NULL;
+    CHECK(persona_lookup_url(PERSONA_ENTITY, "Q868;SELECT", &url, &e) != 0);
+    CHECK(url == NULL);
+    CHECK(persona_lookup_url(PERSONA_SPARQL, "Q868 OR 1", &url, &e) != 0);
+    CHECK(persona_lookup_url(PERSONA_SUMMARY, "Foo Bar", &url, &e) == 0);
+    CHECK(url && strcmp(url, "https://en.wikipedia.org/api/rest_v1/page/summary/Foo%20Bar") == 0);
+    free(url);
+    url = NULL;
+    CHECK(persona_lookup_url(PERSONA_SUMMARY, "https://evil.example/x", &url, &e) == 0);
+    CHECK(url && strncmp(url, "https://en.wikipedia.org/api/rest_v1/page/summary/", 50) == 0);
+    CHECK(url && strstr(url, "https://evil") == NULL);
+    free(url);
+    url = NULL;
+
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), summary, strlen(summary),
+                                sparql, strlen(sparql), &p, &e) == 0);
+    CHECK(p.state == PERSONA_READY);
+    CHECK(p.qid && strcmp(p.qid, "Q868") == 0);
+    CHECK(p.description && strcmp(p.description, "Ancient Greek philosopher and polymath (384–322 BC)") == 0);
+    CHECK(p.summary && strcmp(p.summary, "Aristotle was an ancient Greek philosopher.") == 0);
+    CHECK(p.born && strcmp(p.born, "384 BCE") == 0);
+    CHECK(p.died && strcmp(p.died, "322 BCE") == 0);
+    CHECK(p.occupation && strcmp(p.occupation, "philosopher, biologist") == 0);
+    CHECK(p.wikipedia && strcmp(p.wikipedia, "https://en.wikipedia.org/wiki/Aristotle") == 0);
+    CHECK(p.photo_url && strcmp(p.photo_url, "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a4/Aristotle.jpg") == 0);
+    CHECK(p.alias_n == 2);
+    CHECK(p.aliases && strcmp(p.aliases[0], "Aristoteles") == 0);
+    CHECK(p.aliases && strcmp(p.aliases[1], "The Stagirite") == 0);
+    CHECK(p.work_n == 2);
+    CHECK(p.works && strcmp(p.works[0].title, "Poetics") == 0);
+    CHECK(p.works && p.works[0].year && strcmp(p.works[0].year, "335 BCE") == 0);
+    CHECK(p.works && p.works[0].url && strcmp(p.works[0].url, "https://en.wikipedia.org/wiki/Poetics_(Aristotle)") == 0);
+    CHECK(p.works && strcmp(p.works[1].title, "Metaphysics") == 0);
+    CHECK(p.works && (!p.works[1].url || !p.works[1].url[0]));
+    persona_profile_free(&p);
+
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), bad_summary,
+                                strlen(bad_summary), NULL, 0, &p, &e) == 0);
+    CHECK(p.state == PERSONA_READY);
+    CHECK(p.photo_url == NULL);
+    CHECK(p.wikipedia == NULL);
+    CHECK(p.summary && strcmp(p.summary, "x") == 0);
+    persona_profile_free(&p);
+
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_summary,
+                                strlen(thumb_summary), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url && strcmp(p.photo_url, thumb_kept) == 0);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_port,
+                                strlen(thumb_port), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url && strcmp(p.photo_url, "https://upload.wikimedia.org/wikipedia/commons/thumb/a.jpg") == 0);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_evil,
+                                strlen(thumb_evil), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url == NULL);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_http,
+                                strlen(thumb_http), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url == NULL);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_user,
+                                strlen(thumb_user), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url == NULL);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), entity, strlen(entity), thumb_other,
+                                strlen(thumb_other), NULL, 0, &p, &e) == 0);
+    CHECK(p.photo_url == NULL);
+    persona_profile_free(&p);
+
+    CHECK(persona_profile_parse("Aristotle", search, strlen(search), NULL, 0, NULL, 0, NULL, 0, &p, &e) == 0);
+    CHECK(p.state == PERSONA_READY);
+    CHECK(p.qid && strcmp(p.qid, "Q868") == 0);
+    CHECK(p.description && strcmp(p.description, "Greek philosopher") == 0);
+    CHECK(!p.summary || !p.summary[0]);
+    persona_profile_free(&p);
+
+    CHECK(persona_profile_parse("Homer", given, strlen(given), NULL, 0, NULL, 0, NULL, 0, &p, &e) == 0);
+    CHECK(p.state == PERSONA_NONE);
+    CHECK(p.qid == NULL);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", crater, strlen(crater), NULL, 0, NULL, 0, NULL, 0, &p, &e) == 0);
+    CHECK(p.state == PERSONA_NONE);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Aristotle", contains, strlen(contains), NULL, 0, NULL, 0, NULL, 0, &p, &e) == 0);
+    CHECK(p.state == PERSONA_READY);
+    CHECK(p.qid && strcmp(p.qid, "Q5") == 0);
+    persona_profile_free(&p);
+    CHECK(persona_profile_parse("Kant", "{\"search\":[{\"id\":\"Q5\",\"label\":\"Kant\",\"description\":\"writer\"}]}",
+                                strlen("{\"search\":[{\"id\":\"Q5\",\"label\":\"Kant\",\"description\":\"writer\"}]}"),
+                                NULL, 0, NULL, 0, kant, strlen(kant), &p, &e) == 0);
+    CHECK(p.born && strcmp(p.born, "1724") == 0);
+    CHECK(!p.died || !p.died[0]);
+    CHECK(p.works && p.work_n == 1 && (!p.works[0].year || !p.works[0].year[0]));
+    persona_profile_free(&p);
+
+    jpg = malloc(4);
+    if (!root || !people || !marker || !secret || !jpg) {
+        fprintf(stderr, "persona profile corpus\n");
+        fails++;
+        free(jpg);
+        goto done;
+    }
+    memcpy(jpg, "\xff\xd8\xff\x00", 4);
+    made.state = PERSONA_READY;
+    made.qid = xstrdup("Q1");
+    made.description = xstrdup("cached");
+    made.summary = xstrdup("from the shelf cache");
+    made.photo = jpg;
+    made.photo_n = 4;
+    made.photo_type = xstrdup("image/jpeg");
+    jpg = NULL;
+    CHECK(persona_profile_store(root, "Aristotle", &made, &e) == 0);
+    CHECK(persona_file(people, ".json", &json) == 0);
+    CHECK(write_file(secret, "SECRET", 6) == 0);
+    {
+        char *canon_dir = grove_realpath(people, NULL);
+        char *canon_file = json ? grove_realpath(json, NULL) : NULL;
+        const char *evil =
+            "{\"v\":1,\"qid\":\"Q1\",\"summary\":\"kept\",\"wikipedia\":\"https://evil.example/a\","
+            "\"photo\":\"../../secret\",\"works\":[{\"title\":\"Poetics\",\"year\":\"\",\"url\":\"https://127.0.0.1/x\"}]}";
+        const char *dropped = "{\"v\":1,\"qid\":\"Q1;drop\",\"summary\":\"no\"}";
+        CHECK(canon_dir && canon_file && strncmp(canon_file, canon_dir, strlen(canon_dir)) == 0);
+        CHECK(canon_file && canon_dir && canon_file[strlen(canon_dir)] == '/');
+        free(canon_dir);
+        free(canon_file);
+        CHECK(json && write_file(json, evil, strlen(evil)) == 0);
+        CHECK(persona_profile_load(root, "Aristotle", &loaded, &e) == 0);
+        CHECK(loaded.state == PERSONA_READY);
+        CHECK(loaded.qid && strcmp(loaded.qid, "Q1") == 0);
+        CHECK(loaded.summary && strcmp(loaded.summary, "kept") == 0);
+        CHECK(loaded.wikipedia == NULL);
+        CHECK(loaded.photo_n == 0);
+        CHECK(loaded.work_n == 1 && loaded.works && (!loaded.works[0].url || !loaded.works[0].url[0]));
+        persona_profile_free(&loaded);
+        CHECK(json && write_file(json, dropped, strlen(dropped)) == 0);
+        CHECK(persona_profile_load(root, "Aristotle", &loaded, &e) == 0);
+        CHECK(loaded.state == PERSONA_NONE);
+        persona_profile_free(&loaded);
+    }
+    CHECK(persona_profile_store(root, "Aristotle", &made, &e) == 0);
+    CHECK(persona_profile(root, "  aristotle ", &loaded, &e) == 0);
+    CHECK(loaded.state == PERSONA_READY);
+    CHECK(loaded.qid && strcmp(loaded.qid, "Q1") == 0);
+    CHECK(loaded.summary && strcmp(loaded.summary, "from the shelf cache") == 0);
+    CHECK(loaded.photo_n == 4 && loaded.photo && memcmp(loaded.photo, "\xff\xd8\xff\x00", 4) == 0);
+    CHECK(loaded.photo_type && strcmp(loaded.photo_type, "image/jpeg") == 0);
+    persona_profile_free(&loaded);
+    hippo.state = PERSONA_READY;
+    hippo.qid = xstrdup("Q9501");
+    hippo.summary = xstrdup("a different person");
+    CHECK(persona_profile_store(root, "Augustine of Hippo", &hippo, &e) == 0);
+    CHECK(persona_profile_store(root, "../gotcha", &made, &e) == 0);
+    CHECK(access(marker, F_OK) != 0);
+    CHECK(persona_profile_load(root, "Augustine", &loaded, &e) == 0);
+    CHECK(loaded.state == PERSONA_NONE);
+    persona_profile_free(&loaded);
+    CHECK(persona_profile_load(root, "Augustine of Hippo", &loaded, &e) == 0);
+    CHECK(loaded.qid && strcmp(loaded.qid, "Q9501") == 0);
+    persona_profile_free(&loaded);
+    {
+        unsigned char *html = malloc(6);
+        PersonaProfile bad;
+        memset(&bad, 0, sizeof bad);
+        if (!html) {
+            fails++;
+        } else {
+            memcpy(html, "<html>", 6);
+            bad.state = PERSONA_READY;
+            bad.qid = xstrdup("Q2");
+            bad.summary = xstrdup("cached poet");
+            bad.photo = html;
+            bad.photo_n = 6;
+            bad.photo_type = xstrdup("image/jpeg");
+            CHECK(persona_profile_store(root, "Sappho", &bad, &e) == 0);
+            CHECK(persona_profile(root, "Sappho", &loaded, &e) == 0);
+            CHECK(loaded.state == PERSONA_READY);
+            CHECK(loaded.qid && strcmp(loaded.qid, "Q2") == 0);
+            CHECK(loaded.photo_n == 0);
+            persona_profile_free(&loaded);
+        }
+        persona_profile_free(&bad);
+    }
+done:
+    persona_profile_free(&made);
+    persona_profile_free(&hippo);
+    persona_profile_free(&loaded);
+    persona_profile_free(&p);
+    free(url);
+    free(json);
+    free(marker);
+    free(secret);
+    free(people);
+    rm_rf(root);
+}
+
 static void test_library_sort(void) {
     char tmpl[] = "/tmp/grove-sort-XXXXXX";
     char *root = mkdtemp(tmpl);
@@ -3499,6 +4010,8 @@ int main(void) {
     test_notes();
     test_library();
     test_named_creator();
+    test_personas();
+    test_persona_profile();
     test_library_sort();
     test_alias_root();
     test_narrow();

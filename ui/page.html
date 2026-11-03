@@ -48,43 +48,29 @@
   .stage {
     width: calc(100% - var(--gutter));
     margin: 0 auto;
+    container: page / inline-size;
   }
   .wrap {
     width: 100%;
     margin: 0;
     padding: 1.15rem 0 4rem;
-    container: page / inline-size;
   }
-  body.books-side .stage {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
-    column-gap: var(--books-gap);
-    align-items: start;
-  }
-  body.books-side .wrap { grid-column: 1; grid-row: 1; min-width: 0; }
+  /* Open books float, so the text beside them widens once the stack ends. */
   .open-books[hidden],
   body.books-side .open-books[hidden] { display: none; }
   body.books-side .open-books {
-    grid-column: 2;
-    grid-row: 1;
-    position: sticky;
-    top: calc(var(--mast-h, 4.6rem) + 0.35rem);
-    align-self: start;
+    float: right;
+    width: min(18rem, 38%);
+    margin: 0 0 1.35rem var(--books-gap);
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
-    max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
-    overflow: auto;
     min-width: 0;
     padding-top: 1.15rem;
   }
-  body.books-side .open-books .tabs.stack {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--bg);
-    padding-bottom: 0.45rem;
-  }
+  body.books-side #results,
+  body.books-side #ex-list { display: block; }
+  #search-head { display: flow-root; }
   body.books-side .open-books .toc-col {
     border-top: 1px solid var(--line);
     padding-top: 0.75rem;
@@ -103,6 +89,30 @@
   }
   header p.error { color: #8a2a1a; white-space: normal; }
   form { margin: 0; position: relative; }
+  button.info {
+    position: absolute;
+    right: 0.45rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 1px solid #d8d0c4;
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--muted);
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-style: italic;
+    font-size: 0.9rem;
+    line-height: 1.35rem;
+    text-align: center;
+    padding: 0;
+  }
+  button.info:hover, button.info:focus-visible { color: var(--ink); border-color: var(--focus); }
+  button.info[aria-expanded="true"] {
+    color: var(--ink);
+    background: var(--mark);
+    border-color: transparent;
+  }
   button.go {
     position: absolute;
     width: 1px;
@@ -128,6 +138,7 @@
     outline-offset: 1px;
     border-color: transparent;
   }
+  #q { padding-right: 2.6rem; }
   .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 0; }
   .chips:empty { margin: 0; }
   .chips:not(:empty) { margin-top: 0.7rem; }
@@ -210,11 +221,29 @@
   }
   article { margin-top: 1.7rem; min-width: 0; }
   .name {
+    display: block;
+    width: auto;
+    min-width: 0;
+    appearance: none;
+    white-space: normal;
+    overflow-wrap: break-word;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.28rem;
     line-height: 1.3;
   }
-  .name:hover, .passage:hover .text { background: #efe8dc; }
+  .name, .passage { cursor: pointer; }
+  /* The label is inline so each line can hug Narrow, then run full width under it. */
+  .hit-label, #results .text { display: inline; }
+  .name:hover .hit-label, .passage:hover .text,
+  .passage.on .text { background: #efe8dc; }
+  .name:focus-visible .hit-label, .passage:focus-visible .text {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .passage.open .text {
+    box-decoration-break: clone;
+    box-shadow: inset 2px 0 0 #c4b8a8;
+  }
   .folder, .doctitle {
     margin: 0.15rem 0 0;
     color: var(--muted);
@@ -225,16 +254,22 @@
   }
   .passage {
     display: block;
-    width: 100%;
+    width: auto;
+    min-width: 0;
+    appearance: none;
+    white-space: normal;
+    overflow-wrap: break-word;
     margin-top: 0.75rem;
   }
   .where {
+    display: block;
+    margin: 0 0 0.12rem;
     color: var(--muted);
     font-size: 0.78rem;
     font-variant-numeric: tabular-nums;
   }
   .text {
-    margin: 0.12rem 0 0;
+    margin: 0;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.05rem;
     line-height: 1.55;
@@ -330,6 +365,21 @@
   }
   .ex-place { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.78rem; }
   .ex-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.5rem; margin-top: 0.45rem; }
+  button.tag-add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.45rem;
+    height: 1.45rem;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--focus);
+    font-size: 1.05rem;
+    line-height: 1;
+  }
+  button.tag-add[aria-expanded="true"] { color: var(--ink); border-color: var(--ink); }
   .ex-actions { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; margin-top: 0.35rem; }
   .ex-actions button { color: var(--focus); font-size: 0.88rem; }
   .ex-actions button:hover { text-decoration: underline; }
@@ -364,14 +414,23 @@
     color: var(--ink);
     border-color: transparent;
   }
+  .snip-set {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .snip-name {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
   .more {
     margin-top: 0.55rem;
     color: var(--focus);
     font-size: 0.88rem;
   }
   .more:hover { text-decoration: underline; }
-  .passage.open { box-shadow: inset 2px 0 0 #c4b8a8; }
-  .passage.on { background: #efe8dc; }
+
   .tabs { display: contents; }
   .tab-rule {
     width: 1px;
@@ -420,12 +479,27 @@
   .tabs.stack .tab-label { flex: 1 1 auto; }
   .reader[hidden] { display: none; }
   .reader-bar {
-    position: sticky;
-    top: var(--mast-h, 4.6rem);
-    z-index: 3;
-    background: var(--bg);
     padding: 0.45rem 0 0.55rem;
   }
+  .to-top {
+    position: fixed;
+    right: 1.15rem;
+    bottom: 1.15rem;
+    z-index: 20;
+    width: 2.45rem;
+    height: 2.45rem;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 22px rgba(29, 26, 22, 0.12);
+  }
+  .to-top[hidden] { display: none; }
+  .to-top:hover, .to-top:focus-visible { border-color: var(--ink); }
+  .to-top:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .reader-nav { display: flex; gap: 1rem; margin: 0; }
   .reader-nav button { color: var(--focus); font-size: 0.88rem; }
   .reader-nav button:hover { text-decoration: underline; }
@@ -439,6 +513,7 @@
     line-height: 1.25;
   }
   .reader-body {
+    max-width: 72rem;
     margin-top: 1rem;
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.12rem;
@@ -459,7 +534,7 @@
   .reader-body { user-select: text; }
   .toc { margin-top: 0.7rem; }
   .toc summary { color: var(--muted); cursor: pointer; font-size: 0.85rem; }
-  .toc div { max-height: 14rem; overflow: auto; margin-top: 0.3rem; }
+  .toc div { margin-top: 0.3rem; }
   .toc button { display: block; width: 100%; font-size: 0.92rem; padding: 0.12rem 0; }
   .toc button.lv2 { padding-left: 0.9rem; }
   .toc button.lv3 { padding-left: 1.8rem; }
@@ -488,7 +563,7 @@
     padding: 0.4rem 0 0.5rem;
   }
   .modes button.mode.on { color: var(--ink); box-shadow: inset 0 -1px 0 var(--ink); }
-  #search-view[hidden], #library-view[hidden], #excerpts-view[hidden] { display: none; }
+  #search-view[hidden], #library-view[hidden], #personas-view[hidden], #excerpts-view[hidden] { display: none; }
   #library-view { container-type: inline-size; }
   .lib-tools {
     display: flex;
@@ -499,7 +574,7 @@
   }
   .lib-tools button { flex: 0 0 auto; color: var(--focus); font-size: 0.95rem; padding: 0.35rem 0; }
   .lib-tools button:hover, .lib-actions button:hover { text-decoration: underline; }
-  #lib-filter { flex: 1 1 14rem; margin: 0; font-size: 1rem; padding: 0.55rem 0.75rem; }
+  #lib-filter, #persona-filter { flex: 1 1 14rem; margin: 0; font-size: 1rem; padding: 0.55rem 0.75rem; }
   .lib-status { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
   .lib-root, .lib-meta, .lib-path {
     margin: 0.12rem 0 0;
@@ -518,20 +593,33 @@
     max-width: 100%;
   }
   .lib-table {
-    width: 100%;
-    min-width: 44rem;
-    table-layout: fixed;
+    width: max-content;
     border-collapse: collapse;
   }
-  .lib-table th:first-child,
-  .lib-table td:first-child { width: 18%; }
   .lib-table th, .lib-table td {
     text-align: left;
     vertical-align: top;
-    padding: 0.45rem 0.85rem 0.45rem 0;
+    padding: 0.5rem 1.35rem 0.5rem 0;
     border-bottom: 1px solid var(--line);
     font-weight: 400;
+    white-space: nowrap;
   }
+  .lib-table th:nth-child(1),
+  .lib-table td:nth-child(1) { min-width: 18rem; }
+  .lib-table th:nth-child(2),
+  .lib-table td:nth-child(2) { min-width: 14rem; }
+  .lib-table th:nth-child(3),
+  .lib-table td:nth-child(3) { min-width: 9rem; }
+  .lib-table th:nth-child(4),
+  .lib-table td:nth-child(4) { min-width: 7rem; }
+  .lib-table th:nth-child(5),
+  .lib-table td:nth-child(5) { min-width: 6rem; }
+  .lib-table th:nth-child(6),
+  .lib-table td:nth-child(6) { min-width: 8rem; }
+  .lib-table th:nth-child(7),
+  .lib-table td:nth-child(7) { min-width: 8rem; }
+  .lib-table th:nth-child(8),
+  .lib-table td:nth-child(8) { min-width: 16rem; }
   .lib-table th { white-space: nowrap; }
   .lib-table tr.lib-group th {
     width: auto;
@@ -557,17 +645,67 @@
     font-family: Palatino, "Palatino Linotype", Georgia, serif;
     font-size: 1.02rem;
     line-height: 1.3;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
   .lib-title:hover { background: #efe8dc; }
-  .lib-cell {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.92rem;
+  .persona-link:hover, .persona-back:hover, .persona-library:hover { text-decoration: underline; }
+  .persona-row {
+    display: block;
+    width: auto;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--line);
   }
+  .persona-name, .persona-person {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    color: var(--ink);
+  }
+  .persona-name { font-size: 1.15rem; }
+  .persona-person { font-size: 1.6rem; margin: 0.2rem 0 0; }
+  .persona-meta, .persona-date { color: var(--muted); font-size: 0.88rem; }
+  .persona-date { margin-left: 0.6rem; }
+  .persona-back, .persona-library { color: var(--focus); font-size: 0.95rem; padding: 0.35rem 0; }
+  .persona-role {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.02rem;
+    font-weight: normal;
+    margin: 1.1rem 0 0.2rem;
+  }
+  .persona-work { margin: 0.15rem 0; }
+  .persona-known, .persona-desc { color: var(--muted); margin: 0.25rem 0; }
+  .persona-sheet { display: flex; gap: 1rem; align-items: flex-start; margin-top: 0.75rem; }
+  .persona-photo { width: 7rem; height: 9rem; object-fit: cover; background: var(--line); flex: 0 0 auto; }
+  .persona-summary {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.12rem;
+    line-height: 1.45;
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 6;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .persona-facts { display: flex; flex-wrap: wrap; gap: 0.8rem 1.5rem; margin: 1rem 0 0; }
+  .persona-facts div { min-width: 6rem; }
+  .persona-facts dt { color: var(--muted); font-size: 0.82rem; }
+  .persona-facts dd { margin: 0; }
+  .persona-wiki { color: var(--focus); display: inline-block; margin-top: 0.8rem; }
+  .persona-bib {
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.35rem;
+    font-weight: normal;
+    margin: 1.5rem 0 0.2rem;
+  }
+  .persona-sub {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0.9rem 0 0.2rem;
+  }
+  .persona-ext { font-family: Palatino, "Palatino Linotype", Georgia, serif; color: var(--ink); font-size: 1.05rem; }
+  .lib-cell { font-size: 0.92rem; }
   .lib-table th:last-child,
-  .lib-actions-cell { width: 9.5rem; }
+  .lib-table td.lib-actions-cell { min-width: 9.5rem; white-space: normal; }
   .lib-actions { display: flex; flex-wrap: nowrap; gap: 0.35rem 0.75rem; align-items: baseline; justify-content: flex-end; }
   .lib-actions button { color: var(--focus); font-size: 0.9rem; white-space: nowrap; }
   .lib-actions:has(.lib-ask) { flex-wrap: wrap; max-width: 16rem; justify-content: flex-start; }
@@ -663,45 +801,26 @@
   .narrow-aside { display: none; }
   .shelf { min-width: 0; }
   @container (min-width: 38rem) {
-    #library-view .shelf:has(> .narrow-aside:not([hidden])) {
-      display: grid;
-      grid-template-columns: 15rem minmax(0, 1fr);
-      column-gap: clamp(1.25rem, 3vw, 2.5rem);
-      align-items: start;
-    }
-    #library-view .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
+    #search-view .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
+      float: left;
       display: block;
-      position: sticky;
-      top: calc(var(--mast-h, 4.6rem) + 0.35rem);
-      max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
-      overflow: auto;
+      width: 15rem;
+      margin: 0 clamp(1.25rem, 3vw, 2.5rem) 1.35rem 0;
     }
-    #library-view .narrow-open { display: none; }
+    #search-view .shelf:has(> .narrow-aside:not([hidden])) #results { display: block; }
+    #search-view .narrow-open { display: none; }
   }
-  @container page (min-width: 56rem) {
+  @container page (min-width: 42rem) {
     .reader:has(.toc[open]) {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
-      column-gap: clamp(1.5rem, 3vw, 3rem);
-      align-items: start;
-      width: min(92rem, 100%);
+      width: min(72rem, 100%);
       margin-inline: auto;
     }
-    .reader:has(.toc[open]) .reader-bar { grid-column: 1; grid-row: 1; }
-    .reader:has(.toc[open]) .reader-title { grid-column: 1; grid-row: 2; }
-    .reader:has(.toc[open]) .reader-body { grid-column: 1; grid-row: 3; min-width: 0; }
     .reader:has(.toc[open]) .toc-col {
-      grid-column: 2;
-      grid-row: 1 / span 3;
-      position: sticky;
-      top: calc(var(--mast-h, 4.6rem) + 0.35rem);
-      max-height: calc(100dvh - var(--mast-h, 4.6rem) - 1rem);
-      overflow: auto;
-      align-self: start;
-      min-width: 0;
+      float: right;
+      width: min(18rem, 34%);
+      margin: 0.15rem 0 1.15rem clamp(1.25rem, 3vw, 2.5rem);
     }
     .reader:has(.toc[open]) .toc div { max-height: none; overflow: visible; }
-    /* The contents grid outranks [hidden], so a closed book would show beside the open one. */
     .reader[hidden]:has(.toc[open]) { display: none; }
   }
   @container page (min-width: 76rem) {
@@ -711,7 +830,8 @@
     }
   }
   body.books-side .reader,
-  body.books-side .reader:not(:has(.toc[open])) {
+  body.books-side .reader:not(:has(.toc[open])),
+  body.books-side .reader:has(.toc[open]) {
     width: 100%;
     margin-inline: 0;
   }
@@ -767,6 +887,7 @@
       <nav class="modes" id="modes" aria-label="Views">
         <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
         <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
+        <button type="button" id="mode-personas" class="mode" aria-pressed="false">Personas</button>
         <button type="button" id="mode-excerpts" class="mode" aria-pressed="false">Excerpts</button>
         <div class="tabs" id="tabs"></div>
       </nav>
@@ -777,35 +898,38 @@
   <div class="wrap" id="wrap">
     <div id="search-col">
     <div id="search-view">
-    <button type="button" id="search-narrow-open" class="narrow-open" hidden>Narrow</button>
-    <div class="shelf">
-    <aside id="search-narrow" class="narrow-aside" hidden></aside>
-    <div class="shelf-main">
     <header id="search-head">
       <form id="find">
         <input id="q" type="text" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" autofocus>
         <button type="submit" class="go" tabindex="-1">Search</button>
+        <button type="button" id="search-info" class="info" aria-expanded="false" aria-controls="search-help" aria-label="How search works">i</button>
       </form>
       <div id="search-opts" class="search-opts" hidden>
         <button type="button" id="opt-stem" aria-pressed="true">Stemming</button>
         <button type="button" id="opt-fuzzy" aria-pressed="false">Fuzzy</button>
         <button type="button" id="opt-concept" aria-pressed="false">Concepts</button>
+        <span class="snip-set" role="group" aria-label="Snippet length">
+          <span class="snip-name">Snippet</span>
+          <button type="button" id="snip-sentence" aria-pressed="false">Sentence</button>
+          <button type="button" id="snip-nearby" aria-pressed="true">Nearby</button>
+          <button type="button" id="snip-passage" aria-pressed="false">Passage</button>
+        </span>
       </div>
       <div class="chips" id="chips"></div>
-      <p class="help">Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix, and ~ is one edit. Stemming matches inflections. Fuzzy allows one edit on longer words. Concepts adds related words and marks them in blue.</p>
+      <p id="search-help" class="help" hidden>Space means AND. OR and NOT are capitals. Quotes are a phrase. A trailing * is a prefix, and ~ is one edit. Stemming matches inflections. Fuzzy allows one edit on longer words. Concepts adds related words and marks them in blue. Snippet is the sentence, a few sentences nearby, or the passage.</p>
       <div class="saved" id="saved"></div>
       <p class="count" id="count"></p>
       <p class="err" id="err" hidden></p>
     </header>
+    <button type="button" id="search-narrow-open" class="narrow-open" hidden>Narrow</button>
+    <div class="shelf">
+    <aside id="search-narrow" class="narrow-aside" hidden></aside>
+    <div class="shelf-main">
     <main id="results"></main>
     </div>
     </div>
     </div>
     <div id="library-view" hidden>
-      <button type="button" id="lib-narrow-open" class="narrow-open">Narrow</button>
-      <div class="shelf">
-      <aside id="lib-narrow" class="narrow-aside"></aside>
-      <div class="shelf-main">
       <p class="help">Add a folder, a file, or a web page. Each volume is a Dublin Core record. The shelf groups by creator. A file named Title — Author shows that author until the record has one. Sort any column. Identifier and the rest of the record stay in Edit. The text stays on disk.</p>
       <div class="lib-tools">
         <button type="button" id="lib-folder">Add a folder</button>
@@ -818,8 +942,15 @@
       <p class="count" id="lib-count"></p>
       <p class="err" id="lib-err" hidden></p>
       <div class="lib-scroll" id="lib-rows"></div>
+    </div>
+    <div id="personas-view" hidden>
+      <p class="help">One person, however many names the books use. Author is the creator. A contributor written as Role: Name takes that role, such as Translator, Editor, or Speaker. A source that begins Translated by, Edited by, or Read by counts as that role. Opening a name fetches a short public profile, and a photograph when one is public.</p>
+      <div class="lib-tools" id="persona-tools">
+        <input id="persona-filter" type="text" placeholder="Filter names" aria-label="Filter names" autocomplete="off" spellcheck="false">
       </div>
-      </div>
+      <p class="count" id="persona-count"></p>
+      <p class="err" id="persona-err" hidden></p>
+      <div id="persona-list"></div>
     </div>
     <div id="excerpts-view" hidden>
       <p class="help">Select a passage in a book and choose Save excerpt. The collection keeps the wording, the place, and a citation. The book stays in the library.</p>
@@ -866,6 +997,11 @@
   </form>
   <div id="pick-menu" class="pick-menu" role="group" aria-label="Selection" hidden></div>
   <p id="toast" class="toast" role="status" hidden></p>
+  <button type="button" id="to-top" class="to-top" hidden aria-label="Back to top">
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <path d="M7 2.2v9.2M7 2.2L3.1 6.2M7 2.2l3.9 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
   <div id="narrow-sheet" class="narrow-sheet" role="dialog" aria-modal="true" aria-label="Narrow" hidden>
     <div id="narrow-sheet-body" class="narrow-body"></div>
     <button type="button" id="narrow-done">Done</button>
@@ -876,6 +1012,11 @@ const searchOpts = document.getElementById("search-opts");
 const optStem = document.getElementById("opt-stem");
 const optFuzzy = document.getElementById("opt-fuzzy");
 const optConcept = document.getElementById("opt-concept");
+const snipSentence = document.getElementById("snip-sentence");
+const snipNearby = document.getElementById("snip-nearby");
+const snipPassage = document.getElementById("snip-passage");
+const SNIP_CHOICES = ["sentence", "nearby", "passage"];
+let snipLen = "nearby";
 const chips = document.getElementById("chips");
 const count = document.getElementById("count");
 const err = document.getElementById("err");
@@ -891,9 +1032,11 @@ const indexLine = document.getElementById("index");
 const savedRow = document.getElementById("saved");
 const modeSearch = document.getElementById("mode-search");
 const modeLibrary = document.getElementById("mode-library");
+const modePersonas = document.getElementById("mode-personas");
 const modeExcerpts = document.getElementById("mode-excerpts");
 const searchView = document.getElementById("search-view");
 const libraryView = document.getElementById("library-view");
+const personasView = document.getElementById("personas-view");
 const excerptsView = document.getElementById("excerpts-view");
 const pickMenu = document.getElementById("pick-menu");
 const toastEl = document.getElementById("toast");
@@ -911,8 +1054,6 @@ const libPage = document.getElementById("lib-page");
 const libPageUrl = document.getElementById("lib-page-url");
 const searchNarrowOpen = document.getElementById("search-narrow-open");
 const searchNarrowEl = document.getElementById("search-narrow");
-const libNarrowOpen = document.getElementById("lib-narrow-open");
-const libNarrowEl = document.getElementById("lib-narrow");
 const narrowSheet = document.getElementById("narrow-sheet");
 const narrowSheetBody = document.getElementById("narrow-sheet-body");
 const narrowDone = document.getElementById("narrow-done");
@@ -941,7 +1082,7 @@ function withMarks(s) {
     .replace(/&lt;&lt;([\s\S]*?)&gt;&gt;/g, "<mark>$1</mark>");
 }
 
-/* The list shows the sentence around the match. The reader marks that same sentence. */
+/* Sentence length is the one sentence around the match. The reader marks that same sentence. */
 function sentenceCore(text, mark) {
   const a = mark.index;
   const b = a + mark[0].length;
@@ -995,6 +1136,101 @@ function listSentence(raw) {
   if (core.cutL && out.slice(0, 3) !== "...") out = "... " + out;
   if (core.cutR && !/[.?!]$/.test(out) && !out.endsWith("...")) out += " ...";
   return out;
+}
+
+function snipStop(text, i) {
+  const c = text[i];
+  if (c === "." || c === "?" || c === "!") return true;
+  if (c !== "\n") return false;
+  let k = i - 1;
+  while (k >= 0 && (text[k] === " " || text[k] === "\r" || text[k] === "\t")) k--;
+  if (k >= 0 && (text[k] === "." || text[k] === "?" || text[k] === "!")) return false;
+  return true;
+}
+
+/* A few sentences around the match. A line break still ends a sentence. */
+function nearbySnippet(raw) {
+  const text = String(raw || "");
+  const mark = /<<[\s\S]*?>>/.exec(text) || /\{\{[\s\S]*?\}\}/.exec(text);
+  if (!mark) {
+    const clean = text.replace(/^\s+/, "").replace(/\s+$/, "");
+    if (clean.length <= 700) return clean;
+    let end = 640;
+    while (end > 400 && !snipStop(clean, end) && !/\s/.test(clean[end])) end--;
+    return clean.slice(0, end).replace(/\s+$/, "") + " ...";
+  }
+  const a = mark.index;
+  const b = a + mark[0].length;
+  const extra = 2;
+  const backCap = 480;
+  const fwdCap = 640;
+  let left = a;
+  let prev = 0;
+  let bounded = false;
+  let i = a - 1;
+  for (; i >= 0 && a - i <= backCap; i--) {
+    if (!snipStop(text, i)) continue;
+    prev++;
+    left = i + 1;
+    bounded = true;
+    if (prev > extra) break;
+  }
+  if (bounded && prev <= extra && i < 0) left = 0;
+  if (!bounded) {
+    if (a === 0) left = 0;
+    else {
+      const floor = Math.max(0, a - 120);
+      left = floor;
+      while (left < a && !/\s/.test(text[left])) left++;
+      while (left < a && /\s/.test(text[left])) left++;
+      if (left >= a) left = floor;
+    }
+  }
+  let right = b;
+  let next = 0;
+  let closed = false;
+  let j = b;
+  for (; j < text.length && j - b <= fwdCap; j++) {
+    if (!snipStop(text, j)) continue;
+    next++;
+    right = j + 1;
+    closed = true;
+    if (next > extra) break;
+  }
+  if (next <= extra && j >= text.length) right = text.length;
+  else if (!closed && b < text.length) {
+    if (text.length - b <= fwdCap) right = text.length;
+    else {
+      const ceil = b + 160;
+      right = ceil;
+      while (right > b && !/\s/.test(text[right - 1])) right--;
+      if (right <= b) right = ceil;
+    }
+  }
+  let out = text.slice(left, right).replace(/^\s+/, "").replace(/\s+$/, "");
+  if (left > 0 && out.slice(0, 3) !== "...") out = "... " + out;
+  if (right < text.length && !/[.?!]$/.test(out) && !out.endsWith("...") && !out.endsWith("\n")) out += " ...";
+  return out;
+}
+
+function passageSnippet(raw) {
+  return String(raw || "").replace(/^\s+/, "").replace(/\s+$/, "");
+}
+
+function shownSnippet(raw) {
+  if (snipLen === "passage") return passageSnippet(raw);
+  if (snipLen === "nearby") return nearbySnippet(raw);
+  return listSentence(raw);
+}
+
+function paintSnippets() {
+  const nodes = document.querySelectorAll(".passage");
+  for (let i = 0; i < nodes.length; i++) {
+    const btn = nodes[i];
+    const line = btn.querySelector(".text");
+    if (!line || btn._raw == null) continue;
+    line.innerHTML = withMarks(shownSnippet(btn._raw));
+  }
 }
 
 function plainSnippet(raw) {
@@ -1144,7 +1380,6 @@ const NARROW_LABEL = {
   period: "Period",
   genre: "Genre"
 };
-const NARROW_EMPTY = "These fill in from the record.";
 const NARROW_SEL_MAX = 64;
 
 function emptyNarrow() {
@@ -1152,9 +1387,7 @@ function emptyNarrow() {
 }
 
 let searchNarrow = emptyNarrow();
-let libraryNarrow = emptyNarrow();
 let searchGroups = null;
-let libraryGroups = null;
 let sheetKind = "";
 let sheetOpener = null;
 
@@ -1342,15 +1575,6 @@ function paintSearchNarrow() {
   }
 }
 
-function paintLibraryNarrow() {
-  narrowButton(libNarrowOpen, libraryNarrow);
-  const copy = groupsEmpty(libraryGroups) ? NARROW_EMPTY : "";
-  fillNarrow(libNarrowEl, libraryGroups, libraryNarrow, toggleLibrary, clearLibrary, copy);
-  if (sheetKind === "library" && narrowSheet && !narrowSheet.hidden) {
-    fillNarrow(narrowSheetBody, libraryGroups, libraryNarrow, toggleLibrary, clearLibrary, copy);
-  }
-}
-
 function toggleSearch(key, value) {
   if (!toggleList(searchNarrow[key], value)) {
     showError("too many values");
@@ -1369,30 +1593,11 @@ function clearSearch() {
   runSearch();
 }
 
-function toggleLibrary(key, value) {
-  if (!toggleList(libraryNarrow[key], value)) {
-    showLibError("too many values");
-    return;
-  }
-  showLibError("");
-  saveNarrow("grove.narrow.library", libraryNarrow);
-  paintLibraryNarrow();
-  loadLibrary();
-}
-
-function clearLibrary() {
-  libraryNarrow = emptyNarrow();
-  saveNarrow("grove.narrow.library", libraryNarrow);
-  paintLibraryNarrow();
-  loadLibrary();
-}
-
-function openNarrowSheet(kind, opener) {
-  sheetKind = kind;
+function openNarrowSheet(opener) {
+  sheetKind = "search";
   sheetOpener = opener || null;
   if (narrowSheet) narrowSheet.hidden = false;
-  if (kind === "library") paintLibraryNarrow();
-  else paintSearchNarrow();
+  paintSearchNarrow();
   if (narrowDone) narrowDone.focus();
 }
 
@@ -1505,10 +1710,27 @@ function countLine(files, places) {
   return line;
 }
 
+/* A button box stays as wide as the gap beside Narrow for its whole height.
+   A div does not, so the lines can widen once that column ends. */
+function hitControl(className, onActivate) {
+  const el = document.createElement("div");
+  el.className = className;
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.addEventListener("click", onActivate);
+  el.addEventListener("keydown", function (ev) {
+    if (ev.target !== el) return;
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    ev.preventDefault();
+    onActivate();
+  });
+  return el;
+}
+
 function addPassage(parent, hit, passage) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "passage";
+  const btn = hitControl("passage", function () {
+    openTab(hit.path, passage.offset || 0, markedWords(passage.text), plainSnippet(passage.text));
+  });
   btn.dataset.path = hit.path || "";
   btn.dataset.offset = String(passage.offset || 0);
   const parts = [];
@@ -1524,13 +1746,11 @@ function addPassage(parent, hit, passage) {
     where.textContent = parts.join(" · ");
     btn.append(where);
   }
-  const text = document.createElement("p");
+  const text = document.createElement("span");
   text.className = "text";
-  text.innerHTML = withMarks(listSentence(passage.text || ""));
+  btn._raw = passage.text || "";
+  text.innerHTML = withMarks(shownSnippet(btn._raw));
   btn.append(text);
-  btn.addEventListener("click", function () {
-    openTab(hit.path, passage.offset || 0, markedWords(passage.text), plainSnippet(passage.text));
-  });
   parent.append(btn);
   const slot = document.createElement("div");
   slot.className = "note-slot";
@@ -1724,13 +1944,13 @@ function render(hits, query) {
     const counted = hit.nmatches;
     places += typeof counted === "number" && counted > 0 ? counted : passages.length;
     const art = document.createElement("article");
-    const name = document.createElement("button");
     const fetched = isFetchedPage(hit.path || "");
     const title = (hit.title || "").trim();
-    name.type = "button";
-    name.className = "name";
-    name.textContent = fetched && title ? title : baseName(hit.path || "");
-    name.addEventListener("click", function () { openPath(hit.path); });
+    const name = hitControl("name", function () { openPath(hit.path); });
+    const label = document.createElement("span");
+    label.className = "hit-label";
+    label.textContent = fetched && title ? title : baseName(hit.path || "");
+    name.append(label);
     art.append(name);
     const folder = folderOf(hit.path || "");
     if (folder && !fetched) {
@@ -2164,6 +2384,8 @@ function settleMark(tab) {
 const EXCERPT_MAX = 2400;
 const EXCERPT_KEEP = 400;
 const tagDraft = {};
+let tagOpen = "";
+let tagFocus = false;
 let pickKind = "";
 let picking = false;
 let pickTimer = 0;
@@ -2647,26 +2869,38 @@ function downloadFile(name, text, type) {
   setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
 }
 
+function focusTagField() {
+  if (!tagFocus) return;
+  tagFocus = false;
+  const field = document.querySelector("#ex-list input.tag-in");
+  if (field) field.focus();
+}
+
 function addTag(id, raw) {
   const tag = String(raw || "").trim().replace(/\s+/g, " ").slice(0, 40);
   tagDraft[id] = "";
   const ex = findExcerpt(id);
   if (!ex || !tag) {
+    if (ex) tagFocus = true;
     drawExcerpts();
     return;
   }
   const tags = (ex.tags || []).slice();
   if (tags.some(function (item) { return item.toLowerCase() === tag.toLowerCase(); })) {
+    tagFocus = true;
     drawExcerpts();
     return;
   }
   if (tags.length >= 12) {
     toast("That passage has enough tags");
+    tagFocus = true;
     drawExcerpts();
     return;
   }
   tags.push(tag);
   ex.tags = tags;
+  tagOpen = id;
+  tagFocus = true;
   storeExcerpts();
   drawExcerpts();
 }
@@ -2678,7 +2912,10 @@ function drawExcerpts() {
   const tagsEl = document.getElementById("ex-tags");
   const countEl = document.getElementById("ex-count");
   const filterEl = document.getElementById("ex-filter");
-  if (!list) return;
+  if (!list) {
+    focusTagField();
+    return;
+  }
   const needle = filterEl ? filterEl.value.trim().toLowerCase() : "";
   const visible = excerpts.filter(function (ex) { return !needle || excerptHay(ex).indexOf(needle) >= 0; });
   if (tools) tools.hidden = excerpts.length === 0;
@@ -2716,12 +2953,16 @@ function drawExcerpts() {
     });
   }
   list.replaceChildren();
-  if (!excerpts.length) return;
+  if (!excerpts.length) {
+    focusTagField();
+    return;
+  }
   if (!visible.length) {
     const empty = document.createElement("p");
     empty.className = "ex-empty";
     empty.textContent = "No excerpt matches that filter.";
     list.append(empty);
+    focusTagField();
     return;
   }
   groupedExcerpts(visible).forEach(function (group) {
@@ -2771,22 +3012,42 @@ function drawExcerpts() {
         chip.append(name, rm);
         row.append(chip);
       });
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "tag-in";
-      input.placeholder = "Add a tag";
-      input.setAttribute("aria-label", "Add a tag");
-      input.maxLength = 40;
-      input.autocomplete = "off";
-      input.spellcheck = false;
-      input.value = tagDraft[ex.id] || "";
-      input.addEventListener("input", function () { tagDraft[ex.id] = input.value; });
-      input.addEventListener("keydown", function (ev) {
-        if (ev.key !== "Enter") return;
-        ev.preventDefault();
-        addTag(ex.id, input.value);
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "tag-add";
+      add.textContent = "+";
+      add.setAttribute("aria-label", "Add a tag");
+      add.setAttribute("aria-expanded", tagOpen === ex.id ? "true" : "false");
+      add.addEventListener("click", function () {
+        tagOpen = tagOpen === ex.id ? "" : ex.id;
+        tagFocus = tagOpen === ex.id;
+        drawExcerpts();
       });
-      row.append(input);
+      row.append(add);
+      if (tagOpen === ex.id) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "tag-in";
+        input.placeholder = "Tag";
+        input.setAttribute("aria-label", "Tag");
+        input.maxLength = 40;
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.value = tagDraft[ex.id] || "";
+        input.addEventListener("input", function () { tagDraft[ex.id] = input.value; });
+        input.addEventListener("keydown", function (ev) {
+          if (ev.key === "Escape") {
+            ev.preventDefault();
+            tagOpen = "";
+            drawExcerpts();
+            return;
+          }
+          if (ev.key !== "Enter") return;
+          ev.preventDefault();
+          addTag(ex.id, input.value);
+        });
+        row.append(input);
+      }
       item.append(row);
       const actions = document.createElement("div");
       actions.className = "ex-actions";
@@ -2809,6 +3070,7 @@ function drawExcerpts() {
       list.append(item);
     });
   });
+  focusTagField();
 }
 
 async function openExcerpt(ex) {
@@ -3168,6 +3430,15 @@ document.getElementById("find").addEventListener("submit", function (e) {
   e.preventDefault();
   runSearch();
 });
+const searchInfo = document.getElementById("search-info");
+const searchHelp = document.getElementById("search-help");
+if (searchInfo && searchHelp) {
+  searchInfo.addEventListener("click", function () {
+    const open = searchHelp.hidden;
+    searchHelp.hidden = !open;
+    searchInfo.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+}
 function onQueryInput() {
   drawChips();
   drawSaved();
@@ -3254,7 +3525,12 @@ const LIB_FIELDS = [
 ];
 let groveView = "search";
 let shelfView = "search";
-const viewScroll = { search: 0, library: 0, excerpts: 0 };
+const viewScroll = { search: 0, library: 0, excerpts: 0, personas: 0 };
+let personaLinks = null;
+let personaPeople = null;
+let personaTruncated = 0;
+let personaName = "";
+let personaSeq = 0;
 let editing = "";
 let editingLabel = "";
 let editReturn = null;
@@ -3400,8 +3676,6 @@ function askRemove(actions, vol) {
 
 function drawLibrary(data) {
   shelfData = data;
-  libraryGroups = data && data.narrow ? data.narrow : null;
-  paintLibraryNarrow();
   showLibError("");
   drawRoots(data.roots);
   libCount.textContent = countLineLib(data);
@@ -3442,7 +3716,8 @@ function drawLibrary(data) {
         const th = document.createElement("th");
         th.colSpan = LIB_COLS.length + 1;
         th.scope = "rowgroup";
-        th.textContent = label;
+        if (label === "No creator") th.textContent = label;
+        else fillPersonaNames(th, label);
         band.append(th);
         body.append(band);
         groupLabel = label;
@@ -3458,6 +3733,11 @@ function drawLibrary(data) {
         title.textContent = shownTitle(vol);
         title.addEventListener("click", function () { openTab(vol.path, 0, ""); });
         td.append(title);
+      } else if (col[0] === "creator") {
+        const text = String(vol.creator || "");
+        td.className = "lib-cell";
+        td.title = text;
+        fillPersonaNames(td, text);
       } else {
         const text = String(vol[col[0]] || "");
         td.className = "lib-cell";
@@ -3492,11 +3772,11 @@ async function loadLibrary() {
   try {
     const raw = await grove_library(
       libFilter.value || "",
-      narrowArg(libraryNarrow, "language"),
-      narrowArg(libraryNarrow, "author"),
-      narrowArg(libraryNarrow, "form"),
-      narrowArg(libraryNarrow, "period"),
-      narrowArg(libraryNarrow, "genre"),
+      "",
+      "",
+      "",
+      "",
+      "",
       libSortKey,
       libSortDesc ? "desc" : "asc"
     );
@@ -3549,7 +3829,10 @@ function watchJob() {
       }
       if (job.kind) {
         loadInfo();
+        personaLinks = null;
+        personaPeople = null;
         loadLibrary();
+        if (groveView === "personas") loadPersonas();
       }
     } catch (e) {
       if (id === jobWatch && groveView === "library") showLibError("Could not update the library");
@@ -3582,9 +3865,436 @@ async function ensureShelf() {
   }
 }
 
+function fillPersonaNames(parent, text) {
+  parent.replaceChildren();
+  const names = String(text || "").split(";").map(function (part) { return part.trim(); }).filter(Boolean);
+  names.forEach(function (name, i) {
+    if (i) parent.append(document.createTextNode("; "));
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "persona-link";
+    btn.textContent = name;
+    btn.addEventListener("click", function () { openPersona(name); });
+    parent.append(btn);
+  });
+}
+
+function personaRoleRank(role) {
+  const k = String(role || "").toLocaleLowerCase();
+  if (k === "author") return 0;
+  if (k === "translator") return 1;
+  if (k === "editor") return 2;
+  if (k === "speaker") return 3;
+  if (k === "contributor") return 5;
+  return 4;
+}
+
+function personaRoleCmp(a, b) {
+  const d = personaRoleRank(a) - personaRoleRank(b);
+  if (d) return d;
+  return foldCmp(a, b);
+}
+
+function personaWorkTitle(link) {
+  const title = String((link && link.title) || "").trim();
+  if (title) return title;
+  const path = String((link && link.path) || "");
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return (cut >= 0 ? path.slice(cut + 1) : path) || "Untitled";
+}
+
+function personaGroups(links) {
+  const people = [];
+  let person = null;
+  (links || []).forEach(function (link) {
+    const name = String(link.name || "");
+    const role = String(link.role || "");
+    const path = String(link.path || "");
+    if (!name) return;
+    if (!person || foldCmp(person.name, name) !== 0) {
+      person = { name: name, roles: [], works: [], paths: {} };
+      people.push(person);
+    }
+    if (path) person.paths[path] = 1;
+    let known = false;
+    person.roles.forEach(function (have) {
+      if (foldCmp(have, role) === 0) known = true;
+    });
+    if (!known && role) person.roles.push(role);
+    person.works.push({
+      role: role,
+      title: personaWorkTitle(link),
+      path: path,
+      date: String(link.date || "").trim()
+    });
+  });
+  people.forEach(function (p) {
+    p.roles.sort(personaRoleCmp);
+    p.works.sort(function (a, b) {
+      const c = personaRoleCmp(a.role, b.role);
+      if (c) return c;
+      const t = foldCmp(a.title, b.title);
+      if (t) return t;
+      return foldCmp(a.path, b.path);
+    });
+    p.count = Object.keys(p.paths).length;
+  });
+  return people;
+}
+
+function foldHas(hay, needle) {
+  const n = String(needle || "").trim().toLocaleLowerCase();
+  if (!n) return true;
+  return String(hay || "").toLocaleLowerCase().indexOf(n) >= 0;
+}
+
+function showPersonaError(msg) {
+  const el = document.getElementById("persona-err");
+  if (!el) return;
+  el.hidden = !msg;
+  el.textContent = msg || "";
+}
+
+function personaPeopleList() {
+  if (!personaPeople) personaPeople = personaGroups(personaLinks || []);
+  return personaPeople;
+}
+
+function drawPersonas() {
+  const list = document.getElementById("persona-list");
+  const countEl = document.getElementById("persona-count");
+  const tools = document.getElementById("persona-tools");
+  const filter = document.getElementById("persona-filter");
+  if (!list) return;
+  showPersonaError("");
+  const people = personaPeopleList();
+  const open = String(personaName || "").trim();
+  if (tools) tools.hidden = !!open;
+  if (open) {
+    let person = null;
+    people.forEach(function (p) {
+      if (!person && foldCmp(p.name, open) === 0) person = p;
+    });
+    drawPersonaDetail(list, countEl, person, open);
+    return;
+  }
+  const q = filter ? filter.value : "";
+  const shown = people.filter(function (p) { return foldHas(p.name, q); });
+  if (countEl) {
+    let line = "";
+    if (!people.length) line = "No one is named on this shelf.";
+    else if (!shown.length) line = "No one matches.";
+    else line = shown.length + (shown.length === 1 ? " person" : " people");
+    if (personaTruncated) line = (line ? line + " " : "") + "Some later names were left out.";
+    countEl.textContent = line;
+  }
+  list.replaceChildren();
+  shown.forEach(function (person) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "persona-row";
+    const name = document.createElement("span");
+    name.className = "persona-name";
+    name.textContent = person.name;
+    const meta = document.createElement("span");
+    meta.className = "persona-meta";
+    const roles = person.roles.join(", ");
+    const works = person.count + (person.count === 1 ? " work" : " works");
+    meta.textContent = roles ? " · " + roles + " · " + works : " · " + works;
+    btn.append(name, meta);
+    btn.addEventListener("click", function () { openPersona(person.name); });
+    list.append(btn);
+  });
+}
+
+const personaProfiles = {};
+let personaProfileSeq = 0;
+
+function publicHost(url, host) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.hostname === host && !u.username && (u.port === "" || u.port === "443");
+  } catch (e) {
+    return false;
+  }
+}
+
+function photoSrc(photo) {
+  const s = String(photo || "");
+  if (s.indexOf("data:image/jpeg;base64,") === 0 || s.indexOf("data:image/png;base64,") === 0 ||
+      s.indexOf("data:image/gif;base64,") === 0 || s.indexOf("data:image/webp;base64,") === 0) {
+    return s;
+  }
+  return "";
+}
+
+function paintPersonaProfile(host, person, data) {
+  host.replaceChildren();
+  if (!data) {
+    const waiting = document.createElement("p");
+    waiting.className = "persona-meta";
+    waiting.textContent = "Looking up a public profile…";
+    host.append(waiting);
+    return;
+  }
+  if (data.aliases && data.aliases.length) {
+    const known = document.createElement("p");
+    known.className = "persona-known";
+    known.textContent = "Also known as " + data.aliases.join(", ");
+    host.append(known);
+  }
+  if (data.description) {
+    const desc = document.createElement("p");
+    desc.className = "persona-desc";
+    desc.textContent = data.description;
+    host.append(desc);
+  }
+  const sheet = document.createElement("div");
+  sheet.className = "persona-sheet";
+  const src = photoSrc(data.photo);
+  if (src) {
+    const img = document.createElement("img");
+    img.className = "persona-photo";
+    img.alt = "";
+    img.src = src;
+    img.addEventListener("error", function () { img.remove(); });
+    sheet.append(img);
+  }
+  const copy = document.createElement("div");
+  if (data.summary) {
+    const summary = document.createElement("p");
+    summary.className = "persona-summary";
+    summary.textContent = data.summary;
+    copy.append(summary);
+  } else if (data.state === "unavailable") {
+    const miss = document.createElement("p");
+    miss.className = "persona-meta";
+    miss.textContent = "The public profile could not be loaded.";
+    copy.append(miss);
+  } else if (data.state !== "ready") {
+    const miss = document.createElement("p");
+    miss.className = "persona-meta";
+    miss.textContent = "No public profile matched this name.";
+    copy.append(miss);
+  }
+  sheet.append(copy);
+  host.append(sheet);
+  if (data.born || data.died || data.occupation) {
+    const dl = document.createElement("dl");
+    dl.className = "persona-facts";
+    function fact(term, value) {
+      if (!value) return;
+      const wrap = document.createElement("div");
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      wrap.append(dt, dd);
+      dl.append(wrap);
+    }
+    fact("Born", data.born);
+    fact("Died", data.died);
+    fact("Occupation", data.occupation);
+    host.append(dl);
+  }
+  if (data.wikipedia && publicHost(data.wikipedia, "en.wikipedia.org")) {
+    const link = document.createElement("a");
+    link.className = "persona-wiki";
+    link.href = data.wikipedia;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = /^Q\d+$/.test(data.qid || "") ? "Wikipedia · " + data.qid : "Wikipedia";
+    host.append(link);
+  }
+  const also = document.getElementById("persona-also");
+  if (!also) return;
+  also.replaceChildren();
+  const local = {};
+  (person.works || []).forEach(function (work) {
+    local[String(work.title || "").toLocaleLowerCase()] = 1;
+  });
+  const external = (data.works || []).filter(function (work) {
+    return work && work.title && !local[String(work.title).toLocaleLowerCase()];
+  }).sort(function (a, b) {
+    return (b.url ? 1 : 0) - (a.url ? 1 : 0);
+  }).slice(0, 8);
+  if (!external.length) return;
+  const heading = document.createElement("h3");
+  heading.className = "persona-sub";
+  heading.textContent = "Also attributed";
+  also.append(heading);
+  external.forEach(function (work) {
+    const row = document.createElement("p");
+    row.className = "persona-work";
+    const ok = work.url && publicHost(work.url, "en.wikipedia.org");
+    if (ok) {
+      const link = document.createElement("a");
+      link.className = "persona-ext";
+      link.href = work.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = work.title;
+      row.append(link);
+    } else {
+      const span = document.createElement("span");
+      span.className = "persona-ext";
+      span.textContent = work.title;
+      row.append(span);
+    }
+    if (work.year) {
+      const year = document.createElement("span");
+      year.className = "persona-date";
+      year.textContent = work.year;
+      row.append(year);
+    }
+    also.append(row);
+  });
+}
+
+async function loadPersonaProfile(name, host, person) {
+  const seq = ++personaProfileSeq;
+  if (personaProfiles[name]) {
+    paintPersonaProfile(host, person, personaProfiles[name]);
+    return;
+  }
+  paintPersonaProfile(host, person, null);
+  if (typeof grove_persona_profile !== "function") {
+    paintPersonaProfile(host, person, { state: "unavailable" });
+    return;
+  }
+  try {
+    const raw = await grove_persona_profile(name);
+    if (seq !== personaProfileSeq) return;
+    const data = JSON.parse(raw);
+    if (!data || data.error) {
+      paintPersonaProfile(host, person, { state: "unavailable" });
+      return;
+    }
+    personaProfiles[name] = data;
+    paintPersonaProfile(host, person, data);
+  } catch (e) {
+    if (seq === personaProfileSeq) paintPersonaProfile(host, person, { state: "unavailable" });
+  }
+}
+
+function drawPersonaDetail(list, countEl, person, open) {
+  list.replaceChildren();
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "persona-back";
+  back.textContent = "All personas";
+  back.addEventListener("click", showAllPersonas);
+  list.append(back);
+  if (!person) {
+    if (countEl) countEl.textContent = "";
+    const missing = document.createElement("p");
+    missing.className = "persona-meta";
+    missing.textContent = "This name is not on the shelf.";
+    list.append(missing);
+    return;
+  }
+  if (countEl) {
+    countEl.textContent = person.count + (person.count === 1 ? " work" : " works");
+  }
+  const heading = document.createElement("h2");
+  heading.className = "persona-person";
+  heading.textContent = person.name;
+  const pub = document.createElement("div");
+  const toLib = document.createElement("button");
+  toLib.type = "button";
+  toLib.className = "persona-library";
+  toLib.textContent = "In the library";
+  toLib.addEventListener("click", function () {
+    if (libFilter) libFilter.value = person.name;
+    setView("library");
+  });
+  const bib = document.createElement("h2");
+  bib.className = "persona-bib";
+  bib.textContent = "Bibliography";
+  const shelf = document.createElement("h3");
+  shelf.className = "persona-sub";
+  shelf.textContent = "In this library";
+  const also = document.createElement("div");
+  also.id = "persona-also";
+  list.append(heading, pub, toLib, bib, shelf);
+  let current = null;
+  person.works.forEach(function (work) {
+    if (current === null || foldCmp(current, work.role) !== 0) {
+      const h = document.createElement("h3");
+      h.className = "persona-role";
+      h.textContent = work.role || "Contributor";
+      list.append(h);
+      current = work.role;
+    }
+    const row = document.createElement("p");
+    row.className = "persona-work";
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "lib-title";
+    title.textContent = work.title;
+    title.addEventListener("click", function () { openTab(work.path, 0, ""); });
+    row.append(title);
+    if (work.date) {
+      const date = document.createElement("span");
+      date.className = "persona-date";
+      date.textContent = work.date;
+      row.append(date);
+    }
+    list.append(row);
+  });
+  list.append(also);
+  loadPersonaProfile(person.name, pub, person);
+}
+
+function showAllPersonas() {
+  personaName = "";
+  try { sessionStorage.removeItem("grove.persona"); } catch (e) {}
+  drawPersonas();
+}
+
+function openPersona(name) {
+  personaName = String(name || "").trim();
+  try { sessionStorage.setItem("grove.persona", personaName); } catch (e) {}
+  if (groveView === "personas") drawPersonas();
+  else setView("personas");
+}
+
+async function loadPersonas() {
+  const countEl = document.getElementById("persona-count");
+  if (typeof grove_personas !== "function") {
+    showPersonaError("Open the window again to see personas.");
+    return;
+  }
+  if (personaLinks) {
+    drawPersonas();
+    return;
+  }
+  const id = ++personaSeq;
+  if (countEl) countEl.textContent = "Reading the shelf…";
+  showPersonaError("");
+  try {
+    const raw = await grove_personas();
+    if (id !== personaSeq || groveView !== "personas") return;
+    const data = JSON.parse(raw);
+    if (data.error) {
+      if (countEl) countEl.textContent = "";
+      showPersonaError(data.error);
+      return;
+    }
+    personaLinks = data.links || [];
+    personaPeople = null;
+    personaTruncated = data.truncated ? 1 : 0;
+    drawPersonas();
+  } catch (e) {
+    if (id === personaSeq) showPersonaError("Could not read personas");
+  }
+}
+
 function setView(name) {
-  const next = name === "library" ? "library" : name === "read" ? "read" : name === "excerpts" ? "excerpts" : "search";
-  if (groveView === "search" || groveView === "library" || groveView === "excerpts") viewScroll[groveView] = window.scrollY;
+  const next = name === "library" ? "library" : name === "personas" ? "personas" : name === "read" ? "read" : name === "excerpts" ? "excerpts" : "search";
+  if (groveView === "search" || groveView === "library" || groveView === "excerpts" || groveView === "personas") {
+    viewScroll[groveView] = window.scrollY;
+  }
   if (groveView === "read" && next !== "read" && activeId) {
     const prev = tabs.find(function (t) { return t.id === activeId; });
     if (prev) prev.scroll = window.scrollY;
@@ -3598,21 +4308,28 @@ function setView(name) {
   groveView = next;
   searchView.hidden = next !== "search";
   libraryView.hidden = next !== "library";
+  if (personasView) personasView.hidden = next !== "personas";
   if (excerptsView) excerptsView.hidden = next !== "excerpts";
   readerCol.hidden = next !== "read";
   wrap.classList.toggle("wide", next === "library");
   modeSearch.classList.toggle("on", next === "search");
   modeLibrary.classList.toggle("on", next === "library");
+  if (modePersonas) modePersonas.classList.toggle("on", next === "personas");
   if (modeExcerpts) modeExcerpts.classList.toggle("on", next === "excerpts");
   modeSearch.setAttribute("aria-pressed", next === "search" ? "true" : "false");
   modeLibrary.setAttribute("aria-pressed", next === "library" ? "true" : "false");
+  if (modePersonas) modePersonas.setAttribute("aria-pressed", next === "personas" ? "true" : "false");
   if (modeExcerpts) modeExcerpts.setAttribute("aria-pressed", next === "excerpts" ? "true" : "false");
-  if (next === "search" || next === "library" || next === "excerpts") {
+  if (next === "search" || next === "library" || next === "excerpts" || next === "personas") {
     shelfView = next;
     try { sessionStorage.setItem("grove.view", next); } catch (e) {}
+    if (next === "personas") {
+      try { sessionStorage.setItem("grove.persona", personaName || ""); } catch (e) {}
+    }
   }
   drawTabStrip();
   if (next === "library") ensureShelf();
+  else if (next === "personas") loadPersonas();
   else if (next === "excerpts") drawExcerpts();
   else if (next === "search") q.focus();
   if (next !== "read") {
@@ -3727,6 +4444,8 @@ async function dropVolume(path) {
       return;
     }
     if (editing === path) closeEditor();
+    personaLinks = null;
+    personaPeople = null;
     loadLibrary();
   } catch (e) {
     showLibError("Could not remove the volume");
@@ -3763,6 +4482,8 @@ async function saveRecord(ev) {
       return;
     }
     closeEditor();
+    personaLinks = null;
+    personaPeople = null;
     loadLibrary();
   } catch (e) {
     showLibError("Could not save the record");
@@ -3772,12 +4493,16 @@ async function saveRecord(ev) {
 function restoreView() {
   let name = "";
   try { name = sessionStorage.getItem("grove.view") || ""; } catch (e) { return; }
-  if (name === "library" && typeof grove_shelf === "function") setView("library");
+  if (name === "personas") {
+    try { personaName = sessionStorage.getItem("grove.persona") || ""; } catch (e) { personaName = ""; }
+    setView("personas");
+  } else if (name === "library" && typeof grove_shelf === "function") setView("library");
   else if (name === "excerpts") setView("excerpts");
 }
 
 modeSearch.addEventListener("click", function () { setView("search"); });
 modeLibrary.addEventListener("click", function () { setView("library"); });
+if (modePersonas) modePersonas.addEventListener("click", function () { setView("personas"); });
 if (modeExcerpts) modeExcerpts.addEventListener("click", function () { setView("excerpts"); });
 document.getElementById("lib-folder").addEventListener("click", function () { pickPath("dir"); });
 document.getElementById("lib-file").addEventListener("click", function () { pickPath("file"); });
@@ -3795,6 +4520,12 @@ libFilter.addEventListener("input", function () {
   clearTimeout(filterTimer);
   filterTimer = setTimeout(loadLibrary, 200);
 });
+const personaFilter = document.getElementById("persona-filter");
+if (personaFilter) {
+  personaFilter.addEventListener("input", function () {
+    if (groveView === "personas" && personaLinks && !personaName) drawPersonas();
+  });
+}
 libEdit.addEventListener("submit", saveRecord);
 libEdit.addEventListener("click", function (ev) {
   if (ev.target === libEdit) closeEditor();
@@ -3881,6 +4612,39 @@ function bindMode(el, key) {
   });
 }
 
+function snipButton(name) {
+  if (name === "nearby") return snipNearby;
+  if (name === "passage") return snipPassage;
+  return snipSentence;
+}
+
+function setSnipLen(name, persist) {
+  snipLen = SNIP_CHOICES.indexOf(name) >= 0 ? name : "nearby";
+  for (let i = 0; i < SNIP_CHOICES.length; i++) {
+    const el = snipButton(SNIP_CHOICES[i]);
+    if (el) el.setAttribute("aria-pressed", SNIP_CHOICES[i] === snipLen ? "true" : "false");
+  }
+  if (persist) {
+    try { sessionStorage.setItem("grove.search.snip", snipLen); } catch (e) {}
+  }
+  paintSnippets();
+}
+
+function initSnipLen() {
+  let stored = "";
+  try { stored = sessionStorage.getItem("grove.search.snip") || ""; } catch (e) {}
+  setSnipLen(stored, false);
+  for (let i = 0; i < SNIP_CHOICES.length; i++) {
+    const name = SNIP_CHOICES[i];
+    const el = snipButton(name);
+    if (!el) continue;
+    el.addEventListener("click", function () {
+      if (snipLen === name) return;
+      setSnipLen(name, true);
+    });
+  }
+}
+
 function initSearchOpts() {
   if (!searchOpts || typeof grove_modes !== "function") return;
   storedMode(optStem, "grove.search.stem", true);
@@ -3890,6 +4654,7 @@ function initSearchOpts() {
   bindMode(optStem, "grove.search.stem");
   bindMode(optFuzzy, "grove.search.fuzzy");
   bindMode(optConcept, "grove.search.concept");
+  initSnipLen();
 }
 
 function whenReady(fn) {
@@ -3913,20 +4678,25 @@ function restoreQuery() {
   if (qv) q.value = qv;
   if (qv || narrowActive(searchNarrow)) runSearch();
 }
+const toTop = document.getElementById("to-top");
+function syncToTop() {
+  if (!toTop) return;
+  toTop.hidden = window.scrollY < 280;
+}
+if (toTop) {
+  toTop.addEventListener("click", function () {
+    window.scrollTo(0, 0);
+  });
+  window.addEventListener("scroll", syncToTop, { passive: true });
+  syncToTop();
+}
 loadExcerpts();
 bindExcerptChrome();
 searchNarrow = readNarrow("grove.narrow.search");
-libraryNarrow = readNarrow("grove.narrow.library");
 loadLibSort();
-paintLibraryNarrow();
 if (searchNarrowOpen) {
   searchNarrowOpen.addEventListener("click", function () {
-    openNarrowSheet("search", searchNarrowOpen);
-  });
-}
-if (libNarrowOpen) {
-  libNarrowOpen.addEventListener("click", function () {
-    openNarrowSheet("library", libNarrowOpen);
+    openNarrowSheet(searchNarrowOpen);
   });
 }
 if (narrowDone) narrowDone.addEventListener("click", closeNarrowSheet);

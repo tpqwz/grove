@@ -594,6 +594,7 @@ static int is_kw(const unsigned char *p, const unsigned char *end, const char *k
 typedef struct FontUse {
     unsigned content;
     unsigned uni_obj;
+    unsigned page;
     char name[32];
 } FontUse;
 
@@ -848,6 +849,7 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
     take_title(bytes, n, title);
     /* Two passes: first learn each font's ToUnicode map, then pull text. */
     for (int pass = 0; pass < 2; pass++) {
+        unsigned last_page = 0;
         for (size_t i = 0; i < n; i++) {
             size_t word = 0;
             if (size_add(i, 6, &word) != 0 || word > n) {
@@ -971,11 +973,24 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
                 int textual = grove_memmem(use, un, " Tj", 3) || grove_memmem(use, un, " TJ", 3) || grove_memmem(use, un, "Tj", 2) ||
                               grove_memmem(use, un, "TJ", 2);
                 if ((!nuses || is_content) && textual) {
-                    /* One form feed per text stream after the first. A PDF that
-                     * stores one stream per page then has a real page number. */
+                    /* A form feed starts the next page. Streams listed on the
+                     * same /Type /Page stay on that page. With no page catalog,
+                     * each text stream is still its own page. */
+                    unsigned page = 0;
+                    for (int u = 0; u < nuses; u++) {
+                        if (uses[u].content == obj && uses[u].page) {
+                            page = uses[u].page;
+                            break;
+                        }
+                    }
                     size_t before = text->len;
                     if (text->len) {
-                        buf_putc(text, '\f');
+                        int same = page && last_page && page == last_page;
+                        if (!same) {
+                            buf_putc(text, '\f');
+                        } else if (text->data && !isspace((unsigned char)text->data[text->len - 1])) {
+                            buf_putc(text, '\n');
+                        }
                     }
                     size_t marked = text->len;
                     FontCtx ctx;
@@ -997,6 +1012,10 @@ int pdf_extract(const unsigned char *bytes, size_t n, Buf *text, char **title, E
                     if (text->len == marked && text->data) {
                         text->len = before;
                         text->data[before] = 0;
+                    } else if (page) {
+                        last_page = page;
+                    } else if (text->len > before) {
+                        last_page = 0;
                     }
                 }
             }
@@ -1443,6 +1462,13 @@ static int collect_font_uses(const unsigned char *b, size_t n, FontUse **uses, i
                     free(links);
                     clear_font_uses(uses, nuses, slots, nslots);
                     return -1;
+                }
+            }
+        }
+        for (int c = 0; c < nc; c++) {
+            for (int u = 0; u < *nuses; u++) {
+                if ((*uses)[u].content == contents[c] && (*uses)[u].page == 0) {
+                    (*uses)[u].page = (unsigned)(p + 1);
                 }
             }
         }

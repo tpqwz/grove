@@ -4607,7 +4607,7 @@ static int shelf_match(const char *needle, const char *path, const char *title, 
         return 1;
     }
     size_t nn = strlen(needle);
-    const char *bits[8];
+    const char *bits[10];
     int nb = 0;
     bits[nb++] = path;
     bits[nb++] = title;
@@ -4618,6 +4618,8 @@ static int shelf_match(const char *needle, const char *path, const char *title, 
         bits[nb++] = cat->field[CF_LANGUAGE];
         bits[nb++] = cat->field[CF_TYPE];
         bits[nb++] = cat->field[CF_IDENTIFIER];
+        bits[nb++] = cat->field[CF_CONTRIBUTOR];
+        bits[nb++] = cat->field[CF_SOURCE];
     }
     for (int i = 0; i < nb; i++) {
         const char *s = bits[i] ? bits[i] : "";
@@ -6063,4 +6065,487 @@ fail:
     sqlite3_close(db);
     free(owned);
     return -1;
+}
+
+/* A persona link before duplicate names collapse. ord keeps the first spelling. */
+typedef struct PersonaRaw {
+    char *name;
+    char *role;
+    char *title;
+    char *path;
+    char *date;
+    int ord;
+} PersonaRaw;
+
+typedef struct PersonaBuild {
+    PersonaRaw *raw;
+    int n;
+    int cap;
+    int truncated;
+    int ord;
+} PersonaBuild;
+
+static void persona_raw_free(PersonaRaw *r) {
+    if (!r) {
+        return;
+    }
+    free(r->name);
+    free(r->role);
+    free(r->title);
+    free(r->path);
+    free(r->date);
+    memset(r, 0, sizeof *r);
+}
+
+static void persona_raw_clear(PersonaRaw *raw, int n) {
+    int i;
+    if (!raw) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        persona_raw_free(&raw[i]);
+    }
+    free(raw);
+}
+
+/* A role is a short label: letters, space, hyphen, apostrophe, period. */
+static int role_clean(const char *s, size_t n) {
+    int letter = 0;
+    size_t i;
+    if (!s || n < 1 || n > 40) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            letter = 1;
+            continue;
+        }
+        if (c == ' ' || c == '-' || c == '\'' || c == '.' || c >= 0x80) {
+            if (c >= 0x80) {
+                letter = 1;
+            }
+            continue;
+        }
+        return 0;
+    }
+    return letter;
+}
+
+static const char *role_known(const char *s, size_t n) {
+    char buf[41];
+    size_t i;
+    if (!s || n == 0 || n >= sizeof buf) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (unsigned char)(c - 'A' + 'a');
+        }
+        buf[i] = (char)c;
+    }
+    buf[n] = 0;
+    if (strcmp(buf, "author") == 0) {
+        return "Author";
+    }
+    if (strcmp(buf, "translator") == 0) {
+        return "Translator";
+    }
+    if (strcmp(buf, "editor") == 0) {
+        return "Editor";
+    }
+    if (strcmp(buf, "speaker") == 0) {
+        return "Speaker";
+    }
+    if (strcmp(buf, "contributor") == 0) {
+        return "Contributor";
+    }
+    return NULL;
+}
+
+static const char *by_role(const char *s, size_t n, size_t *skip) {
+    static const char *pref[] = {"translated by ", "edited by ", "spoken by ", "read by "};
+    static const char *role[] = {"Translator", "Editor", "Speaker", "Speaker"};
+    int i;
+    for (i = 0; i < 4; i++) {
+        size_t pn = strlen(pref[i]);
+        size_t k;
+        int ok = 1;
+        if (n < pn) {
+            continue;
+        }
+        for (k = 0; k < pn; k++) {
+            unsigned char a = (unsigned char)s[k];
+            unsigned char b = (unsigned char)pref[i][k];
+            if (a >= 'A' && a <= 'Z') {
+                a = (unsigned char)(a - 'A' + 'a');
+            }
+            if (a != b) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            *skip = pn;
+            return role[i];
+        }
+    }
+    return NULL;
+}
+
+static int persona_add(PersonaBuild *b, const char *name, size_t namelen, const char *role, size_t rolelen,
+                       const char *title, const char *path, const char *date) {
+    char *ncopy;
+    char *rcopy;
+    char *tcopy;
+    char *pcopy;
+    char *dcopy;
+    size_t keep;
+    size_t rkeep;
+    PersonaRaw *r;
+    if (!b || b->truncated) {
+        return 0;
+    }
+    if (b->n >= PERSONA_CAP) {
+        b->truncated = 1;
+        return 0;
+    }
+    keep = utf8_prefix_bytes(name ? name : "", name ? namelen : 0, 200);
+    rkeep = utf8_prefix_bytes(role ? role : "", role ? rolelen : 0, 40);
+    if (keep == 0 || rkeep == 0) {
+        return 0;
+    }
+    ncopy = xstrndup(name, keep);
+    rcopy = xstrndup(role, rkeep);
+    tcopy = xstrdup(title ? title : "");
+    pcopy = xstrdup(path ? path : "");
+    dcopy = xstrdup(date ? date : "");
+    if (!ncopy || !rcopy || !tcopy || !pcopy || !dcopy) {
+        free(ncopy);
+        free(rcopy);
+        free(tcopy);
+        free(pcopy);
+        free(dcopy);
+        return -1;
+    }
+    if (b->n == b->cap) {
+        int nc;
+        if (cap_grow(b->cap, 16, &nc) != 0 || grow_alloc((void **)&b->raw, (size_t)nc, sizeof *b->raw) != 0) {
+            free(ncopy);
+            free(rcopy);
+            free(tcopy);
+            free(pcopy);
+            free(dcopy);
+            return -1;
+        }
+        b->cap = nc;
+    }
+    r = &b->raw[b->n];
+    memset(r, 0, sizeof *r);
+    r->name = ncopy;
+    r->role = rcopy;
+    r->title = tcopy;
+    r->path = pcopy;
+    r->date = dcopy;
+    r->ord = b->ord++;
+    b->n++;
+    return 0;
+}
+
+/* cut stops the name at a comma, semicolon, or newline. strip drops one
+ * trailing period. Author names use neither. */
+static int persona_named(PersonaBuild *b, const char *s, size_t n, int cut, int strip, const char *role,
+                         size_t rolelen, const char *title, const char *path, const char *date) {
+    const char *known;
+    size_t i;
+    span_trim(s, n, &s, &n);
+    if (cut) {
+        for (i = 0; i < n; i++) {
+            char c = s[i];
+            if (c == ',' || c == ';' || c == '\n' || c == '\r') {
+                break;
+            }
+        }
+        n = i;
+        span_trim(s, n, &s, &n);
+    }
+    if (strip && n > 0 && s[n - 1] == '.') {
+        n--;
+        span_trim(s, n, &s, &n);
+    }
+    if (n == 0 || !role || rolelen == 0) {
+        return 0;
+    }
+    known = role_known(role, rolelen);
+    if (known) {
+        role = known;
+        rolelen = strlen(known);
+    }
+    return persona_add(b, s, n, role, rolelen, title, path, date);
+}
+
+static int persona_segment(PersonaBuild *b, const char *s, size_t n, int contributor, const char *title,
+                           const char *path, const char *date) {
+    const char *colon = NULL;
+    const char *by;
+    size_t skip = 0;
+    size_t i;
+    span_trim(s, n, &s, &n);
+    if (n == 0) {
+        return 0;
+    }
+    if (contributor) {
+        for (i = 0; i < n; i++) {
+            if (s[i] == ':') {
+                colon = s + i;
+                break;
+            }
+        }
+        if (colon) {
+            const char *ls = s;
+            size_t ln = (size_t)(colon - s);
+            const char *rs;
+            size_t rn;
+            span_trim(ls, ln, &ls, &ln);
+            if (role_clean(ls, ln)) {
+                rs = colon + 1;
+                rn = n - (size_t)(rs - s);
+                return persona_named(b, rs, rn, 1, 1, ls, ln, title, path, date);
+            }
+        }
+    }
+    by = by_role(s, n, &skip);
+    if (by) {
+        return persona_named(b, s + skip, n - skip, 1, 1, by, strlen(by), title, path, date);
+    }
+    if (!contributor) {
+        return 0;
+    }
+    return persona_named(b, s, n, 0, 0, "Contributor", strlen("Contributor"), title, path, date);
+}
+
+static int persona_authors(PersonaBuild *b, const char *field, const char *title, const char *path, const char *date) {
+    const char *p = field ? field : "";
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != ';') {
+            p++;
+        }
+        if (persona_named(b, start, (size_t)(p - start), 0, 0, "Author", strlen("Author"), title, path, date) != 0) {
+            return -1;
+        }
+        if (b->truncated) {
+            return 0;
+        }
+        if (*p == ';') {
+            p++;
+        }
+    }
+    return 0;
+}
+
+static int persona_pieces(PersonaBuild *b, const char *field, int contributor, const char *title, const char *path,
+                          const char *date) {
+    const char *p = field ? field : "";
+    if (!contributor) {
+        size_t n = 0;
+        while (p[n] && p[n] != '\n' && p[n] != '\r') {
+            n++;
+        }
+        return persona_segment(b, p, n, 0, title, path, date);
+    }
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != ';') {
+            p++;
+        }
+        if (persona_segment(b, start, (size_t)(p - start), 1, title, path, date) != 0) {
+            return -1;
+        }
+        if (b->truncated) {
+            return 0;
+        }
+        if (*p == ';') {
+            p++;
+        }
+    }
+    return 0;
+}
+
+static int persona_ord_cmp(const void *va, const void *vb) {
+    const PersonaRaw *a = va;
+    const PersonaRaw *b = vb;
+    int c = fold_cmp(a->name, b->name);
+    if (c) {
+        return c;
+    }
+    c = fold_cmp(a->role, b->role);
+    if (c) {
+        return c;
+    }
+    c = strcmp(a->path ? a->path : "", b->path ? b->path : "");
+    if (c) {
+        return c;
+    }
+    if (a->ord < b->ord) {
+        return -1;
+    }
+    if (a->ord > b->ord) {
+        return 1;
+    }
+    return 0;
+}
+
+static int persona_fail(PersonaBuild *b, Cat *cats, int ncats, sqlite3_stmt *st, char *path, char *named) {
+    free(path);
+    free(named);
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    cats_free(cats, ncats);
+    if (b) {
+        persona_raw_clear(b->raw, b->n);
+        b->raw = NULL;
+        b->n = 0;
+    }
+    return -1;
+}
+
+int index_personas(Index *ix, Personas *out, Err *e) {
+    PersonaBuild b;
+    Cat *cats = NULL;
+    int ncats = 0;
+    sqlite3_stmt *st = NULL;
+    int step = SQLITE_DONE;
+    int stop = 0;
+    int w = 0;
+    int i;
+    memset(&b, 0, sizeof b);
+    if (out) {
+        memset(out, 0, sizeof *out);
+    }
+    if (!ix || !out) {
+        err_set(e, "no index");
+        return -1;
+    }
+    if (reload_roots(ix, e) != 0) {
+        return -1;
+    }
+    if (load_catalog(ix->db, &cats, &ncats, e) != 0) {
+        return -1;
+    }
+    if (prep(ix, &st, "SELECT title, root_id, rel FROM docs", e) != 0) {
+        cats_free(cats, ncats);
+        return -1;
+    }
+    while (!stop && (step = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *docs_title = (const char *)sqlite3_column_text(st, 0);
+        const char *rel = (const char *)sqlite3_column_text(st, 2);
+        int64_t root_id = sqlite3_column_int64(st, 1);
+        char *path = display_path(ix, root_id, rel, NULL);
+        char *named = NULL;
+        const Cat *cat;
+        const char *shown;
+        const char *date;
+        const char *authors;
+        if (!path) {
+            err_set(e, "out of memory");
+            return persona_fail(&b, cats, ncats, st, NULL, NULL);
+        }
+        cat = cat_find(cats, ncats, path);
+        shown = docs_title ? docs_title : "";
+        date = "";
+        if (cat && cat->field[CF_TITLE] && cat->field[CF_TITLE][0]) {
+            shown = cat->field[CF_TITLE];
+        }
+        if (cat && cat->field[CF_DATE]) {
+            date = cat->field[CF_DATE];
+        }
+        if (cat && !text_blank(cat->field[CF_CREATOR])) {
+            authors = cat->field[CF_CREATOR];
+        } else {
+            if (creator_in_name(path, &named) != 0) {
+                err_set(e, "out of memory");
+                return persona_fail(&b, cats, ncats, st, path, named);
+            }
+            authors = named ? named : "";
+        }
+        if (persona_authors(&b, authors, shown, path, date) != 0 ||
+            (cat && persona_pieces(&b, cat->field[CF_CONTRIBUTOR], 1, shown, path, date) != 0) ||
+            (cat && persona_pieces(&b, cat->field[CF_SOURCE], 0, shown, path, date) != 0)) {
+            err_set(e, "out of memory");
+            return persona_fail(&b, cats, ncats, st, path, named);
+        }
+        free(named);
+        free(path);
+        if (b.truncated) {
+            stop = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (!stop && step != SQLITE_DONE) {
+        db_fail(ix, e, "personas");
+        return persona_fail(&b, cats, ncats, NULL, NULL, NULL);
+    }
+    cats_free(cats, ncats);
+    cats = NULL;
+    if (b.n > 1) {
+        qsort(b.raw, (size_t)b.n, sizeof *b.raw, persona_ord_cmp);
+    }
+    for (i = 0; i < b.n; i++) {
+        if (w > 0 && fold_cmp(b.raw[w - 1].name, b.raw[i].name) == 0 &&
+            fold_cmp(b.raw[w - 1].role, b.raw[i].role) == 0 &&
+            strcmp(b.raw[w - 1].path ? b.raw[w - 1].path : "", b.raw[i].path ? b.raw[i].path : "") == 0) {
+            persona_raw_free(&b.raw[i]);
+            continue;
+        }
+        if (w != i) {
+            b.raw[w] = b.raw[i];
+            memset(&b.raw[i], 0, sizeof b.raw[i]);
+        }
+        w++;
+    }
+    if (w > 0) {
+        PersonaLink *links = NULL;
+        if (grow_alloc((void **)&links, (size_t)w, sizeof *links) != 0) {
+            err_set(e, "out of memory");
+            persona_raw_clear(b.raw, b.n);
+            return -1;
+        }
+        for (i = 0; i < w; i++) {
+            links[i].name = b.raw[i].name;
+            links[i].role = b.raw[i].role;
+            links[i].title = b.raw[i].title;
+            links[i].path = b.raw[i].path;
+            links[i].date = b.raw[i].date;
+            b.raw[i].name = NULL;
+            b.raw[i].role = NULL;
+            b.raw[i].title = NULL;
+            b.raw[i].path = NULL;
+            b.raw[i].date = NULL;
+        }
+        out->links = links;
+    }
+    persona_raw_clear(b.raw, b.n);
+    out->n = w;
+    out->truncated = b.truncated;
+    return 0;
+}
+
+void personas_free(Personas *list) {
+    int i;
+    if (!list) {
+        return;
+    }
+    for (i = 0; i < list->n; i++) {
+        free(list->links[i].name);
+        free(list->links[i].role);
+        free(list->links[i].title);
+        free(list->links[i].path);
+        free(list->links[i].date);
+    }
+    free(list->links);
+    memset(list, 0, sizeof *list);
 }

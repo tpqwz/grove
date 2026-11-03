@@ -1,6 +1,7 @@
 #include "index.h"
 #include "mod.h"
 #include "os.h"
+#include "persona.h"
 #include "webui.h"
 
 #include <errno.h>
@@ -1705,6 +1706,142 @@ fail:
     return NULL;
 }
 
+static char *personas_json(void) {
+    Personas list;
+    Buf b;
+    int i;
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    memset(&list, 0, sizeof list);
+    Err e;
+    err_clear(&e);
+    if (index_personas(ix, &list, &e) != 0) {
+        personas_free(&list);
+        return json_error(e.msg[0] ? e.msg : "could not read personas");
+    }
+    buf_init(&b);
+    if (buf_printf(&b, "{\"truncated\":%d,\"links\":[", list.truncated ? 1 : 0) != 0) {
+        goto fail;
+    }
+    for (i = 0; i < list.n; i++) {
+        const PersonaLink *link = &list.links[i];
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"name\":") != 0 || jesc(&b, link->name) != 0 || jstr(&b, "role", link->role) != 0 ||
+            jstr(&b, "title", link->title) != 0 || jstr(&b, "path", link->path) != 0 ||
+            jstr(&b, "date", link->date) != 0 || buf_putc(&b, '}') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    personas_free(&list);
+    return b.data;
+fail:
+    personas_free(&list);
+    buf_free(&b);
+    return NULL;
+}
+
+static int b64_append(Buf *b, const unsigned char *p, size_t n) {
+    static const char enc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i = 0;
+    while (i + 3 <= n) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8) | (unsigned)p[i + 2];
+        char out[4];
+        out[0] = enc[(v >> 18) & 63];
+        out[1] = enc[(v >> 12) & 63];
+        out[2] = enc[(v >> 6) & 63];
+        out[3] = enc[v & 63];
+        if (buf_append(b, out, 4) != 0) {
+            return -1;
+        }
+        i += 3;
+    }
+    if (i < n) {
+        unsigned v = (unsigned)p[i] << 16;
+        char out[4];
+        int two = i + 1 < n;
+        if (two) {
+            v |= (unsigned)p[i + 1] << 8;
+        }
+        out[0] = enc[(v >> 18) & 63];
+        out[1] = enc[(v >> 12) & 63];
+        out[2] = two ? enc[(v >> 6) & 63] : '=';
+        out[3] = '=';
+        if (buf_append(b, out, 4) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int photo_mime(const char *type) {
+    return type && (strcmp(type, "image/jpeg") == 0 || strcmp(type, "image/png") == 0 || strcmp(type, "image/gif") == 0 ||
+                    strcmp(type, "image/webp") == 0);
+}
+
+static char *profile_json(const PersonaProfile *p) {
+    Buf b;
+    int i;
+    const char *state = "none";
+    buf_init(&b);
+    if (p->state == PERSONA_READY) {
+        state = "ready";
+    } else if (p->state == PERSONA_UNAVAILABLE) {
+        state = "unavailable";
+    }
+    if (buf_puts(&b, "{\"state\":") != 0 || jesc(&b, state) != 0 || jstr(&b, "qid", p->qid) != 0 ||
+        jstr(&b, "description", p->description) != 0 || jstr(&b, "summary", p->summary) != 0 ||
+        jstr(&b, "born", p->born) != 0 || jstr(&b, "died", p->died) != 0 ||
+        jstr(&b, "occupation", p->occupation) != 0 || jstr(&b, "wikipedia", p->wikipedia) != 0 ||
+        buf_puts(&b, ",\"aliases\":[") != 0) {
+        goto fail;
+    }
+    for (i = 0; i < p->alias_n; i++) {
+        if ((i && buf_putc(&b, ',') != 0) || jesc(&b, p->aliases[i]) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "],\"works\":[") != 0) {
+        goto fail;
+    }
+    for (i = 0; i < p->work_n; i++) {
+        const PersonaPubWork *w = &p->works[i];
+        if ((i && buf_putc(&b, ',') != 0) || buf_puts(&b, "{\"title\":") != 0 || jesc(&b, w->title) != 0 ||
+            jstr(&b, "year", w->year) != 0 || jstr(&b, "url", w->url) != 0 || buf_putc(&b, '}') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_putc(&b, ']') != 0) {
+        goto fail;
+    }
+    if (p->photo && p->photo_n > 0 && photo_mime(p->photo_type)) {
+        if (buf_puts(&b, ",\"photo\":\"data:") != 0 || buf_puts(&b, p->photo_type) != 0 ||
+            buf_puts(&b, ";base64,") != 0 || b64_append(&b, p->photo, p->photo_n) != 0 || buf_putc(&b, '"') != 0) {
+            goto fail;
+        }
+    }
+    if (buf_putc(&b, '}') != 0) {
+        goto fail;
+    }
+    return b.data;
+fail:
+    buf_free(&b);
+    return NULL;
+}
+
+static void on_personas(webui_event_t *e) {
+    char *json = NULL;
+    pthread_mutex_lock(&mu);
+    json = personas_json();
+    pthread_mutex_unlock(&mu);
+    reply_owned(e, json);
+}
+
 static char *job_json(void) {
     GroveJob job;
     grove_host_job(&job);
@@ -1725,6 +1862,31 @@ static char *job_json(void) {
 static const char *arg_at(webui_event_t *e, size_t i) {
     const char *s = webui_get_string_at(e, i);
     return s ? s : "";
+}
+
+static void on_persona_profile(webui_event_t *e) {
+    char *name = xstrdup(arg_at(e, 0));
+    char *dir = xstrdup(index_dir ? index_dir : "");
+    PersonaProfile profile;
+    Err err;
+    char *json = NULL;
+    if (!name || !dir) {
+        free(name);
+        free(dir);
+        reply(e, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    memset(&profile, 0, sizeof profile);
+    err_clear(&err);
+    if (persona_profile(dir, name, &profile, &err) != 0) {
+        json = json_error(err.msg[0] ? err.msg : "could not read that profile");
+    } else {
+        json = profile_json(&profile);
+    }
+    persona_profile_free(&profile);
+    free(name);
+    free(dir);
+    reply_owned(e, json);
 }
 
 static void on_library(webui_event_t *e) {
@@ -1935,6 +2097,8 @@ GUARD(on_alerts)
 GUARD(on_watch)
 GUARD(on_unwatch)
 GUARD(on_library)
+GUARD(on_personas)
+GUARD(on_persona_profile)
 GUARD(on_catalog)
 GUARD(on_drop)
 GUARD(on_add)
@@ -1992,6 +2156,8 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_watch", on_watch_guard);
     webui_bind(win, "grove_unwatch", on_unwatch_guard);
     webui_bind(win, "grove_library", on_library_guard);
+    webui_bind(win, "grove_personas", on_personas_guard);
+    webui_bind(win, "grove_persona_profile", on_persona_profile_guard);
     webui_bind(win, "grove_catalog", on_catalog_guard);
     webui_bind(win, "grove_drop", on_drop_guard);
     webui_bind(win, "grove_add", on_add_guard);

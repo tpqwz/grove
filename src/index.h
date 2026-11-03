@@ -286,5 +286,30 @@ int index_page_url(Index *ix, const char *path, char **url, Err *e);
 /* Drops the volume from the index. The file on disk stays. */
 int index_library_drop(Index *ix, const char *path, Err *e);
 
+/* One name in one role on one volume. The same spelling in another role is
+ * another link. PERSONA_CAP counts links before those duplicates collapse. */
+#define PERSONA_CAP 20000
+
+typedef struct PersonaLink {
+    char *name;
+    char *role;
+    char *title;
+    char *path;
+    char *date;
+} PersonaLink;
+
+typedef struct Personas {
+    PersonaLink *links;
+    int n;
+    int truncated;
+} Personas;
+
+/* Every volume, past LIBRARY_SHOW. Author is the creator, or the name in
+ * "Title — Author" when the creator is blank. Contributor is Role: Name.
+ * A source line that begins Translated by, Edited by, Read by, or Spoken by
+ * counts as that role. */
+int index_personas(Index *ix, Personas *out, Err *e);
+void personas_free(Personas *list);
+
 #endif
 

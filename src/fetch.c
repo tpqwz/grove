@@ -761,3 +761,286 @@ int grove_fetch_into(Index *ix, const char *index_dir, const char *raw, IndexSta
     free(page);
     return rc;
 }
+
+static int host_is(const char *host, size_t n, const char *lit) {
+    size_t m = strlen(lit);
+    size_t i;
+    if (n != m) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)host[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (unsigned char)(c - 'A' + 'a');
+        }
+        if (c != (unsigned char)lit[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int fetch_https_allowed(const char *url, const char *const *hosts, int nhosts) {
+    const char *host;
+    const char *p;
+    const char *end;
+    const char *rest;
+    size_t n;
+    size_t hn;
+    int i;
+    if (!url || !hosts || nhosts <= 0) {
+        return 0;
+    }
+    n = strlen(url);
+    if (n < 9 || n > (size_t)FETCH_URL_MAX || strncmp(url, "https://", 8) != 0) {
+        return 0;
+    }
+    host = url + 8;
+    end = url + n;
+    if (*host == '/' || *host == '[' || *host == '@' || *host == ':' || *host == '.' || *host == '%') {
+        return 0;
+    }
+    p = host;
+    while (p < end && *p != '/' && *p != ':' && *p != '?' && *p != '#' && *p != '@') {
+        unsigned char c = (unsigned char)*p;
+        if (c <= 0x20 || c >= 0x7f || c == '\\' || c == '%') {
+            return 0;
+        }
+        p++;
+    }
+    hn = (size_t)(p - host);
+    if (hn == 0 || hn > 253 || host[hn - 1] == '.') {
+        return 0;
+    }
+    if (p < end && *p == ':') {
+        int port = 0;
+        int digits = 0;
+        p++;
+        while (p < end && *p >= '0' && *p <= '9') {
+            port = port * 10 + (*p - '0');
+            if (port > 65535) {
+                return 0;
+            }
+            digits++;
+            p++;
+        }
+        if (digits == 0 || port != 443) {
+            return 0;
+        }
+    }
+    if (p < end && *p == '@') {
+        return 0;
+    }
+    rest = p;
+    for (p = rest; p < end; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= 0x20 || c == 0x7f || c == '\\' || c == '@') {
+            return 0;
+        }
+    }
+    for (i = 0; i < nhosts; i++) {
+        if (hosts[i] && host_is(host, hn, hosts[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int fetch_https_get(const char *url, const char *const *hosts, int nhosts, const char *accept, size_t cap,
+                    unsigned char **body, size_t *n, Err *e) {
+    char body_path[] = "/tmp/grove-https-body-XXXXXX";
+    char err_path[] = "/tmp/grove-https-err-XXXXXX";
+    char eff_path[] = "/tmp/grove-https-url-XXXXXX";
+    int body_fd = -1;
+    int err_fd = -1;
+    int eff_fd = -1;
+    int have_body = 0;
+    int have_err = 0;
+    int have_eff = 0;
+    int spawned = 0;
+    pid_t pid = 0;
+    char *request = NULL;
+    unsigned char *eff = NULL;
+    size_t eff_n = 0;
+    char *argv[28];
+    int argc = 0;
+    if (body) {
+        *body = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!body || !n || cap == 0) {
+        err_set(e, "could not fetch that profile");
+        return -1;
+    }
+    if (accept && strcmp(accept, "application/json") != 0) {
+        err_set(e, "could not fetch that profile");
+        return -1;
+    }
+    if (!fetch_https_allowed(url, hosts, nhosts)) {
+        err_set(e, "that address is not a public profile");
+        return -1;
+    }
+    request = xstrdup(url);
+    body_fd = mkstemp(body_path);
+    err_fd = mkstemp(err_path);
+    eff_fd = mkstemp(eff_path);
+    have_body = body_fd >= 0;
+    have_err = err_fd >= 0;
+    have_eff = eff_fd >= 0;
+    if (!request || body_fd < 0 || err_fd < 0 || eff_fd < 0) {
+        err_set(e, "could not fetch that profile");
+        goto fail;
+    }
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa) != 0) {
+        err_set(e, "could not fetch that profile");
+        goto fail;
+    }
+    int act = 0;
+    act |= posix_spawn_file_actions_adddup2(&fa, eff_fd, STDOUT_FILENO);
+    act |= posix_spawn_file_actions_addclose(&fa, eff_fd);
+    act |= posix_spawn_file_actions_addclose(&fa, body_fd);
+    act |= posix_spawn_file_actions_addclose(&fa, err_fd);
+    act |= posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, err_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    argv[argc++] = "curl";
+    argv[argc++] = "--globoff";
+    argv[argc++] = "--proto";
+    argv[argc++] = "=https";
+    argv[argc++] = "--proto-redir";
+    argv[argc++] = "=https";
+    argv[argc++] = "--fail";
+    argv[argc++] = "--silent";
+    argv[argc++] = "--show-error";
+    argv[argc++] = "--location";
+    argv[argc++] = "--max-redirs";
+    argv[argc++] = "3";
+    argv[argc++] = "--compressed";
+    argv[argc++] = "--max-time";
+    argv[argc++] = "8";
+    argv[argc++] = "--connect-timeout";
+    argv[argc++] = "5";
+    argv[argc++] = "--user-agent";
+    argv[argc++] = "grove/0.1.0-alpha";
+    if (accept) {
+        argv[argc++] = "-H";
+        argv[argc++] = "Accept: application/json";
+    }
+    argv[argc++] = "-o";
+    argv[argc++] = body_path;
+    argv[argc++] = "-w";
+    argv[argc++] = "%{url_effective}";
+    argv[argc++] = "--";
+    argv[argc++] = request;
+    argv[argc++] = NULL;
+    int rc = act != 0 ? act : posix_spawnp(&pid, "curl", &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) {
+        if (rc == ENOENT) {
+            err_set(e, "this machine has no curl, so a page cannot be fetched");
+        } else {
+            err_set(e, "could not fetch that profile");
+        }
+        goto fail;
+    }
+    spawned = 1;
+    close(body_fd);
+    body_fd = -1;
+    close(err_fd);
+    err_fd = -1;
+    close(eff_fd);
+    eff_fd = -1;
+    if (wait_pid(pid) != 0) {
+        spawned = 0;
+        set_curl_error(err_path, e);
+        goto fail;
+    }
+    spawned = 0;
+    {
+        int fd = open(eff_path, O_RDONLY);
+        unsigned char *raw = NULL;
+        size_t raw_n = 0;
+        Err ignore;
+        err_clear(&ignore);
+        if (fd < 0 || fetch_read_cap(fd, &raw, &raw_n, 4096, &ignore) != 0 || raw_n == 0 || raw_n > 4095) {
+            if (fd >= 0) {
+                close(fd);
+            }
+            free(raw);
+            err_set(e, "could not fetch that profile");
+            goto fail;
+        }
+        close(fd);
+        eff = malloc(raw_n + 1);
+        if (!eff) {
+            free(raw);
+            err_set(e, "out of memory");
+            goto fail;
+        }
+        memcpy(eff, raw, raw_n);
+        free(raw);
+        eff_n = raw_n;
+    }
+    while (eff_n && (eff[eff_n - 1] == '\n' || eff[eff_n - 1] == '\r' || eff[eff_n - 1] == ' ')) {
+        eff_n--;
+    }
+    eff[eff_n] = 0;
+    if (!fetch_https_allowed((const char *)eff, hosts, nhosts)) {
+        err_set(e, "that address is not a public profile");
+        goto fail;
+    }
+    {
+        int fd = open(body_path, O_RDONLY);
+        if (fd < 0) {
+            err_set(e, "could not fetch that profile");
+            goto fail;
+        }
+        rc = fetch_read_cap(fd, body, n, cap, e);
+        close(fd);
+        if (rc != 0) {
+            goto fail;
+        }
+    }
+    if (*n == 0) {
+        free(*body);
+        *body = NULL;
+        err_set(e, "that page is empty");
+        goto fail;
+    }
+    free(request);
+    free(eff);
+    unlink(body_path);
+    unlink(err_path);
+    unlink(eff_path);
+    return 0;
+fail:
+    if (spawned) {
+        kill(pid, SIGKILL);
+        wait_pid(pid);
+    }
+    if (body_fd >= 0) {
+        close(body_fd);
+    }
+    if (err_fd >= 0) {
+        close(err_fd);
+    }
+    if (eff_fd >= 0) {
+        close(eff_fd);
+    }
+    if (have_body) {
+        unlink(body_path);
+    }
+    if (have_err) {
+        unlink(err_path);
+    }
+    if (have_eff) {
+        unlink(eff_path);
+    }
+    free(request);
+    free(eff);
+    free(*body);
+    *body = NULL;
+    *n = 0;
+    return -1;
+}

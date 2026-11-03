@@ -25,4 +25,13 @@ int fetch_save(const char *index_dir, const char *raw, char **saved, char **url,
  * is filled in when that field is still empty. */
 int grove_fetch_into(Index *ix, const char *index_dir, const char *raw, IndexStats *st, Err *e);
 
+/* 1 when url is https, has no userinfo, uses port 443, and the host is one
+ * of hosts. A redirect target is checked with the same rule. */
+int fetch_https_allowed(const char *url, const char *const *hosts, int nhosts);
+
+/* GET one allowlisted https address. accept is NULL or "application/json".
+ * More than cap bytes is an error and *body stays NULL. The caller frees *body. */
+int fetch_https_get(const char *url, const char *const *hosts, int nhosts, const char *accept, size_t cap,
+                    unsigned char **body, size_t *n, Err *e);
+
 #endif

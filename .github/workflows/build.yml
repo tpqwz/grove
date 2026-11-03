@@ -31,14 +31,11 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          cp grove dist/grove
-          printf '%s\n' 'grove 0.1.0-alpha' 'linux x86_64' 'This archive is the Linux x86_64 build.' > dist/PLATFORM.txt
+          cp grove dist/grove-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: grove-linux-x86_64
-          path: |
-            dist/grove
-            dist/PLATFORM.txt
+          path: dist/grove-linux-x86_64
           if-no-files-found: error
 
   macos:
@@ -64,15 +61,12 @@ jobs:
             *) arch="$(uname -m)" ;;
           esac
           mkdir -p dist
-          cp grove dist/grove
-          printf '%s\n' 'grove 0.1.0-alpha' "macos ${arch}" "This archive is the macOS ${arch} build." > dist/PLATFORM.txt
+          cp grove "dist/grove-macos-${arch}"
           echo "arch=${arch}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: grove-macos-${{ steps.pack.outputs.arch }}
-          path: |
-            dist/grove
-            dist/PLATFORM.txt
+          path: dist/grove-macos-${{ steps.pack.outputs.arch }}
           if-no-files-found: error
 
   windows:
@@ -104,12 +98,45 @@ jobs:
           ./grove.exe --index "$d/idx" search 'portable search' | grep -q 'note.txt'
           rm -rf "$d"
           mkdir -p dist
-          cp grove.exe dist/grove.exe
-          printf '%s\n' 'grove 0.1.0-alpha' 'windows x86_64' 'This archive is the Windows x86_64 build.' > dist/PLATFORM.txt
+          cp grove.exe dist/grove-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: grove-windows-x86_64
-          path: |
-            dist/grove.exe
-            dist/PLATFORM.txt
+          path: dist/grove-windows-x86_64.exe
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: grove-*
+          path: dist
+      - name: Publish the programs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          mapfile -t files < <(find dist -type f | sort)
+          test "${#files[@]}" -gt 0
+          notes=$(mktemp)
+          cat > "$notes" << EOF
+          grove ${ver}, built from \`${GITHUB_SHA::7}\`.
+
+          Each file is one platform's program. On Linux and macOS, chmod +x the file before running it.
+
+          A command does not open a browser. The same program opens the window.
+          EOF
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --prerelease \
+              --title "grove ${ver}" \
+              --notes-file "$notes"
+          fi

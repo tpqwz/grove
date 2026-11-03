@@ -15,13 +15,7 @@ make test
 
 `make` writes `./grove`, or `grove.exe` on Windows. That one program is the commands and the window. On Linux and macOS, `make test` builds the unit tests with address and undefined-behavior sanitizers, then builds `./grove` and runs `tests/integration.sh`. On Windows, `make test` builds `grove.exe` and checks `--version`. The build refuses a wrapped allocation size, checks format strings, and links with a guarded stack and, on Linux, full RELRO. Grove's own C follows the SEI CERT C Coding Standard: a conversion reports failure, a size that would wrap is refused, and a file is measured with `fstat` on the descriptor that was opened. Running `grove` does not need Python. The first build clones [WebUI](https://github.com/webui-dev/webui) and packs the page. A later run of the program does not. A Windows copy uses that packed page.
 
-GitHub Actions builds that same file on every push. Each artifact is one platform:
-
-- `grove-linux-x86_64` is the Linux x86_64 executable.
-- `grove-macos-arm64` or `grove-macos-x86_64` is the macOS executable for that Mac.
-- `grove-windows-x86_64` is the Windows x86_64 executable, named `grove.exe`.
-
-`PLATFORM.txt` in the artifact names that platform. A command does not need a browser. The window does.
+GitHub Actions builds that same file on every push. A version tag publishes the program itself, one file for each platform: `grove-linux-x86_64`, `grove-macos-arm64` or `grove-macos-x86_64`, and `grove-windows-x86_64.exe`. On Linux and macOS, `chmod +x` the download before running it. A command does not need a browser. The window does.
 
 ## Index
 

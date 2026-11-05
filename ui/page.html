@@ -804,10 +804,18 @@
     #search-view .shelf:has(> .narrow-aside:not([hidden])) > .narrow-aside {
       float: left;
       display: block;
+      position: relative;
+      z-index: 2;
       width: 15rem;
       margin: 0 clamp(1.25rem, 3vw, 2.5rem) 1.35rem 0;
     }
     #search-view .shelf:has(> .narrow-aside:not([hidden])) #results { display: block; }
+    #search-view .shelf:has(> .narrow-aside.folded:not([hidden])) > .narrow-aside {
+      float: none;
+      width: auto;
+      margin: 0 0 0.45rem;
+    }
+    #search-view .shelf:has(> .narrow-aside.folded:not([hidden])) #results { display: grid; }
     #search-view .narrow-open { display: none; }
   }
   @container page (min-width: 42rem) {
@@ -844,6 +852,29 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
+  button.narrow-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 1 1 auto;
+    padding: 0.35rem 0;
+  }
+  button.narrow-title::before {
+    content: "";
+    width: 0;
+    height: 0;
+    border-left: 0.28rem solid transparent;
+    border-right: 0.28rem solid transparent;
+    border-top: 0.34rem solid currentColor;
+  }
+  .narrow-aside.folded button.narrow-title::before {
+    border-top: 0.26rem solid transparent;
+    border-right: 0;
+    border-bottom: 0.26rem solid transparent;
+    border-left: 0.34rem solid currentColor;
+  }
+  button.narrow-title:hover,
+  button.narrow-title:focus-visible { color: var(--ink); }
   .narrow-clear { color: var(--focus); font-size: 0.82rem; }
   .narrow-clear:hover { text-decoration: underline; }
   .narrow-group { border: 0; margin: 0.95rem 0 0; padding: 0; min-width: 0; }
@@ -878,6 +909,35 @@
   .narrow-sheet .narrow-body { overflow: auto; min-height: 0; flex: 1; }
   .narrow-done { color: var(--focus); font-size: 0.95rem; margin-top: 0.8rem; align-self: flex-start; }
   .narrow-done:hover { text-decoration: underline; }
+  .set-h {
+    margin: 1.35rem 0 0.4rem;
+    font-family: Palatino, "Palatino Linotype", Georgia, serif;
+    font-size: 1.2rem;
+    font-weight: 400;
+  }
+  .set-choice {
+    display: block;
+    width: 100%;
+    max-width: 40rem;
+    margin: 0.4rem 0 0;
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--paper);
+  }
+  .set-choice.on { background: var(--mark); border-color: transparent; }
+  .set-choice b { display: block; font-weight: 600; }
+  .set-choice span { display: block; margin-top: 0.15rem; color: var(--muted); font-size: 0.88rem; }
+  .stats {
+    display: grid;
+    grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr);
+    gap: 0.28rem 1rem;
+    margin: 0.35rem 0 0;
+    max-width: 46rem;
+  }
+  .stats dt { color: var(--muted); }
+  .stats dd { margin: 0; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -889,6 +949,7 @@
         <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
         <button type="button" id="mode-personas" class="mode" aria-pressed="false">Personas</button>
         <button type="button" id="mode-excerpts" class="mode" aria-pressed="false">Excerpts</button>
+        <button type="button" id="mode-settings" class="mode" aria-pressed="false">Settings</button>
         <div class="tabs" id="tabs"></div>
       </nav>
     </div>
@@ -965,6 +1026,13 @@
       <p class="count" id="ex-count"></p>
       <div id="ex-list"></div>
     </div>
+    <div id="settings-view" hidden>
+      <p class="help">These choices are kept for this window. A search uses them at once.</p>
+      <h2 class="set-h">This index</h2>
+      <dl class="stats" id="settings-stats"></dl>
+      <h2 class="set-h">Search</h2>
+      <div id="settings-opts"></div>
+    </div>
     </div>
     <div id="reader-col" hidden>
       <div id="panes"></div>
@@ -1034,6 +1102,10 @@ const modeSearch = document.getElementById("mode-search");
 const modeLibrary = document.getElementById("mode-library");
 const modePersonas = document.getElementById("mode-personas");
 const modeExcerpts = document.getElementById("mode-excerpts");
+const modeSettings = document.getElementById("mode-settings");
+const settingsView = document.getElementById("settings-view");
+const settingsStats = document.getElementById("settings-stats");
+const settingsOpts = document.getElementById("settings-opts");
 const searchView = document.getElementById("search-view");
 const libraryView = document.getElementById("library-view");
 const personasView = document.getElementById("personas-view");
@@ -1387,6 +1459,7 @@ function emptyNarrow() {
 }
 
 let searchNarrow = emptyNarrow();
+let narrowFolded = false;
 let searchGroups = null;
 let sheetKind = "";
 let sheetOpener = null;
@@ -1491,14 +1564,30 @@ function toggleList(list, value) {
   return true;
 }
 
+function foldNarrow(on) {
+  narrowFolded = !!on;
+  try {
+    if (narrowFolded) sessionStorage.setItem("grove.narrow.folded", "1");
+    else sessionStorage.removeItem("grove.narrow.folded");
+  } catch (e) {}
+  paintSearchNarrow();
+}
+
 function fillNarrow(el, narrow, sel, onToggle, onClear, emptyCopy) {
   if (!el) return;
+  const foldable = el === searchNarrowEl;
   el.replaceChildren();
+  if (foldable) el.classList.toggle("folded", narrowFolded);
   const head = document.createElement("div");
   head.className = "narrow-head";
-  const title = document.createElement("h2");
+  const title = document.createElement(foldable ? "button" : "h2");
   title.className = "narrow-title";
   title.textContent = "Narrow";
+  if (foldable) {
+    title.type = "button";
+    title.setAttribute("aria-expanded", narrowFolded ? "false" : "true");
+    title.addEventListener("click", function () { foldNarrow(!narrowFolded); });
+  }
   head.append(title);
   if (narrowActive(sel)) {
     const clear = document.createElement("button");
@@ -1509,6 +1598,7 @@ function fillNarrow(el, narrow, sel, onToggle, onClear, emptyCopy) {
     head.append(clear);
   }
   el.append(head);
+  if (foldable && narrowFolded) return;
   if (groupsEmpty(narrow)) {
     if (emptyCopy) {
       const note = document.createElement("p");
@@ -4422,8 +4512,8 @@ async function loadPersonas() {
 }
 
 function setView(name) {
-  const next = name === "library" ? "library" : name === "personas" ? "personas" : name === "read" ? "read" : name === "excerpts" ? "excerpts" : "search";
-  if (groveView === "search" || groveView === "library" || groveView === "excerpts" || groveView === "personas") {
+  const next = name === "library" ? "library" : name === "personas" ? "personas" : name === "read" ? "read" : name === "excerpts" ? "excerpts" : name === "settings" ? "settings" : "search";
+  if (groveView === "search" || groveView === "library" || groveView === "excerpts" || groveView === "personas" || groveView === "settings") {
     viewScroll[groveView] = window.scrollY;
   }
   if (groveView === "read" && next !== "read" && activeId) {
@@ -4441,17 +4531,20 @@ function setView(name) {
   libraryView.hidden = next !== "library";
   if (personasView) personasView.hidden = next !== "personas";
   if (excerptsView) excerptsView.hidden = next !== "excerpts";
+  if (settingsView) settingsView.hidden = next !== "settings";
   readerCol.hidden = next !== "read";
   wrap.classList.toggle("wide", next === "library");
   modeSearch.classList.toggle("on", next === "search");
   modeLibrary.classList.toggle("on", next === "library");
   if (modePersonas) modePersonas.classList.toggle("on", next === "personas");
   if (modeExcerpts) modeExcerpts.classList.toggle("on", next === "excerpts");
+  if (modeSettings) modeSettings.classList.toggle("on", next === "settings");
   modeSearch.setAttribute("aria-pressed", next === "search" ? "true" : "false");
   modeLibrary.setAttribute("aria-pressed", next === "library" ? "true" : "false");
   if (modePersonas) modePersonas.setAttribute("aria-pressed", next === "personas" ? "true" : "false");
   if (modeExcerpts) modeExcerpts.setAttribute("aria-pressed", next === "excerpts" ? "true" : "false");
-  if (next === "search" || next === "library" || next === "excerpts" || next === "personas") {
+  if (modeSettings) modeSettings.setAttribute("aria-pressed", next === "settings" ? "true" : "false");
+  if (next === "search" || next === "library" || next === "excerpts" || next === "personas" || next === "settings") {
     shelfView = next;
     try { sessionStorage.setItem("grove.view", next); } catch (e) {}
     if (next === "personas") {
@@ -4462,6 +4555,7 @@ function setView(name) {
   if (next === "library") ensureShelf();
   else if (next === "personas") loadPersonas();
   else if (next === "excerpts") drawExcerpts();
+  else if (next === "settings") renderSettings();
   else if (next === "search") q.focus();
   if (next !== "read") {
     const y = viewScroll[next] || 0;
@@ -4629,12 +4723,14 @@ function restoreView() {
     setView("personas");
   } else if (name === "library" && typeof grove_shelf === "function") setView("library");
   else if (name === "excerpts") setView("excerpts");
+  else if (name === "settings") setView("settings");
 }
 
 modeSearch.addEventListener("click", function () { setView("search"); });
 modeLibrary.addEventListener("click", function () { setView("library"); });
 if (modePersonas) modePersonas.addEventListener("click", function () { setView("personas"); });
 if (modeExcerpts) modeExcerpts.addEventListener("click", function () { setView("excerpts"); });
+if (modeSettings) modeSettings.addEventListener("click", function () { setView("settings"); });
 document.getElementById("lib-folder").addEventListener("click", function () { pickPath("dir"); });
 document.getElementById("lib-file").addEventListener("click", function () { pickPath("file"); });
 document.getElementById("lib-page-open").addEventListener("click", function (ev) {
@@ -4740,6 +4836,7 @@ function bindMode(el, key) {
     el.setAttribute("aria-pressed", on ? "true" : "false");
     try { sessionStorage.setItem(key, on ? "1" : "0"); } catch (e) {}
     if (shownQuery().trim()) runSearch();
+    if (groveView === "settings") renderSettings();
   });
 }
 
@@ -4772,8 +4869,89 @@ function initSnipLen() {
     el.addEventListener("click", function () {
       if (snipLen === name) return;
       setSnipLen(name, true);
+      if (groveView === "settings") renderSettings();
     });
   }
+}
+
+function byteWords(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n === 1 ? "1 byte" : n + " bytes";
+  if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
+  const mb = n / (1024 * 1024);
+  const shown = mb >= 10 ? String(Math.round(mb)) : String(Math.round(mb * 10) / 10);
+  return shown + " MB";
+}
+
+function statRow(dl, name, value) {
+  const dt = document.createElement("dt");
+  dt.textContent = name;
+  const dd = document.createElement("dd");
+  dd.textContent = value;
+  dl.append(dt, dd);
+}
+
+function setChoice(on, label, hint, pick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "set-choice" + (on ? " on" : "");
+  b.setAttribute("aria-pressed", on ? "true" : "false");
+  const title = document.createElement("b");
+  title.textContent = label;
+  const note = document.createElement("span");
+  note.textContent = hint;
+  b.append(title, note);
+  b.addEventListener("click", pick);
+  return b;
+}
+
+let settingsSeq = 0;
+function renderSettings() {
+  if (!settingsOpts || !settingsStats) return;
+  const id = ++settingsSeq;
+  settingsOpts.replaceChildren();
+  const stemOn = optStem && optStem.getAttribute("aria-pressed") === "true";
+  const fuzzyOn = optFuzzy && optFuzzy.getAttribute("aria-pressed") === "true";
+  const conceptOn = optConcept && optConcept.getAttribute("aria-pressed") === "true";
+  settingsOpts.append(setChoice(stemOn, stemOn ? "Stemming is on" : "Stemming is off", "Matches inflections, and the Porter stem when that stem is itself a word. This starts on.", function () { if (optStem) optStem.click(); }));
+  settingsOpts.append(setChoice(fuzzyOn, fuzzyOn ? "Fuzzy is on" : "Fuzzy is off", "One edit on a word of five letters or more.", function () { if (optFuzzy) optFuzzy.click(); }));
+  settingsOpts.append(setChoice(conceptOn, conceptOn ? "Concepts is on" : "Concepts is off", "Related words: a short classical family, then the closest WordNet synonyms, twelve at most. A missing list leaves the families. A related word is marked in blue. This does not download a model.", function () { if (optConcept) optConcept.click(); }));
+  settingsOpts.append(setChoice(snipLen === "sentence", "Sentence", "The snippet is one sentence.", function () { setSnipLen("sentence", true); renderSettings(); }));
+  settingsOpts.append(setChoice(snipLen === "nearby", "Nearby", "A few sentences around the match. This starts on.", function () { setSnipLen("nearby", true); renderSettings(); }));
+  settingsOpts.append(setChoice(snipLen === "passage", "Passage", "The whole passage around the match.", function () { setSnipLen("passage", true); renderSettings(); }));
+  settingsStats.replaceChildren();
+  statRow(settingsStats, "Index", "Reading the index.");
+  if (typeof grove_info !== "function") return;
+  grove_info().then(function (raw) {
+    if (id !== settingsSeq) return;
+    let info = {};
+    try { info = JSON.parse(raw) || {}; } catch (e) { info = {}; }
+    if (info.error) {
+      settingsStats.replaceChildren();
+      statRow(settingsStats, "Index", info.error);
+      return;
+    }
+    settingsStats.replaceChildren();
+    const docs = info.documents || 0;
+    statRow(settingsStats, "Documents", docs + (docs === 1 ? " document" : " documents"));
+    statRow(settingsStats, "Text", byteWords(info.text_bytes));
+    const roots = Array.isArray(info.roots) ? info.roots : [];
+    if (!roots.length) statRow(settingsStats, "Roots", "None yet.");
+    for (let i = 0; i < roots.length; i++) {
+      const root = roots[i] || {};
+      statRow(settingsStats, i === 0 ? "Roots" : "", (root.path || "") + (root.full ? " · whole folder" : " · chosen files"));
+    }
+    statRow(settingsStats, "Excerpts", String(info.excerpts || 0));
+    statRow(settingsStats, "Notes", String(info.notes || 0));
+    statRow(settingsStats, "Saved searches", String(info.saved || 0));
+    statRow(settingsStats, "Watches", String(info.watches || 0));
+    statRow(settingsStats, "Personas", String(info.personas || 0));
+    statRow(settingsStats, "WordNet", info.wordnet ? "The synonym list is on this computer." : "The synonym list is not beside the program. The classical families still apply.");
+  }).catch(function () {
+    if (id !== settingsSeq) return;
+    settingsStats.replaceChildren();
+    statRow(settingsStats, "Index", "Could not read the index.");
+  });
 }
 
 function initSearchOpts() {
@@ -4823,6 +5001,7 @@ if (toTop) {
 }
 bindExcerptChrome();
 searchNarrow = readNarrow("grove.narrow.search");
+try { narrowFolded = sessionStorage.getItem("grove.narrow.folded") === "1"; } catch (e) {}
 loadLibSort();
 if (searchNarrowOpen) {
   searchNarrowOpen.addEventListener("click", function () {

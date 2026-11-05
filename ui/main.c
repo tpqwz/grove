@@ -2,6 +2,7 @@
 #include "mod.h"
 #include "os.h"
 #include "persona.h"
+#include "sqlite3.h"
 #include "webui.h"
 
 #include <errno.h>
@@ -348,6 +349,43 @@ fail:
     return NULL;
 }
 
+static uint32_t table_count(sqlite3 *db, const char *table) {
+    char sql[96];
+    sqlite3_stmt *st = NULL;
+    int wrote;
+    sqlite3_int64 n;
+    if (!db || !table || !table[0] || strchr(table, '"')) {
+        return 0;
+    }
+    wrote = snprintf(sql, sizeof sql, "SELECT COUNT(*) FROM \"%s\"", table);
+    if (wrote < 0 || (size_t)wrote >= sizeof sql) {
+        return 0;
+    }
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    n = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        n = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    if (n < 0 || n > 1000000000) {
+        return 0;
+    }
+    return (uint32_t)n;
+}
+
+static int wordnet_ready(void) {
+    const char *env = getenv("GROVE_WORDNET");
+    if (env && env[0] && access(env, R_OK) == 0) {
+        return 1;
+    }
+    if (access("share/wordnet-syn.txt", R_OK) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static char *info_json(void) {
     if (!ix) {
         return json_error(open_err[0] ? open_err : "no index");
@@ -359,10 +397,45 @@ static char *info_json(void) {
     if (index_info(ix, &info, &e) != 0) {
         return json_error(e.msg[0] ? e.msg : "could not read the index");
     }
+    uint32_t excerpts = 0;
+    uint32_t notes = 0;
+    uint32_t saved = 0;
+    uint32_t watches = 0;
+    uint32_t personas = 0;
+    char *db_path = index_dir ? path_join(index_dir, "grove.db") : NULL;
+    sqlite3 *db = NULL;
+    if (db_path && sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK && db) {
+        sqlite3_busy_timeout(db, 2000);
+        excerpts = table_count(db, "excerpts");
+        notes = table_count(db, "notes");
+        saved = table_count(db, "saved");
+        watches = table_count(db, "alert");
+        personas = table_count(db, "persona");
+        sqlite3_close(db);
+    }
+    free(db_path);
     Buf b;
     buf_init(&b);
     if (buf_puts(&b, "{\"index\":") != 0 || jesc(&b, index_dir) != 0 ||
-        buf_printf(&b, ",\"documents\":%u}", info.n_docs) != 0) {
+        buf_printf(&b, ",\"documents\":%u,\"text_bytes\":%llu,\"wordnet\":%s,\"excerpts\":%u,\"notes\":%u,\"saved\":%u,\"watches\":%u,\"personas\":%u,\"roots\":[",
+                   info.n_docs, (unsigned long long)info.text_bytes, wordnet_ready() ? "true" : "false", excerpts, notes, saved, watches,
+                   personas) != 0) {
+        buf_free(&b);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < info.n_roots; i++) {
+        int full = info.root_full && info.root_full[i] ? 1 : 0;
+        if (i && buf_putc(&b, ',') != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+        if (buf_puts(&b, "{\"path\":") != 0 || jesc(&b, info.roots ? info.roots[i] : "") != 0 ||
+            buf_printf(&b, ",\"full\":%d}", full) != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
         buf_free(&b);
         return NULL;
     }

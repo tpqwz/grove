@@ -540,7 +540,7 @@
   .toc button.lv3 { padding-left: 1.8rem; }
   .toc button:hover { background: #efe8dc; }
   #index {
-    margin: 0 0 0.7rem;
+    margin: 1.15rem 0 0;
     color: var(--muted);
     font-size: 0.82rem;
     overflow: hidden;
@@ -943,7 +943,6 @@
 <body>
   <header class="mast" id="mast">
     <div class="mast-in">
-      <p id="index"></p>
       <nav class="modes" id="modes" aria-label="Views">
         <button type="button" id="mode-search" class="mode on" aria-pressed="true">Search</button>
         <button type="button" id="mode-library" class="mode" aria-pressed="false">Library</button>
@@ -1003,6 +1002,7 @@
       <p class="count" id="lib-count"></p>
       <p class="err" id="lib-err" hidden></p>
       <div class="lib-scroll" id="lib-rows"></div>
+      <p id="index"></p>
     </div>
     <div id="personas-view" hidden>
       <p class="help">One person, however many names the books use. Author is the creator. A contributor written as Role: Name takes that role, such as Translator, Editor, or Speaker. A source that begins Translated by, Edited by, or Read by counts as that role. Opening a name fetches a short public profile, and a photograph when one is public. Both are kept in the index.</p>

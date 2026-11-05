@@ -1,0 +1,6 @@
+/* Grove's window icon, and the WebView2 loader the program unpacks.
+ * 101 is the icon WebUI's window class asks for. 32512 is the program's
+ * own icon. 201 is the loader. */
+101 ICON "grove.ico"
+32512 ICON "grove.ico"
+201 RCDATA "WebView2Loader.dll"

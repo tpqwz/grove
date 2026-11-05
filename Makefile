@@ -50,6 +50,11 @@ WEBUI_LINK = -Wl,--whole-archive ui/third_party/webui/dist/libwebui-2-static.a -
 WEBUI_EXTRA = -lws2_32 -luser32 -lole32 -loleaut32 -luuid -lshell32 -lgdi32 -lstdc++
 EXPORT =
 ICON_SRC =
+WIN_RES = ui/grove.res.o
+endif
+
+ifeq ($(PLATFORM),macos)
+MAC_SRC = ui/mac_icon.m
 endif
 
 ifeq ($(PLATFORM),windows)
@@ -87,10 +92,26 @@ ui/page.h: ui/page.html ui/pack.py
 $(SQLITE_OBJ): third_party/sqlite/sqlite3.c
 	$(CC) $(SQLITE_CFLAGS) -c -o $@ third_party/sqlite/sqlite3.c
 
-$(GROVE): $(SRCS) ui/host.c ui/main.c $(ICON_SRC) ui/page.h $(SQLITE_OBJ) $(WEBUI_LIB) ui/window_icon.h ui/mod.h src/cli.h
+ui/grove.ico: ui/icon_pack.py
+	python3 ui/icon_pack.py --ico $@
+
+ui/icon_png.h: ui/icon_pack.py
+	python3 ui/icon_pack.py --header $@
+
+ui/WebView2Loader.dll: ui/fetch_webview2.py
+	python3 ui/fetch_webview2.py $@
+
+ui/grove.res.o: ui/grove.rc ui/grove.ico ui/WebView2Loader.dll
+	cd ui && windres -O coff grove.rc grove.res.o
+
+$(GROVE): $(SRCS) ui/host.c ui/main.c $(ICON_SRC) $(MAC_SRC) $(WIN_RES) ui/page.h $(SQLITE_OBJ) $(WEBUI_LIB) ui/window_icon.h ui/mod.h src/cli.h
 	$(LINK) $(CFLAGS) -DGROVE_EMBED $(INCLUDES) -x c -o $@ \
-		ui/host.c ui/main.c $(ICON_SRC) $(SRCS) -x none $(SQLITE_OBJ) \
+		ui/host.c ui/main.c $(ICON_SRC) $(SRCS) -x none $(MAC_SRC) $(WIN_RES) $(SQLITE_OBJ) \
 		$(WEBUI_LINK) $(LIBS) $(WEBUI_EXTRA) $(EXPORT) $(LDFLAGS)
+
+ifeq ($(PLATFORM),macos)
+$(GROVE): ui/icon_png.h
+endif
 
 grove-test: $(CORE) src/test.c $(SQLITE_OBJ)
 	$(CC) $(CFLAGS) $(SAN) $(INCLUDES) -o $@ $(CORE) src/test.c $(SQLITE_OBJ) $(LIBS) $(LDFLAGS)
@@ -105,4 +126,5 @@ test: grove-test $(GROVE)
 endif
 
 clean:
-	rm -f grove grove.exe grove-test src/*.o third_party/sqlite/sqlite3.o
+	rm -f grove grove.exe grove-test src/*.o third_party/sqlite/sqlite3.o \
+		ui/grove.res.o ui/grove.ico ui/WebView2Loader.dll ui/icon_png.h

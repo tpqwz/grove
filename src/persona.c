@@ -6,6 +6,7 @@
 
 #include "sqlite3.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -966,7 +967,8 @@ static const char *photo_kind(const unsigned char *p, size_t n) {
     return NULL;
 }
 
-static int cache_names(const char *index_dir, const char *name, char **json_path, char **img_path, char **dir_path) {
+static int cache_names(const char *index_dir, const char *name, char **json_path, char **img_path, char **dir_path,
+                       char hex_out[65]) {
     char who[PERSONA_NAME_MAX + 1];
     char folded[1024];
     char hex[65];
@@ -981,11 +983,17 @@ static int cache_names(const char *index_dir, const char *name, char **json_path
     if (dir_path) {
         *dir_path = NULL;
     }
+    if (hex_out) {
+        hex_out[0] = 0;
+    }
     if (!index_dir || !index_dir[0] || name_copy(name, who, sizeof who) != 0 ||
         fold_into(who, folded, sizeof folded) != 0) {
         return -1;
     }
     fetch_sha256_hex(folded, strlen(folded), hex);
+    if (hex_out) {
+        memcpy(hex_out, hex, 65);
+    }
     dir = path_join(index_dir, "personas");
     if (!dir) {
         return -1;
@@ -1015,18 +1023,562 @@ static int cache_names(const char *index_dir, const char *name, char **json_path
     return 0;
 }
 
-static int under_dir(const char *file, const char *dir) {
-    char *cf = grove_realpath(file, NULL);
-    char *cd = grove_realpath(dir, NULL);
-    size_t n;
-    int ok = 0;
-    if (cf && cd) {
-        n = strlen(cd);
-        ok = strncmp(cf, cd, n) == 0 && cf[n] == '/';
+static const char PERSONA_SCHEMA[] =
+    "CREATE TABLE IF NOT EXISTS persona("
+    " id TEXT PRIMARY KEY,"
+    " body TEXT NOT NULL,"
+    " photo BLOB,"
+    " mime TEXT NOT NULL)";
+
+static int hex64(const char *s) {
+    size_t i;
+    if (!s) {
+        return 0;
     }
-    free(cf);
-    free(cd);
+    for (i = 0; i < 64; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return 0;
+        }
+    }
+    return s[64] == 0;
+}
+
+static unsigned char *copy_bytes(const void *p, size_t n) {
+    size_t need = 0;
+    unsigned char *d;
+    if (!p || n == 0 || size_add(n, 1, &need) != 0) {
+        return NULL;
+    }
+    d = malloc(need);
+    if (!d) {
+        return NULL;
+    }
+    memcpy(d, p, n);
+    d[n] = 0;
+    return d;
+}
+
+static char *persona_db(const char *index_dir) {
+    if (!index_dir || !index_dir[0]) {
+        return NULL;
+    }
+    return path_join(index_dir, "grove.db");
+}
+
+static void persona_abort(sqlite3 *db) {
+    if (!db) {
+        return;
+    }
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_close(db);
+}
+
+static int persona_exec(sqlite3 *db, const char *sql, Err *e) {
+    char *msg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &msg);
+    if (rc != SQLITE_OK) {
+        int primary = rc & 0xff;
+        if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED) {
+            err_set(e, "index is in use");
+        } else {
+            err_set(e, "%s", msg ? msg : sqlite3_errmsg(db));
+        }
+        sqlite3_free(msg);
+        return -1;
+    }
+    return 0;
+}
+
+/* 0 open, 1 no database file, -1 error. create also makes the file. */
+static int persona_open(const char *index_dir, int create, sqlite3 **db, Err *e) {
+    char *path = persona_db(index_dir);
+    int flags = SQLITE_OPEN_READWRITE;
+    int rc;
+    *db = NULL;
+    if (!path) {
+        err_set(e, "cannot save that profile");
+        return -1;
+    }
+    if (create) {
+        flags |= SQLITE_OPEN_CREATE;
+    } else if (access(path, F_OK) != 0) {
+        free(path);
+        return 1;
+    }
+    rc = sqlite3_open_v2(path, db, flags, NULL);
+    free(path);
+    if (rc != SQLITE_OK || !*db) {
+        err_set(e, "cannot save that profile");
+        if (*db) {
+            sqlite3_close(*db);
+            *db = NULL;
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(*db, 20000);
+    sqlite3_extended_result_codes(*db, 1);
+    return 0;
+}
+
+static int persona_begin(const char *index_dir, sqlite3 **db, Err *e) {
+    if (persona_open(index_dir, 1, db, e) != 0) {
+        return -1;
+    }
+    if (persona_exec(*db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(*db);
+        *db = NULL;
+        return -1;
+    }
+    if (persona_exec(*db, PERSONA_SCHEMA, e) != 0) {
+        persona_abort(*db);
+        *db = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int persona_write(const char *index_dir, const char *hex, const void *body, size_t body_n, const void *photo,
+                         size_t photo_n, const char *mime, Err *e) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    const char *use_mime = mime ? mime : "";
+    if (!hex64(hex) || !body || body_n == 0 || body_n > (size_t)PERSONA_BODY_MAX) {
+        err_set(e, "cannot save that profile");
+        return -1;
+    }
+    if (!photo || photo_n == 0 || photo_n > (size_t)PERSONA_PHOTO_MAX) {
+        photo = NULL;
+        photo_n = 0;
+        use_mime = "";
+    }
+    if (persona_begin(index_dir, &db, e) != 0) {
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO persona(id, body, photo, mime) VALUES(?,?,?,?)"
+                           " ON CONFLICT(id) DO UPDATE SET"
+                           " body=excluded.body, photo=excluded.photo, mime=excluded.mime",
+                           -1, &st, NULL) != SQLITE_OK ||
+        sqlite3_bind_text(st, 1, hex, 64, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(st, 2, (const char *)body, (int)body_n, SQLITE_TRANSIENT) != SQLITE_OK) {
+        err_set(e, "cannot save that profile");
+        goto fail;
+    }
+    if (photo) {
+        if (sqlite3_bind_blob(st, 3, photo, (int)photo_n, SQLITE_TRANSIENT) != SQLITE_OK) {
+            err_set(e, "cannot save that profile");
+            goto fail;
+        }
+    } else if (sqlite3_bind_null(st, 3) != SQLITE_OK) {
+        err_set(e, "cannot save that profile");
+        goto fail;
+    }
+    if (sqlite3_bind_text(st, 4, use_mime, -1, SQLITE_TRANSIENT) != SQLITE_OK || sqlite3_step(st) != SQLITE_DONE) {
+        err_set(e, "cannot save that profile");
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    if (persona_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    persona_abort(db);
+    return -1;
+}
+
+/* 1 row, 0 miss, 2 unusable row, -1 out of memory or the index is busy. */
+static int persona_read(const char *index_dir, const char *hex, unsigned char **body, size_t *body_n,
+                        unsigned char **photo, size_t *photo_n, Err *e) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int opened;
+    int step;
+    int nb;
+    const void *src;
+    *body = NULL;
+    *body_n = 0;
+    *photo = NULL;
+    *photo_n = 0;
+    if (!hex64(hex)) {
+        return 0;
+    }
+    opened = persona_open(index_dir, 0, &db, e);
+    if (opened != 0) {
+        err_clear(e);
+        return 0;
+    }
+    if (sqlite3_prepare_v2(db, "SELECT body, photo FROM persona WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        err_clear(e);
+        return 0;
+    }
+    if (sqlite3_bind_text(st, 1, hex, 64, SQLITE_TRANSIENT) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    step = sqlite3_step(st);
+    if (step == SQLITE_DONE) {
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        return 0;
+    }
+    if (step != SQLITE_ROW) {
+        int primary = sqlite3_extended_errcode(db) & 0xff;
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED) {
+            err_set(e, "index is in use");
+            return -1;
+        }
+        err_clear(e);
+        return 0;
+    }
+    nb = sqlite3_column_bytes(st, 0);
+    if (nb <= 0 || (size_t)nb > (size_t)PERSONA_BODY_MAX) {
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        return 2;
+    }
+    src = sqlite3_column_blob(st, 0);
+    *body = src ? copy_bytes(src, (size_t)nb) : NULL;
+    if (!*body) {
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    *body_n = (size_t)nb;
+    if (sqlite3_column_type(st, 1) == SQLITE_BLOB) {
+        int np = sqlite3_column_bytes(st, 1);
+        const void *blob;
+        if (np > 0 && (size_t)np <= (size_t)PERSONA_PHOTO_MAX) {
+            blob = sqlite3_column_blob(st, 1);
+            if (!blob) {
+                free(*body);
+                *body = NULL;
+                *body_n = 0;
+                sqlite3_finalize(st);
+                sqlite3_close(db);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            *photo = copy_bytes(blob, (size_t)np);
+            if (!*photo) {
+                free(*body);
+                *body = NULL;
+                *body_n = 0;
+                sqlite3_finalize(st);
+                sqlite3_close(db);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            *photo_n = (size_t)np;
+        }
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return 1;
+}
+
+static int persona_saved(const char *index_dir, const char *hex, const void *body, size_t body_n, const void *photo,
+                         size_t photo_n) {
+    unsigned char *got_body = NULL;
+    unsigned char *got_photo = NULL;
+    size_t got_body_n = 0;
+    size_t got_photo_n = 0;
+    Err ignore;
+    int got;
+    int ok = 0;
+    err_clear(&ignore);
+    got = persona_read(index_dir, hex, &got_body, &got_body_n, &got_photo, &got_photo_n, &ignore);
+    if (got == 1 && got_body && body && got_body_n == body_n && memcmp(got_body, body, body_n) == 0) {
+        if (photo_n == 0) {
+            ok = got_photo_n == 0;
+        } else if (photo && got_photo && got_photo_n == photo_n && memcmp(got_photo, photo, photo_n) == 0) {
+            ok = 1;
+        }
+    }
+    free(got_body);
+    free(got_photo);
     return ok;
+}
+
+static int profile_drop(PersonaProfile *out, char *d, char *s, char *born, char *died, char *occ, char *wiki,
+                        char *photo, Jdoc *j, Err *e) {
+    free(d);
+    free(s);
+    free(born);
+    free(died);
+    free(occ);
+    free(wiki);
+    free(photo);
+    persona_profile_free(out);
+    jdoc_close(j);
+    err_set(e, "out of memory");
+    return -1;
+}
+
+static int profile_from_cache(const unsigned char *raw, size_t raw_n, const unsigned char *img, size_t img_n,
+                              PersonaProfile *out, Err *e) {
+    Jdoc j;
+    int version = 0;
+    int n;
+    int i;
+    int docn;
+    char *qid = NULL;
+    if (!out) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    if (!raw || raw_n == 0 || raw_n > (size_t)PERSONA_BODY_MAX) {
+        return 0;
+    }
+    docn = (int)raw_n;
+    memset(&j, 0, sizeof j);
+    if (jdoc_open(&j) != 0 || jnumber(&j, (const char *)raw, docn, "$.v", &version) != 0 || version != 1) {
+        jdoc_close(&j);
+        return 0;
+    }
+    qid = jtext(&j, (const char *)raw, docn, "$.qid");
+    if (!qid_ok(qid)) {
+        free(qid);
+        jdoc_close(&j);
+        return 0;
+    }
+    out->state = PERSONA_READY;
+    out->qid = qid;
+    {
+        char *d = jtext(&j, (const char *)raw, docn, "$.description");
+        char *s = jtext(&j, (const char *)raw, docn, "$.summary");
+        char *born = jtext(&j, (const char *)raw, docn, "$.born");
+        char *died = jtext(&j, (const char *)raw, docn, "$.died");
+        char *occ = jtext(&j, (const char *)raw, docn, "$.occupation");
+        char *wiki = jtext(&j, (const char *)raw, docn, "$.wikipedia");
+        char *photo = jtext(&j, (const char *)raw, docn, "$.photo");
+        free(out->description);
+        out->description = clean_text(d, 300);
+        out->summary = clean_text(s, PERSONA_SUMMARY_MAX);
+        out->born = clean_text(born, 32);
+        out->died = clean_text(died, 32);
+        out->occupation = clean_text(occ, 400);
+        out->wikipedia = keep_https(wiki, HOST_WIKI);
+        n = jcount(&j, (const char *)raw, docn, "$.aliases");
+        if (n > PERSONA_ALIAS_MAX) {
+            n = PERSONA_ALIAS_MAX;
+        }
+        for (i = 0; i < n; i++) {
+            char path[40];
+            char *alias;
+            char *clean;
+            if (path_at(path, sizeof path, "$.aliases[%d]", i) != 0) {
+                break;
+            }
+            alias = jtext(&j, (const char *)raw, docn, path);
+            clean = clean_text(alias, PERSONA_NAME_MAX);
+            free(alias);
+            if (add_alias(out, clean) != 0) {
+                return profile_drop(out, d, s, born, died, occ, wiki, photo, &j, e);
+            }
+        }
+        n = jcount(&j, (const char *)raw, docn, "$.works");
+        if (n > PERSONA_WORK_MAX) {
+            n = PERSONA_WORK_MAX;
+        }
+        for (i = 0; i < n; i++) {
+            char path[48];
+            char *title = NULL;
+            char *year = NULL;
+            char *url = NULL;
+            char *clean_title;
+            if (path_at(path, sizeof path, "$.works[%d].title", i) != 0) {
+                break;
+            }
+            title = jtext(&j, (const char *)raw, docn, path);
+            if (path_at(path, sizeof path, "$.works[%d].year", i) == 0) {
+                year = jtext(&j, (const char *)raw, docn, path);
+            }
+            if (path_at(path, sizeof path, "$.works[%d].url", i) == 0) {
+                url = jtext(&j, (const char *)raw, docn, path);
+            }
+            clean_title = clean_text(title, PERSONA_NAME_MAX);
+            if (add_work(out, clean_title, clean_text(year, 32), keep_https(url, HOST_WIKI)) != 0) {
+                free(title);
+                free(year);
+                free(url);
+                return profile_drop(out, d, s, born, died, occ, wiki, photo, &j, e);
+            }
+            free(title);
+            free(year);
+            free(url);
+        }
+        if (photo && img && img_n > 0 && img_n <= (size_t)PERSONA_PHOTO_MAX &&
+            (strcmp(photo, "image/jpeg") == 0 || strcmp(photo, "image/png") == 0 || strcmp(photo, "image/gif") == 0 ||
+             strcmp(photo, "image/webp") == 0)) {
+            const char *got = photo_kind(img, img_n);
+            if (got && strcmp(got, photo) == 0) {
+                out->photo = copy_bytes(img, img_n);
+                if (!out->photo || !(out->photo_type = xstrdup(got))) {
+                    free(out->photo);
+                    out->photo = NULL;
+                    return profile_drop(out, d, s, born, died, occ, wiki, photo, &j, e);
+                }
+                out->photo_n = img_n;
+            }
+        }
+        free(d);
+        free(s);
+        free(born);
+        free(died);
+        free(occ);
+        free(wiki);
+        free(photo);
+    }
+    jdoc_close(&j);
+    return 0;
+}
+
+static int legacy_hex(const char *filename, char hex[65]) {
+    size_t i;
+    size_t n;
+    if (!filename) {
+        return -1;
+    }
+    n = strlen(filename);
+    if (n != 69) {
+        return -1;
+    }
+    for (i = 0; i < 64; i++) {
+        unsigned char c = (unsigned char)filename[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return -1;
+        }
+        hex[i] = (char)c;
+    }
+    hex[64] = 0;
+    if (strcmp(filename + 64, ".json") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void import_legacy(const char *index_dir, const char *hex, const char *json_path, const char *img_path) {
+    unsigned char *raw = NULL;
+    unsigned char *img = NULL;
+    unsigned char *have = NULL;
+    unsigned char *have_photo = NULL;
+    size_t raw_n = 0;
+    size_t img_n = 0;
+    size_t have_n = 0;
+    size_t have_photo_n = 0;
+    PersonaProfile tmp;
+    Err ignore;
+    int got;
+    err_clear(&ignore);
+    memset(&tmp, 0, sizeof tmp);
+    if (!hex64(hex) || !json_path) {
+        return;
+    }
+    got = persona_read(index_dir, hex, &have, &have_n, &have_photo, &have_photo_n, &ignore);
+    free(have);
+    free(have_photo);
+    if (got < 0 || got == 2) {
+        return;
+    }
+    if (read_entire_file(json_path, &raw, &raw_n, PERSONA_BODY_MAX, &ignore) != 0) {
+        err_clear(&ignore);
+        free(raw);
+        return;
+    }
+    err_clear(&ignore);
+    if (img_path && read_entire_file(img_path, &img, &img_n, PERSONA_PHOTO_MAX, &ignore) != 0) {
+        free(img);
+        img = NULL;
+        img_n = 0;
+        err_clear(&ignore);
+    }
+    if (profile_from_cache(raw, raw_n, img, img_n, &tmp, &ignore) != 0 || tmp.state != PERSONA_READY) {
+        persona_profile_free(&tmp);
+        free(raw);
+        free(img);
+        return;
+    }
+    /* A row already in the index stays. The file is removed only when that row is this cache. */
+    if (got == 1) {
+        if (persona_saved(index_dir, hex, raw, raw_n, tmp.photo, tmp.photo_n)) {
+            unlink(json_path);
+            if (tmp.photo_n > 0 && img_path) {
+                unlink(img_path);
+            }
+        }
+        persona_profile_free(&tmp);
+        free(raw);
+        free(img);
+        return;
+    }
+    err_clear(&ignore);
+    if (persona_write(index_dir, hex, raw, raw_n, tmp.photo, tmp.photo_n, tmp.photo_type ? tmp.photo_type : "",
+                      &ignore) == 0 &&
+        persona_saved(index_dir, hex, raw, raw_n, tmp.photo, tmp.photo_n)) {
+        unlink(json_path);
+        if (tmp.photo_n > 0 && img_path) {
+            unlink(img_path);
+        }
+    }
+    persona_profile_free(&tmp);
+    free(raw);
+    free(img);
+}
+
+void persona_cache_adopt(const char *index_dir) {
+    char *dir;
+    DIR *d;
+    struct dirent *de;
+    if (!index_dir || !index_dir[0]) {
+        return;
+    }
+    dir = path_join(index_dir, "personas");
+    if (!dir) {
+        return;
+    }
+    d = opendir(dir);
+    if (!d) {
+        free(dir);
+        return;
+    }
+    while ((de = readdir(d)) != NULL) {
+        char hex[65];
+        char img_base[80];
+        char *json_path;
+        char *img_path;
+        if (legacy_hex(de->d_name, hex) != 0) {
+            continue;
+        }
+        json_path = path_join(dir, de->d_name);
+        img_path = NULL;
+        {
+            int nw = snprintf(img_base, sizeof img_base, "%s.img", hex);
+            if (nw > 0 && (size_t)nw < sizeof img_base) {
+                img_path = path_join(dir, img_base);
+            }
+        }
+        if (json_path) {
+            import_legacy(index_dir, hex, json_path, img_path);
+        }
+        free(json_path);
+        free(img_path);
+    }
+    closedir(d);
+    free(dir);
 }
 
 static int jesc_buf(Buf *b, const char *s) {
@@ -1063,37 +1615,24 @@ static int jfield(Buf *b, const char *key, const char *val, int comma) {
 }
 
 int persona_profile_store(const char *index_dir, const char *name, const PersonaProfile *in, Err *e) {
-    char *json_path = NULL;
-    char *img_path = NULL;
-    char *dir = NULL;
+    char hex[65];
     const char *kind = NULL;
     Buf b;
     int i;
     buf_init(&b);
+    hex[0] = 0;
     if (!in || in->state != PERSONA_READY || !qid_ok(in->qid)) {
         err_set(e, "that profile cannot be kept");
         return -1;
     }
-    if (cache_names(index_dir, name, &json_path, &img_path, &dir) != 0 || !json_path || !img_path || !dir ||
-        mkdir_p(dir) != 0) {
-        free(json_path);
-        free(img_path);
-        free(dir);
+    if (cache_names(index_dir, name, NULL, NULL, NULL, hex) != 0 || !hex64(hex)) {
         err_set(e, "cannot save that profile");
         return -1;
     }
-    unlink(img_path);
     if (in->photo && in->photo_n > 0 && in->photo_n <= (size_t)PERSONA_PHOTO_MAX) {
         kind = photo_kind(in->photo, in->photo_n);
     }
-    if (kind && in->photo_type && strcmp(kind, in->photo_type) == 0) {
-        if (write_file_atomic(img_path, in->photo, in->photo_n, e) != 0) {
-            free(json_path);
-            free(img_path);
-            free(dir);
-            return -1;
-        }
-    } else {
+    if (!(kind && in->photo_type && strcmp(kind, in->photo_type) == 0)) {
         kind = NULL;
     }
     if (buf_puts(&b, "{\"v\":1") != 0 || jfield(&b, "qid", in->qid, 1) != 0 ||
@@ -1121,25 +1660,18 @@ int persona_profile_store(const char *index_dir, const char *name, const Persona
         }
         free(url);
     }
-    if (buf_puts(&b, "],") != 0 || jfield(&b, "photo", kind, 0) != 0 || buf_putc(&b, '}') != 0) {
+    if (buf_puts(&b, "],") != 0 || jfield(&b, "photo", kind, 0) != 0 || buf_putc(&b, '}') != 0 || !b.data || b.len == 0 ||
+        b.len > (size_t)PERSONA_BODY_MAX) {
         goto fail;
     }
-    if (write_file_atomic(json_path, b.data, b.len, e) != 0 || !under_dir(json_path, dir)) {
-        unlink(json_path);
-        unlink(img_path);
-        err_set(e, "cannot save that profile");
+    if (persona_write(index_dir, hex, b.data, b.len, kind ? in->photo : NULL, kind ? in->photo_n : 0, kind ? kind : "",
+                      e) != 0) {
         goto fail;
     }
     buf_free(&b);
-    free(json_path);
-    free(img_path);
-    free(dir);
     return 0;
 fail:
     buf_free(&b);
-    free(json_path);
-    free(img_path);
-    free(dir);
     if (e && !e->msg[0]) {
         err_set(e, "cannot save that profile");
     }
@@ -1150,182 +1682,67 @@ int persona_profile_load(const char *index_dir, const char *name, PersonaProfile
     char *json_path = NULL;
     char *img_path = NULL;
     char *dir = NULL;
-    unsigned char *raw = NULL;
-    size_t raw_n = 0;
-    Jdoc j;
-    int version = 0;
-    int n;
-    int i;
-    char *qid = NULL;
-    struct stat st;
+    char hex[65];
+    unsigned char *body = NULL;
+    unsigned char *photo = NULL;
+    size_t body_n = 0;
+    size_t photo_n = 0;
+    int got;
+    int rc;
     if (!out) {
         err_set(e, "out of memory");
         return -1;
     }
     memset(out, 0, sizeof *out);
-    memset(&j, 0, sizeof j);
-    if (cache_names(index_dir, name, &json_path, &img_path, &dir) != 0 || !json_path) {
+    hex[0] = 0;
+    if (cache_names(index_dir, name, &json_path, &img_path, &dir, hex) != 0 || !json_path || !hex64(hex)) {
         free(json_path);
         free(img_path);
         free(dir);
         return 0;
     }
-    if (stat(json_path, &st) != 0) {
+    free(dir);
+    got = persona_read(index_dir, hex, &body, &body_n, &photo, &photo_n, e);
+    if (got < 0) {
         free(json_path);
         free(img_path);
-        free(dir);
-        return 0;
-    }
-    if (read_entire_file(json_path, &raw, &raw_n, PERSONA_BODY_MAX, e) != 0) {
-        free(json_path);
-        free(img_path);
-        free(dir);
-        err_clear(e);
-        return 0;
-    }
-    if (jdoc_open(&j) != 0 || jnumber(&j, (const char *)raw, (int)raw_n, "$.v", &version) != 0 || version != 1) {
-        jdoc_close(&j);
-        free(raw);
-        free(json_path);
-        free(img_path);
-        free(dir);
-        return 0;
-    }
-    qid = jtext(&j, (const char *)raw, (int)raw_n, "$.qid");
-    if (!qid_ok(qid)) {
-        free(qid);
-        jdoc_close(&j);
-        free(raw);
-        free(json_path);
-        free(img_path);
-        free(dir);
-        return 0;
-    }
-    out->state = PERSONA_READY;
-    out->qid = qid;
-    {
-        char *d = jtext(&j, (const char *)raw, (int)raw_n, "$.description");
-        char *s = jtext(&j, (const char *)raw, (int)raw_n, "$.summary");
-        char *born = jtext(&j, (const char *)raw, (int)raw_n, "$.born");
-        char *died = jtext(&j, (const char *)raw, (int)raw_n, "$.died");
-        char *occ = jtext(&j, (const char *)raw, (int)raw_n, "$.occupation");
-        char *wiki = jtext(&j, (const char *)raw, (int)raw_n, "$.wikipedia");
-        char *photo = jtext(&j, (const char *)raw, (int)raw_n, "$.photo");
-        free(out->description);
-        out->description = clean_text(d, 300);
-        out->summary = clean_text(s, PERSONA_SUMMARY_MAX);
-        out->born = clean_text(born, 32);
-        out->died = clean_text(died, 32);
-        out->occupation = clean_text(occ, 400);
-        out->wikipedia = keep_https(wiki, HOST_WIKI);
-        n = jcount(&j, (const char *)raw, (int)raw_n, "$.aliases");
-        if (n > PERSONA_ALIAS_MAX) {
-            n = PERSONA_ALIAS_MAX;
-        }
-        for (i = 0; i < n; i++) {
-            char path[40];
-            char *alias;
-            char *clean;
-            if (path_at(path, sizeof path, "$.aliases[%d]", i) != 0) {
-                break;
-            }
-            alias = jtext(&j, (const char *)raw, (int)raw_n, path);
-            clean = clean_text(alias, PERSONA_NAME_MAX);
-            free(alias);
-            if (add_alias(out, clean) != 0) {
-                free(d);
-                free(s);
-                free(born);
-                free(died);
-                free(occ);
-                free(wiki);
-                free(photo);
-                persona_profile_free(out);
-                jdoc_close(&j);
-                free(raw);
-                free(json_path);
-                free(img_path);
-                free(dir);
-                err_set(e, "out of memory");
-                return -1;
-            }
-        }
-        n = jcount(&j, (const char *)raw, (int)raw_n, "$.works");
-        if (n > PERSONA_WORK_MAX) {
-            n = PERSONA_WORK_MAX;
-        }
-        for (i = 0; i < n; i++) {
-            char path[48];
-            char *title = NULL;
-            char *year = NULL;
-            char *url = NULL;
-            char *clean_title;
-            if (path_at(path, sizeof path, "$.works[%d].title", i) != 0) {
-                break;
-            }
-            title = jtext(&j, (const char *)raw, (int)raw_n, path);
-            if (path_at(path, sizeof path, "$.works[%d].year", i) == 0) {
-                year = jtext(&j, (const char *)raw, (int)raw_n, path);
-            }
-            if (path_at(path, sizeof path, "$.works[%d].url", i) == 0) {
-                url = jtext(&j, (const char *)raw, (int)raw_n, path);
-            }
-            clean_title = clean_text(title, PERSONA_NAME_MAX);
-            if (add_work(out, clean_title, clean_text(year, 32), keep_https(url, HOST_WIKI)) != 0) {
-                free(title);
-                free(year);
-                free(url);
-                free(d);
-                free(s);
-                free(born);
-                free(died);
-                free(occ);
-                free(wiki);
-                free(photo);
-                persona_profile_free(out);
-                jdoc_close(&j);
-                free(raw);
-                free(json_path);
-                free(img_path);
-                free(dir);
-                err_set(e, "out of memory");
-                return -1;
-            }
-            free(title);
-            free(year);
-            free(url);
-        }
-        if (photo && (strcmp(photo, "image/jpeg") == 0 || strcmp(photo, "image/png") == 0 ||
-                      strcmp(photo, "image/gif") == 0 || strcmp(photo, "image/webp") == 0)) {
-            unsigned char *img = NULL;
-            size_t img_n = 0;
-            Err ignore;
-            err_clear(&ignore);
-            if (img_path && read_entire_file(img_path, &img, &img_n, PERSONA_PHOTO_MAX, &ignore) == 0) {
-                const char *got = photo_kind(img, img_n);
-                if (got && strcmp(got, photo) == 0) {
-                    out->photo = img;
-                    out->photo_n = img_n;
-                    out->photo_type = xstrdup(got);
-                    img = NULL;
-                }
-            }
-            free(img);
-        }
-        free(d);
-        free(s);
-        free(born);
-        free(died);
-        free(occ);
-        free(wiki);
+        free(body);
         free(photo);
+        return -1;
     }
-    jdoc_close(&j);
-    free(raw);
+    if (got == 2) {
+        free(json_path);
+        free(img_path);
+        free(body);
+        free(photo);
+        return 0;
+    }
+    if (got != 1) {
+        free(body);
+        free(photo);
+        body = NULL;
+        photo = NULL;
+        import_legacy(index_dir, hex, json_path, img_path);
+        got = persona_read(index_dir, hex, &body, &body_n, &photo, &photo_n, e);
+        if (got < 0) {
+            free(json_path);
+            free(img_path);
+            free(body);
+            free(photo);
+            return -1;
+        }
+    }
     free(json_path);
     free(img_path);
-    free(dir);
-    return 0;
+    if (got != 1) {
+        free(body);
+        free(photo);
+        return 0;
+    }
+    rc = profile_from_cache(body, body_n, photo, photo_n, out, e);
+    free(body);
+    free(photo);
+    return rc;
 }
 
 static char *wiki_title(const char *entity, size_t entity_n, const char *qid, const char *label) {

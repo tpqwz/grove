@@ -930,7 +930,7 @@
     </div>
     </div>
     <div id="library-view" hidden>
-      <p class="help">Add a folder, a file, or a web page. Each volume is a Dublin Core record. The shelf groups by creator. A file named Title — Author shows that author until the record has one. Sort any column. Identifier and the rest of the record stay in Edit. The text stays on disk.</p>
+      <p class="help">Add a folder, a file, or a web page. Each volume is a Dublin Core record. The shelf groups by creator. A file named Title — Author shows that author until the record has one. Sort any column. Identifier and the rest of the record stay in Edit, and that record is kept in the index. The text stays on disk.</p>
       <div class="lib-tools">
         <button type="button" id="lib-folder">Add a folder</button>
         <button type="button" id="lib-file">Add a file</button>
@@ -944,7 +944,7 @@
       <div class="lib-scroll" id="lib-rows"></div>
     </div>
     <div id="personas-view" hidden>
-      <p class="help">One person, however many names the books use. Author is the creator. A contributor written as Role: Name takes that role, such as Translator, Editor, or Speaker. A source that begins Translated by, Edited by, or Read by counts as that role. Opening a name fetches a short public profile, and a photograph when one is public.</p>
+      <p class="help">One person, however many names the books use. Author is the creator. A contributor written as Role: Name takes that role, such as Translator, Editor, or Speaker. A source that begins Translated by, Edited by, or Read by counts as that role. Opening a name fetches a short public profile, and a photograph when one is public. Both are kept in the index.</p>
       <div class="lib-tools" id="persona-tools">
         <input id="persona-filter" type="text" placeholder="Filter names" aria-label="Filter names" autocomplete="off" spellcheck="false">
       </div>
@@ -953,7 +953,7 @@
       <div id="persona-list"></div>
     </div>
     <div id="excerpts-view" hidden>
-      <p class="help">Select a passage in a book and choose Save excerpt. The collection keeps the wording, the place, and a citation. The book stays in the library.</p>
+      <p class="help">Select a passage in a book and choose Save excerpt. The collection keeps the wording, the place, and a citation in the index. The book stays in the library.</p>
       <div class="ex-tools" id="ex-tools" hidden>
         <input id="ex-filter" type="text" placeholder="Tag, author, or words" aria-label="Filter excerpts" autocomplete="off" spellcheck="false">
         <button type="button" id="ex-copy">Copy all</button>
@@ -2380,9 +2380,10 @@ function settleMark(tab) {
 }
 
 /* A saved passage is a place in a book already on the shelf, plus the wording and a citation.
-   It is not another copy of the book. */
+   It is kept in the index. It is not another copy of the book. */
 const EXCERPT_MAX = 2400;
 const EXCERPT_KEEP = 400;
+let excerptSeq = 0;
 const tagDraft = {};
 let tagOpen = "";
 let tagFocus = false;
@@ -2488,8 +2489,32 @@ function findSame(ex) {
   return null;
 }
 
-function loadExcerpts() {
-  excerpts = [];
+function normalizeExcerpt(item, allowNewId) {
+  if (!item || typeof item.path !== "string" || typeof item.text !== "string" || !item.text) return null;
+  let id = typeof item.id === "string" ? item.id : "";
+  if (!id) {
+    if (!allowNewId) return null;
+    id = "ex-" + Math.random().toString(36).slice(2);
+  }
+  const tags = Array.isArray(item.tags) ? item.tags : [];
+  return {
+    id: id,
+    path: item.path,
+    title: String(item.title || ""),
+    creator: String(item.creator || ""),
+    heading: String(item.heading || ""),
+    page: item.page > 0 ? Math.floor(Number(item.page)) : 0,
+    text: String(item.text).slice(0, EXCERPT_MAX),
+    byte: Number.isFinite(Number(item.byte)) && Number(item.byte) >= 0 ? Math.floor(Number(item.byte)) : 0,
+    endByte: Number.isFinite(Number(item.endByte)) && Number(item.endByte) >= 0 ? Math.floor(Number(item.endByte)) : 0,
+    tags: tags.filter(function (t) { return typeof t === "string" && t.trim(); }).map(function (t) {
+      return t.trim().replace(/\s+/g, " ").slice(0, 40);
+    }).slice(0, 12),
+    created: item.created > 0 ? item.created : 0
+  };
+}
+
+function readLegacyExcerpts() {
   let data = [];
   try {
     const raw = localStorage.getItem("grove.excerpts");
@@ -2497,36 +2522,120 @@ function loadExcerpts() {
   } catch (e) {
     data = [];
   }
-  if (!Array.isArray(data)) return;
+  if (!Array.isArray(data)) return [];
+  const out = [];
   data.forEach(function (item) {
-    if (!item || typeof item.path !== "string" || typeof item.text !== "string" || !item.text) return;
-    const tags = Array.isArray(item.tags) ? item.tags : [];
-    excerpts.push({
-      id: typeof item.id === "string" && item.id ? item.id : ("ex-" + Math.random().toString(36).slice(2)),
-      path: item.path,
-      title: String(item.title || ""),
-      creator: String(item.creator || ""),
-      heading: String(item.heading || ""),
-      page: item.page > 0 ? Math.floor(Number(item.page)) : 0,
-      text: String(item.text).slice(0, EXCERPT_MAX),
-      byte: Number.isFinite(Number(item.byte)) && Number(item.byte) >= 0 ? Math.floor(Number(item.byte)) : 0,
-      endByte: Number.isFinite(Number(item.endByte)) && Number(item.endByte) >= 0 ? Math.floor(Number(item.endByte)) : 0,
-      tags: tags.filter(function (t) { return typeof t === "string" && t.trim(); }).map(function (t) {
-        return t.trim().replace(/\s+/g, " ").slice(0, 40);
-      }).slice(0, 12),
-      created: item.created > 0 ? item.created : 0
-    });
+    const ex = normalizeExcerpt(item, true);
+    if (ex) out.push(ex);
   });
+  return out;
 }
 
-function storeExcerpts() {
+function applyExcerpts(raw) {
+  let data = null;
   try {
-    localStorage.setItem("grove.excerpts", JSON.stringify(excerpts));
-    return true;
+    data = JSON.parse(raw);
   } catch (e) {
-    toast("Could not keep the excerpt");
     return false;
   }
+  if (!data || data.error) {
+    toast((data && data.error) || "Could not keep the excerpt");
+    return false;
+  }
+  const next = [];
+  (data.excerpts || []).forEach(function (item) {
+    const ex = normalizeExcerpt(item, false);
+    if (ex) next.push(ex);
+  });
+  excerpts = next;
+  return true;
+}
+
+function refreshExcerptMarks() {
+  const tab = activeReader();
+  if (!tab || typeof tab.text !== "string") return;
+  const y = window.scrollY;
+  paintReader(tab);
+  window.scrollTo(0, y);
+}
+
+function forgetLegacyExcerpts() {
+  try { localStorage.removeItem("grove.excerpts"); } catch (e) {}
+}
+
+async function saveExcerptRecord(ex) {
+  return grove_excerpt_save(
+    ex.id,
+    ex.path,
+    ex.title || "",
+    ex.creator || "",
+    ex.heading || "",
+    ex.page || 0,
+    ex.text,
+    ex.byte || 0,
+    ex.endByte || 0,
+    ex.created || 0,
+    (ex.tags || []).join("\n")
+  );
+}
+
+async function migrateLegacy(pending, seq) {
+  for (let i = 0; i < pending.length; i++) {
+    if (seq !== excerptSeq) return false;
+    const ex = pending[i];
+    let raw = "";
+    try {
+      raw = await saveExcerptRecord(ex);
+    } catch (e) {
+      toast("Could not keep the excerpt");
+      return false;
+    }
+    if (seq !== excerptSeq) return false;
+    let data = null;
+    try { data = JSON.parse(raw); } catch (err) { return false; }
+    if (data && data.error && data.error !== "Already saved") {
+      toast(data.error);
+      return false;
+    }
+    if (!data || !data.error) {
+      if (!applyExcerpts(raw)) return false;
+    } else {
+      try {
+        raw = await grove_excerpts();
+      } catch (e) {
+        return false;
+      }
+      if (seq !== excerptSeq || !applyExcerpts(raw)) return false;
+    }
+  }
+  forgetLegacyExcerpts();
+  return true;
+}
+
+async function loadExcerpts() {
+  const seq = ++excerptSeq;
+  try {
+    if (typeof grove_excerpts !== "function") throw new Error("missing");
+    const raw = await grove_excerpts();
+    if (seq !== excerptSeq) return;
+    if (!applyExcerpts(raw)) {
+      excerpts = readLegacyExcerpts();
+    } else {
+      const pending = readLegacyExcerpts().filter(function (ex) {
+        return !findExcerpt(ex.id) && !findSame(ex);
+      });
+      if (pending.length) {
+        if (!await migrateLegacy(pending, seq)) return;
+      } else {
+        forgetLegacyExcerpts();
+      }
+    }
+  } catch (e) {
+    if (seq !== excerptSeq) return;
+    excerpts = readLegacyExcerpts();
+  }
+  if (groveView === "excerpts") drawExcerpts();
+  refreshExcerptMarks();
 }
 
 function toast(message) {
@@ -2694,8 +2803,8 @@ function activeReader() {
   return null;
 }
 
-function saveSelection(tab, draft) {
-  if (!draft) return;
+async function saveSelection(tab, draft) {
+  if (!tab || !draft) return;
   if (draft.text.length > EXCERPT_MAX) {
     toast("Choose a shorter passage");
     return;
@@ -2708,7 +2817,7 @@ function saveSelection(tab, draft) {
     toast("The collection is full");
     return;
   }
-  excerpts.unshift({
+  const ex = {
     id: "ex-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     path: draft.path,
     title: draft.title,
@@ -2720,28 +2829,36 @@ function saveSelection(tab, draft) {
     endByte: draft.endByte,
     tags: [],
     created: Date.now()
-  });
-  if (!storeExcerpts()) {
-    excerpts.shift();
+  };
+  const seq = ++excerptSeq;
+  let raw = "";
+  try {
+    raw = await saveExcerptRecord(ex);
+  } catch (e) {
+    toast("Could not keep the excerpt");
     return;
   }
-  const y = window.scrollY;
-  paintReader(tab);
-  window.scrollTo(0, y);
+  if (seq !== excerptSeq || !applyExcerpts(raw)) return;
+  refreshExcerptMarks();
   finishPick();
   toast("Excerpt saved");
   if (groveView === "excerpts") drawExcerpts();
 }
 
-function removeExcerpt(id) {
+async function removeExcerpt(id) {
   const ex = findExcerpt(id);
-  excerpts = excerpts.filter(function (item) { return item.id !== id; });
-  storeExcerpts();
+  const seq = ++excerptSeq;
+  let raw = "";
+  try {
+    raw = await grove_excerpt_drop(id);
+  } catch (e) {
+    toast("Could not keep the excerpt");
+    return;
+  }
+  if (seq !== excerptSeq || !applyExcerpts(raw)) return;
   const tab = activeReader();
   if (tab && ex && tab.path === ex.path && typeof tab.text === "string") {
-    const y = window.scrollY;
-    paintReader(tab);
-    window.scrollTo(0, y);
+    refreshExcerptMarks();
   }
   finishPick();
   if (groveView === "excerpts") drawExcerpts();
@@ -2898,10 +3015,25 @@ function addTag(id, raw) {
     return;
   }
   tags.push(tag);
-  ex.tags = tags;
   tagOpen = id;
   tagFocus = true;
-  storeExcerpts();
+  void setExcerptTags(id, tags);
+}
+
+async function setExcerptTags(id, tags) {
+  const seq = ++excerptSeq;
+  let raw = "";
+  try {
+    raw = await grove_excerpt_tags(id, (tags || []).join("\n"));
+  } catch (e) {
+    toast("Could not keep the excerpt");
+    drawExcerpts();
+    return;
+  }
+  if (seq !== excerptSeq || !applyExcerpts(raw)) {
+    drawExcerpts();
+    return;
+  }
   drawExcerpts();
 }
 
@@ -3005,9 +3137,8 @@ function drawExcerpts() {
         rm.textContent = "\u00d7";
         rm.setAttribute("aria-label", "Remove tag " + tag);
         rm.addEventListener("click", function () {
-          ex.tags = (ex.tags || []).filter(function (item) { return item !== tag; });
-          storeExcerpts();
-          drawExcerpts();
+          const tags = (ex.tags || []).filter(function (item) { return item !== tag; });
+          void setExcerptTags(ex.id, tags);
         });
         chip.append(name, rm);
         row.append(chip);
@@ -4690,7 +4821,6 @@ if (toTop) {
   window.addEventListener("scroll", syncToTop, { passive: true });
   syncToTop();
 }
-loadExcerpts();
 bindExcerptChrome();
 searchNarrow = readNarrow("grove.narrow.search");
 loadLibSort();
@@ -4706,6 +4836,7 @@ whenReady(function () {
   loadSaved();
   loadNotes();
   loadAlerts();
+  loadExcerpts();
   restoreQuery();
   restoreView();
 });

@@ -18,6 +18,16 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <dlfcn.h>
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#endif
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <shobjidl.h>
+#endif
 
 #include "page.h"
 
@@ -1266,6 +1276,197 @@ static void on_note_drop(webui_event_t *e) {
     reply_owned(e, json);
 }
 
+static char *excerpts_json(void) {
+    if (!ix) {
+        return json_error(open_err[0] ? open_err : "no index");
+    }
+    Excerpt *rows = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (index_excerpts_list(ix, &rows, &n, &e) != 0) {
+        return json_error(e.msg[0] ? e.msg : "could not read excerpts");
+    }
+    Buf b;
+    buf_init(&b);
+    if (buf_puts(&b, "{\"excerpts\":[") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < n; i++) {
+        Excerpt *ex = &rows[i];
+        if (i && buf_putc(&b, ',') != 0) {
+            goto fail;
+        }
+        if (buf_puts(&b, "{\"id\":") != 0 || jesc(&b, ex->id) != 0 || buf_puts(&b, ",\"path\":") != 0 ||
+            jesc(&b, ex->path) != 0 || buf_puts(&b, ",\"title\":") != 0 || jesc(&b, ex->title) != 0 ||
+            buf_puts(&b, ",\"creator\":") != 0 || jesc(&b, ex->creator) != 0 || buf_puts(&b, ",\"heading\":") != 0 ||
+            jesc(&b, ex->heading) != 0 || buf_printf(&b, ",\"page\":%d,\"text\":", ex->page) != 0 ||
+            jesc(&b, ex->text) != 0 ||
+            buf_printf(&b, ",\"byte\":%" PRIu32 ",\"endByte\":%" PRIu32 ",\"tags\":[", ex->byte_at, ex->end_byte) != 0) {
+            goto fail;
+        }
+        for (int t = 0; t < ex->ntags; t++) {
+            if ((t && buf_putc(&b, ',') != 0) || jesc(&b, ex->tags[t]) != 0) {
+                goto fail;
+            }
+        }
+        if (buf_printf(&b, "],\"created\":%" PRId64 "}", ex->created) != 0) {
+            goto fail;
+        }
+    }
+    if (buf_puts(&b, "]}") != 0) {
+        goto fail;
+    }
+    index_excerpts_free(rows, n);
+    return b.data;
+fail:
+    index_excerpts_free(rows, n);
+    buf_free(&b);
+    return NULL;
+}
+
+static int excerpt_tag_ptrs(char *s, const char **out, int *n, Err *err) {
+    *n = 0;
+    if (!s || !s[0]) {
+        return 0;
+    }
+    char *p = s;
+    while (*p) {
+        if (*n >= EXCERPT_TAGS_MAX) {
+            err_set(err, "that passage has enough tags");
+            return -1;
+        }
+        char *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = 0;
+        }
+        out[(*n)++] = p;
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static void on_excerpts(webui_event_t *e) {
+    pthread_mutex_lock(&mu);
+    char *json = excerpts_json();
+    pthread_mutex_unlock(&mu);
+    reply_owned(e, json);
+}
+
+static void on_excerpt_save(webui_event_t *e) {
+    char *id = xstrdup(webui_get_string_at(e, 0) ? webui_get_string_at(e, 0) : "");
+    char *path = xstrdup(webui_get_string_at(e, 1) ? webui_get_string_at(e, 1) : "");
+    char *title = xstrdup(webui_get_string_at(e, 2) ? webui_get_string_at(e, 2) : "");
+    char *creator = xstrdup(webui_get_string_at(e, 3) ? webui_get_string_at(e, 3) : "");
+    char *heading = xstrdup(webui_get_string_at(e, 4) ? webui_get_string_at(e, 4) : "");
+    char *text = xstrdup(webui_get_string_at(e, 6) ? webui_get_string_at(e, 6) : "");
+    char *tags = xstrdup(webui_get_string_at(e, 10) ? webui_get_string_at(e, 10) : "");
+    long long page = webui_get_int_at(e, 5);
+    long long byte_at = webui_get_int_at(e, 7);
+    long long end_byte = webui_get_int_at(e, 8);
+    long long created = webui_get_int_at(e, 9);
+    const char *tagv[EXCERPT_TAGS_MAX];
+    int ntags = 0;
+    Err terr;
+    err_clear(&terr);
+    int tags_bad = !tags || excerpt_tag_ptrs(tags, tagv, &ntags, &terr) != 0;
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!id || !path || !title || !creator || !heading || !text || !tags) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else if (page < 0 || page > INT_MAX) {
+        json = json_error("bad page");
+    } else if (byte_at < 0 || byte_at > UINT32_MAX || end_byte < 0 || end_byte > UINT32_MAX) {
+        json = json_error("bad place");
+    } else if (created < 0) {
+        json = json_error("bad time");
+    } else if (tags_bad) {
+        json = json_error(terr.msg[0] ? terr.msg : "empty tag");
+    } else {
+        ExcerptSpec spec;
+        memset(&spec, 0, sizeof spec);
+        spec.id = id;
+        spec.path = path;
+        spec.title = title;
+        spec.creator = creator;
+        spec.heading = heading;
+        spec.page = (int)page;
+        spec.text = text;
+        spec.byte_at = (uint32_t)byte_at;
+        spec.end_byte = (uint32_t)end_byte;
+        spec.tags = tagv;
+        spec.ntags = ntags;
+        spec.created = (int64_t)created;
+        Err err;
+        err_clear(&err);
+        json = index_excerpt_put(ix, &spec, &err) == 0
+                   ? excerpts_json()
+                   : json_error(err.msg[0] ? err.msg : "could not keep the excerpt");
+    }
+    pthread_mutex_unlock(&mu);
+    free(id);
+    free(path);
+    free(title);
+    free(creator);
+    free(heading);
+    free(text);
+    free(tags);
+    reply_owned(e, json);
+}
+
+static void on_excerpt_tags(webui_event_t *e) {
+    char *id = xstrdup(webui_get_string_at(e, 0) ? webui_get_string_at(e, 0) : "");
+    char *tags = xstrdup(webui_get_string_at(e, 1) ? webui_get_string_at(e, 1) : "");
+    const char *tagv[EXCERPT_TAGS_MAX];
+    int ntags = 0;
+    Err terr;
+    err_clear(&terr);
+    int tags_bad = !tags || excerpt_tag_ptrs(tags, tagv, &ntags, &terr) != 0;
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!id || !tags) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else if (tags_bad) {
+        json = json_error(terr.msg[0] ? terr.msg : "empty tag");
+    } else {
+        Err err;
+        err_clear(&err);
+        json = index_excerpt_tags(ix, id, tagv, ntags, &err) == 0
+                   ? excerpts_json()
+                   : json_error(err.msg[0] ? err.msg : "could not keep the excerpt");
+    }
+    pthread_mutex_unlock(&mu);
+    free(id);
+    free(tags);
+    reply_owned(e, json);
+}
+
+static void on_excerpt_drop(webui_event_t *e) {
+    char *id = xstrdup(webui_get_string(e) ? webui_get_string(e) : "");
+    pthread_mutex_lock(&mu);
+    char *json = NULL;
+    if (!id) {
+        json = NULL;
+    } else if (!ix) {
+        json = json_error(open_err[0] ? open_err : "no index");
+    } else {
+        Err err;
+        err_clear(&err);
+        json = index_excerpt_drop(ix, id, &err) == 0 ? excerpts_json()
+                                                      : json_error(err.msg[0] ? err.msg : "could not keep the excerpt");
+    }
+    pthread_mutex_unlock(&mu);
+    free(id);
+    reply_owned(e, json);
+}
+
 /* The host stays up. This module is the program: a save of page.html reloads
  * the page, and a new build of this file replaces the module. */
 static const char *live_path;
@@ -1413,7 +1614,9 @@ static void on_read(webui_event_t *e) {
 }
 
 /* A file input in the page does not yield a path, so the chooser is a
- * desktop dialog. 0 is a path, 1 is cancel, -1 is no chooser. */
+ * desktop dialog. 0 is a path, 1 is cancel, -1 is no chooser.
+ * Windows uses the system file dialog instead of a helper program. */
+#if !defined(_WIN32)
 static int dialog_path(char *const argv[], char *out, size_t n, int *cancel) {
     *cancel = 0;
     if (!out || n < 2) {
@@ -1503,6 +1706,264 @@ static int dialog_path(char *const argv[], char *out, size_t n, int *cancel) {
     }
     return -1;
 }
+#endif
+
+#if defined(_WIN32)
+/* FileOpenDialog. Defined here so the program does not depend on an import library for the GUID. */
+static const CLSID grove_clsid_file_open = {0xDC1C5A9C, 0xE88A, 0x4dde, {0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7}};
+static const IID grove_iid_file_open = {0xD57C7288, 0xD4AD, 0x4768, {0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60}};
+
+struct WinPick {
+    int directory;
+    HWND owner;
+    char *out;
+    size_t n;
+    int cancel;
+    int rc;
+};
+
+static int win_pick_show(struct WinPick *job) {
+    IFileOpenDialog *dlg = NULL;
+    IShellItem *item = NULL;
+    PWSTR name = NULL;
+    HRESULT hr;
+    DWORD opts = 0;
+    HWND owner;
+    DWORD tid;
+    int chars;
+    int rc = -1;
+    job->cancel = 0;
+    if (!job->out || job->n < 2 || job->n > 2147483647u) {
+        return -1;
+    }
+    job->out[0] = 0;
+    owner = job->owner;
+    if (owner) {
+        tid = GetWindowThreadProcessId(owner, NULL);
+        if (tid != GetCurrentThreadId()) {
+            owner = NULL;
+        }
+    }
+    hr = CoCreateInstance(&grove_clsid_file_open, NULL, CLSCTX_INPROC_SERVER, &grove_iid_file_open, (void **)&dlg);
+    if (FAILED(hr) || !dlg) {
+        return -1;
+    }
+    if (FAILED(dlg->lpVtbl->GetOptions(dlg, &opts))) {
+        opts = 0;
+    }
+    opts |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR;
+    if (job->directory) {
+        opts |= FOS_PICKFOLDERS;
+    } else {
+        opts |= FOS_FILEMUSTEXIST;
+    }
+    dlg->lpVtbl->SetOptions(dlg, opts);
+    dlg->lpVtbl->SetTitle(dlg, job->directory ? L"Add a folder" : L"Add a file");
+    hr = dlg->lpVtbl->Show(dlg, owner);
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        job->cancel = 1;
+        rc = 1;
+        goto done;
+    }
+    if (FAILED(hr)) {
+        goto done;
+    }
+    hr = dlg->lpVtbl->GetResult(dlg, &item);
+    if (FAILED(hr) || !item) {
+        goto done;
+    }
+    hr = item->lpVtbl->GetDisplayName(item, SIGDN_FILESYSPATH, &name);
+    if (FAILED(hr) || !name || !name[0]) {
+        goto done;
+    }
+    chars = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1, job->out, (int)job->n, NULL, NULL);
+    if (chars <= 1) {
+        job->out[0] = 0;
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            rc = 2;
+        }
+        goto done;
+    }
+    rc = 0;
+done:
+    if (name) {
+        CoTaskMemFree(name);
+    }
+    if (item) {
+        item->lpVtbl->Release(item);
+    }
+    if (dlg) {
+        dlg->lpVtbl->Release(dlg);
+    }
+    return rc;
+}
+
+static DWORD WINAPI win_pick_thread(void *arg) {
+    struct WinPick *job = arg;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr)) {
+        job->rc = -1;
+        return 0;
+    }
+    job->rc = win_pick_show(job);
+    CoUninitialize();
+    return 0;
+}
+
+static int win_pick(size_t window, int directory, char *out, size_t n, int *cancel) {
+    struct WinPick job;
+    HRESULT hr;
+    int own_init = 0;
+    memset(&job, 0, sizeof job);
+    job.directory = directory;
+    job.out = out;
+    job.n = n;
+    job.owner = (HWND)webui_get_hwnd(window);
+    job.rc = -1;
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (hr == S_OK) {
+        own_init = 1;
+    } else if (hr == RPC_E_CHANGED_MODE) {
+        HANDLE thread = CreateThread(NULL, 0, win_pick_thread, &job, 0, NULL);
+        if (!thread) {
+            return -1;
+        }
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+        *cancel = job.cancel;
+        return job.rc;
+    } else if (FAILED(hr)) {
+        return -1;
+    }
+    job.rc = win_pick_show(&job);
+    if (own_init) {
+        CoUninitialize();
+    }
+    *cancel = job.cancel;
+    return job.rc;
+}
+#endif
+
+#if defined(__APPLE__)
+static int mac_pick(int directory, char *out, size_t n, int *cancel) {
+    char *script = directory ? "POSIX path of (choose folder with prompt \"Add a folder\")"
+                             : "POSIX path of (choose file with prompt \"Add a file\")";
+    char *argv[] = {"osascript", "-e", script, NULL};
+    return dialog_path(argv, out, n, cancel);
+}
+#endif
+
+static void strip_dir_slash(char *path) {
+    size_t n;
+    if (!path) {
+        return;
+    }
+    n = strlen(path);
+    if (n <= 1) {
+        return;
+    }
+    if (path[n - 1] != '/' && path[n - 1] != '\\') {
+        return;
+    }
+    if (n == 3 && path[1] == ':') {
+        return;
+    }
+    path[n - 1] = 0;
+}
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+/* The WebKit window is ours. Zenity stays above it when it knows that id.
+ * libX11 is opened only for this lookup, so a command does not need it. */
+static unsigned long chooser_xid(void) {
+    void *lib;
+    Display *(*open_dpy)(const char *);
+    int (*close_dpy)(Display *);
+    Atom (*intern)(Display *, const char *, Bool);
+    int (*get_prop)(Display *, Window, Atom, long, long, Bool, Atom, Atom *, int *, unsigned long *, unsigned long *,
+                    unsigned char **);
+    int (*xfree)(void *);
+    int (*get_attr)(Display *, Window, XWindowAttributes *);
+    Display *dpy;
+    Atom clients;
+    Atom pid_atom;
+    Atom actual = None;
+    int format = 0;
+    unsigned long n = 0;
+    unsigned long left = 0;
+    unsigned char *raw = NULL;
+    unsigned long xid = 0;
+    unsigned long best = 0;
+    pid_t self;
+    lib = dlopen("libX11.so.6", RTLD_LAZY);
+    if (!lib) {
+        return 0;
+    }
+    open_dpy = (Display * (*)(const char *))dlsym(lib, "XOpenDisplay");
+    close_dpy = (int (*)(Display *))dlsym(lib, "XCloseDisplay");
+    intern = (Atom(*)(Display *, const char *, Bool))dlsym(lib, "XInternAtom");
+    get_prop = (int (*)(Display *, Window, Atom, long, long, Bool, Atom, Atom *, int *, unsigned long *, unsigned long *,
+                        unsigned char **))dlsym(lib, "XGetWindowProperty");
+    xfree = (int (*)(void *))dlsym(lib, "XFree");
+    get_attr = (int (*)(Display *, Window, XWindowAttributes *))dlsym(lib, "XGetWindowAttributes");
+    if (!open_dpy || !close_dpy || !intern || !get_prop || !xfree) {
+        dlclose(lib);
+        return 0;
+    }
+    dpy = open_dpy(NULL);
+    if (!dpy) {
+        dlclose(lib);
+        return 0;
+    }
+    self = getpid();
+    clients = intern(dpy, "_NET_CLIENT_LIST", False);
+    pid_atom = intern(dpy, "_NET_WM_PID", False);
+    if (clients != None && pid_atom != None &&
+        get_prop(dpy, DefaultRootWindow(dpy), clients, 0, 1024, False, XA_WINDOW, &actual, &format, &n, &left, &raw) ==
+            Success &&
+        raw && format == 32) {
+        const long *ids = (const long *)raw;
+        unsigned long i;
+        if (n > 1024) {
+            n = 1024;
+        }
+        for (i = 0; i < n; i++) {
+            Window w = (Window)ids[i];
+            unsigned char *pdata = NULL;
+            Atom pactual = None;
+            int pformat = 0;
+            unsigned long pn = 0;
+            unsigned long pleft = 0;
+            if (get_prop(dpy, w, pid_atom, 0, 1, False, XA_CARDINAL, &pactual, &pformat, &pn, &pleft, &pdata) == Success &&
+                pdata && pformat == 32 && pn >= 1) {
+                long v = *(long *)pdata;
+                if (v == (long)self && v > 0) {
+                    XWindowAttributes attr;
+                    unsigned long area;
+                    memset(&attr, 0, sizeof attr);
+                    if (get_attr && (get_attr(dpy, w, &attr) == 0 || attr.width < 64 || attr.height < 64)) {
+                        xfree(pdata);
+                        continue;
+                    }
+                    area = get_attr ? (unsigned long)attr.width * (unsigned long)attr.height : 1;
+                    if (area >= best) {
+                        best = area;
+                        xid = (unsigned long)w;
+                    }
+                }
+            }
+            if (pdata) {
+                xfree(pdata);
+            }
+        }
+    }
+    if (raw) {
+        xfree(raw);
+    }
+    close_dpy(dpy);
+    dlclose(lib);
+    return xid;
+}
+#endif
 
 static char *path_json(const char *path) {
     Buf b;
@@ -1514,29 +1975,59 @@ static char *path_json(const char *path) {
     return b.data;
 }
 
-static char *pick_json(const char *kind) {
+static char *pick_json(size_t window, const char *kind) {
     int directory = 0;
     if (kind && strcmp(kind, "dir") == 0) {
         directory = 1;
     } else if (!kind || strcmp(kind, "file") != 0) {
         return json_error("choose a folder or a file");
     }
-    char out[PATH_MAX + 2];
+    char out[8192];
     int cancel = 0;
     int ran = -1;
-    if (on_path("zenity")) {
+#if defined(_WIN32)
+    ran = win_pick(window, directory, out, sizeof out, &cancel);
+#elif defined(__APPLE__)
+    ran = mac_pick(directory, out, sizeof out, &cancel);
+    (void)window;
+#else
+    if (on_path("zenity") || on_path("qarma") || on_path("yad")) {
+        char *bin = on_path("zenity") ? "zenity" : (on_path("qarma") ? "qarma" : "yad");
         char *title = directory ? "Add a folder" : "Add a file";
-        char *argv[6];
-        int argc = 0;
-        argv[argc++] = "zenity";
-        argv[argc++] = "--file-selection";
-        if (directory) {
-            argv[argc++] = "--directory";
+        char attach[64];
+        unsigned long xid = 0;
+        int pass;
+        int parented = strcmp(bin, "yad") != 0;
+        if (parented) {
+            xid = chooser_xid();
         }
-        argv[argc++] = "--title";
-        argv[argc++] = title;
-        argv[argc] = NULL;
-        ran = dialog_path(argv, out, sizeof out, &cancel);
+        for (pass = 0; pass < 2 && ran < 0; pass++) {
+            char *argv[8];
+            int argc = 0;
+            if (pass == 1 && !parented) {
+                break;
+            }
+            argv[argc++] = bin;
+            argv[argc++] = "--file-selection";
+            if (directory) {
+                argv[argc++] = "--directory";
+            }
+            argv[argc++] = "--title";
+            argv[argc++] = title;
+            if (pass == 0 && parented) {
+                int nw;
+                argv[argc++] = "--modal";
+                if (xid != 0) {
+                    nw = snprintf(attach, sizeof attach, "--attach=%lu", xid);
+                    if (nw > 0 && (size_t)nw < sizeof attach) {
+                        argv[argc++] = attach;
+                    }
+                }
+            }
+            argv[argc] = NULL;
+            cancel = 0;
+            ran = dialog_path(argv, out, sizeof out, &cancel);
+        }
     }
     if (ran < 0 && on_path("kdialog")) {
         const char *home = getenv("HOME");
@@ -1547,11 +2038,19 @@ static char *pick_json(const char *kind) {
         cancel = 0;
         ran = dialog_path(argv, out, sizeof out, &cancel);
     }
+    (void)window;
+#endif
+    if (ran == 2) {
+        return json_error("that path is not usable");
+    }
     if (ran < 0) {
-        return json_error("Type the path. This desktop has no folder chooser.");
+        return json_error("Could not open the folder chooser.");
     }
     if (cancel || !out[0]) {
         return xstrdup("{\"path\":\"\"}");
+    }
+    if (directory) {
+        strip_dir_slash(out);
     }
     if (strchr(out, '\n') || strchr(out, '\r') || strlen(out) > 4096) {
         return json_error("that path is not usable");
@@ -2043,7 +2542,7 @@ static void on_job(webui_event_t *e) {
 
 static void on_pick(webui_event_t *e) {
     const char *kind = webui_get_string_at(e, 0);
-    reply_owned(e, pick_json(kind));
+    reply_owned(e, pick_json(e->window, kind));
 }
 
 static void on_shelf(webui_event_t *e) {
@@ -2093,6 +2592,10 @@ GUARD(on_forget)
 GUARD(on_notes)
 GUARD(on_note_put)
 GUARD(on_note_drop)
+GUARD(on_excerpts)
+GUARD(on_excerpt_save)
+GUARD(on_excerpt_tags)
+GUARD(on_excerpt_drop)
 GUARD(on_alerts)
 GUARD(on_watch)
 GUARD(on_unwatch)
@@ -2152,6 +2655,10 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_notes", on_notes_guard);
     webui_bind(win, "grove_note", on_note_put_guard);
     webui_bind(win, "grove_forget_note", on_note_drop_guard);
+    webui_bind(win, "grove_excerpts", on_excerpts_guard);
+    webui_bind(win, "grove_excerpt_save", on_excerpt_save_guard);
+    webui_bind(win, "grove_excerpt_tags", on_excerpt_tags_guard);
+    webui_bind(win, "grove_excerpt_drop", on_excerpt_drop_guard);
     webui_bind(win, "grove_alerts", on_alerts_guard);
     webui_bind(win, "grove_watch", on_watch_guard);
     webui_bind(win, "grove_unwatch", on_unwatch_guard);
@@ -2165,16 +2672,23 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_job", on_job_guard);
     webui_bind(win, "grove_pick", on_pick_guard);
     webui_bind(win, "grove_shelf", on_shelf_guard);
-    if (!webui_show(win, live_name ? live_name : page_html)) {
-        fprintf(stderr, "grove: could not open a browser window\n");
+    const char *page = live_name ? live_name : page_html;
+    /* WebUI's own window (WebView2, WebKit, or WKWebView). A browser
+     * is only the fallback, and it is what opens a tab when one is
+     * already running. */
+    if (!webui_show_wv(win, page) && !webui_show(win, page)) {
+        fprintf(stderr, "grove: could not open a window\n");
         return 1;
     }
-    const char *url = webui_get_url(win);
-    fprintf(stderr, "grove: %s\n", url ? url : "");
-    if (live_path) {
-        fprintf(stderr, "grove: watching %s\n", live_path);
+    const char *log = getenv("GROVE_CONSOLE");
+    if (log && log[0] == '1' && log[1] == 0) {
+        const char *url = webui_get_url(win);
+        fprintf(stderr, "grove: %s\n", url ? url : "");
+        if (live_path) {
+            fprintf(stderr, "grove: watching %s\n", live_path);
+        }
+        fflush(stderr);
     }
-    fflush(stderr);
 
     struct stat st;
     if (!ui->smoke && live_path && stat(live_path, &st) == 0) {

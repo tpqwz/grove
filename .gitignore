@@ -6,6 +6,10 @@ grove-ui
 *.o
 *.tmp
 ui/page.h
+ui/icon_png.h
+ui/grove.ico
+ui/grove.res.o
+ui/WebView2Loader.dll
 ui/live/
 ui/third_party/
 samples/index/

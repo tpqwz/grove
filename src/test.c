@@ -1848,6 +1848,170 @@ done:
     rm_rf(root);
 }
 
+static Excerpt *excerpt_by_id(Excerpt *rows, int n, const char *id) {
+    for (int i = 0; i < n; i++) {
+        if (rows[i].id && strcmp(rows[i].id, id) == 0) {
+            return &rows[i];
+        }
+    }
+    return NULL;
+}
+
+static void test_excerpts(void) {
+    char tmpl[] = "/tmp/grove-excerpts-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    char *idx = path_join(root, "idx");
+    Index *ix = NULL;
+    Excerpt *rows = NULL;
+    int n = 0;
+    Err e;
+    err_clear(&e);
+    if (!idx) {
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    if (!ix) {
+        fprintf(stderr, "excerpts open: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    CHECK(index_excerpts_list(ix, &rows, &n, &e) == 0);
+    CHECK(n == 0);
+    ExcerptSpec spec;
+    memset(&spec, 0, sizeof spec);
+    spec.id = "ex-one";
+    spec.path = " /shelf/a.txt ";
+    spec.title = " The Poems ";
+    spec.creator = "Goethe";
+    spec.heading = "DEDICATION.";
+    spec.page = 0;
+    spec.text = "  a fair— form  ";
+    spec.byte_at = 100;
+    spec.end_byte = 120;
+    spec.created = 50;
+    const char *tags[] = {"  Hope ", "hope"};
+    spec.tags = tags;
+    spec.ntags = 2;
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    const char *kept[] = {"Hope", "night"};
+    spec.tags = kept;
+    spec.ntags = 2;
+    CHECK(index_excerpt_put(ix, &spec, &e) == 0);
+    spec.id = "ex-one";
+    spec.ntags = 0;
+    spec.tags = NULL;
+    spec.text = "other words";
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.id = "ex near";
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.id = "ex-empty";
+    spec.text = "   ";
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.id = "ex-line";
+    spec.text = "two\nlines";
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.id = "ex-page";
+    spec.text = "a page";
+    spec.page = EXCERPT_PAGE_MAX + 1;
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.page = 0;
+    spec.id = "ex-long";
+    char *long_text = malloc((size_t)EXCERPT_TEXT_MAX + 2);
+    if (!long_text) {
+        fails++;
+        goto done;
+    }
+    memset(long_text, 'a', (size_t)EXCERPT_TEXT_MAX + 1);
+    long_text[EXCERPT_TEXT_MAX + 1] = 0;
+    spec.text = long_text;
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    free(long_text);
+    spec.id = "ex-near";
+    spec.text = "a fair— form";
+    spec.byte_at = 110;
+    spec.end_byte = 130;
+    spec.created = 40;
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    spec.id = "ex-far";
+    spec.byte_at = 400;
+    spec.end_byte = 420;
+    spec.created = 80;
+    spec.ntags = 0;
+    CHECK(index_excerpt_put(ix, &spec, &e) == 0);
+    const char *renamed[] = {"dawn"};
+    CHECK(index_excerpt_tags(ix, "ex-one", renamed, 1, &e) == 0);
+    CHECK(index_excerpt_tags(ix, "ex-missing", renamed, 1, &e) != 0);
+    CHECK(index_excerpt_drop(ix, "ex-nope", &e) == 0);
+    index_excerpts_free(rows, n);
+    rows = NULL;
+    n = 0;
+    CHECK(index_excerpts_list(ix, &rows, &n, &e) == 0);
+    CHECK(n == 2);
+    Excerpt *one = excerpt_by_id(rows, n, "ex-one");
+    CHECK(one && strcmp(one->path, "/shelf/a.txt") == 0);
+    CHECK(one && strcmp(one->title, "The Poems") == 0);
+    CHECK(one && strcmp(one->text, "a fair— form") == 0);
+    CHECK(one && one->byte_at == 100 && one->end_byte == 120 && one->created == 50);
+    CHECK(one && one->ntags == 1 && one->tags && strcmp(one->tags[0], "dawn") == 0);
+    Excerpt *far = excerpt_by_id(rows, n, "ex-far");
+    CHECK(far && far->created == 80 && far->ntags == 0);
+    CHECK(index_excerpt_drop(ix, " ex-far ", &e) == 0);
+    index_close(ix);
+    ix = index_open(idx, 0, &e);
+    if (!ix) {
+        fprintf(stderr, "excerpts reopen: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_excerpts_free(rows, n);
+    rows = NULL;
+    n = 0;
+    CHECK(index_excerpts_list(ix, &rows, &n, &e) == 0);
+    CHECK(n == 1 && excerpt_by_id(rows, n, "ex-one"));
+    int have = n;
+    index_excerpts_free(rows, n);
+    rows = NULL;
+    n = 0;
+    for (int i = 0; i < EXCERPT_KEEP - have; i++) {
+        char id[32];
+        char text[32];
+        CHECK(snprintf(id, sizeof id, "k%d", i) > 0);
+        CHECK(snprintf(text, sizeof text, "word %d", i) > 0);
+        memset(&spec, 0, sizeof spec);
+        spec.id = id;
+        spec.path = "/shelf/cap.txt";
+        spec.text = text;
+        spec.byte_at = 0;
+        spec.end_byte = 4;
+        if (index_excerpt_put(ix, &spec, &e) != 0) {
+            fprintf(stderr, "excerpt fill %d: %s\n", i, e.msg);
+            fails++;
+            break;
+        }
+    }
+    memset(&spec, 0, sizeof spec);
+    spec.id = "k-over";
+    spec.path = "/shelf/cap.txt";
+    spec.text = "one more";
+    CHECK(index_excerpt_put(ix, &spec, &e) != 0);
+    CHECK(strstr(e.msg, "full") != NULL);
+    CHECK(index_excerpts_list(ix, &rows, &n, &e) == 0);
+    CHECK(n == EXCERPT_KEEP);
+done:
+    index_excerpts_free(rows, n);
+    if (ix) {
+        index_close(ix);
+    }
+    free(idx);
+    rm_rf(root);
+}
+
 static int alert_nfiles(Alert *a, int n, const char *query) {
     for (int i = 0; i < n; i++) {
         if (a[i].query && strcmp(a[i].query, query) == 0) {
@@ -3082,6 +3246,36 @@ done:
 
 static const char *persona_hosts[] = {"upload.wikimedia.org", "en.wikipedia.org", "www.wikidata.org", "query.wikidata.org"};
 
+static int persona_body_set(const char *root, const char *folded, const char *body) {
+    char *db_path = root ? path_join(root, "grove.db") : NULL;
+    char hex[65];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int rc;
+    if (!db_path || !folded || !body) {
+        free(db_path);
+        return -1;
+    }
+    fetch_sha256_hex(folded, strlen(folded), hex);
+    rc = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL);
+    free(db_path);
+    if (rc != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return -1;
+    }
+    rc = sqlite3_prepare_v2(db, "UPDATE persona SET body=?, photo=NULL, mime='' WHERE id=?", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, body, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, hex, 64, SQLITE_TRANSIENT);
+        rc = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db) == 1 ? SQLITE_OK : SQLITE_ERROR;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return rc == SQLITE_OK ? 0 : -1;
+}
+
 static int persona_file(const char *dir, const char *suffix, char **out) {
     DIR *d = opendir(dir);
     struct dirent *de;
@@ -3321,29 +3515,25 @@ static void test_persona_profile(void) {
     made.photo_type = xstrdup("image/jpeg");
     jpg = NULL;
     CHECK(persona_profile_store(root, "Aristotle", &made, &e) == 0);
-    CHECK(persona_file(people, ".json", &json) == 0);
+    CHECK(persona_file(people, ".json", &json) != 0);
+    CHECK(json == NULL);
     CHECK(write_file(secret, "SECRET", 6) == 0);
     {
-        char *canon_dir = grove_realpath(people, NULL);
-        char *canon_file = json ? grove_realpath(json, NULL) : NULL;
         const char *evil =
             "{\"v\":1,\"qid\":\"Q1\",\"summary\":\"kept\",\"wikipedia\":\"https://evil.example/a\","
             "\"photo\":\"../../secret\",\"works\":[{\"title\":\"Poetics\",\"year\":\"\",\"url\":\"https://127.0.0.1/x\"}]}";
         const char *dropped = "{\"v\":1,\"qid\":\"Q1;drop\",\"summary\":\"no\"}";
-        CHECK(canon_dir && canon_file && strncmp(canon_file, canon_dir, strlen(canon_dir)) == 0);
-        CHECK(canon_file && canon_dir && canon_file[strlen(canon_dir)] == '/');
-        free(canon_dir);
-        free(canon_file);
-        CHECK(json && write_file(json, evil, strlen(evil)) == 0);
+        CHECK(persona_body_set(root, "aristotle", evil) == 0);
         CHECK(persona_profile_load(root, "Aristotle", &loaded, &e) == 0);
         CHECK(loaded.state == PERSONA_READY);
         CHECK(loaded.qid && strcmp(loaded.qid, "Q1") == 0);
         CHECK(loaded.summary && strcmp(loaded.summary, "kept") == 0);
         CHECK(loaded.wikipedia == NULL);
         CHECK(loaded.photo_n == 0);
+        CHECK(strcmp(loaded.summary, "SECRET") != 0);
         CHECK(loaded.work_n == 1 && loaded.works && (!loaded.works[0].url || !loaded.works[0].url[0]));
         persona_profile_free(&loaded);
-        CHECK(json && write_file(json, dropped, strlen(dropped)) == 0);
+        CHECK(persona_body_set(root, "aristotle", dropped) == 0);
         CHECK(persona_profile_load(root, "Aristotle", &loaded, &e) == 0);
         CHECK(loaded.state == PERSONA_NONE);
         persona_profile_free(&loaded);
@@ -3390,6 +3580,72 @@ static void test_persona_profile(void) {
             persona_profile_free(&loaded);
         }
         persona_profile_free(&bad);
+    }
+    {
+        char tmpl2[] = "/tmp/grove-profile-leg-XXXXXX";
+        char *leg = mkdtemp(tmpl2);
+        char *leg_people = leg ? path_join(leg, "personas") : NULL;
+        char hex[65];
+        char base[80];
+        char *leg_json = NULL;
+        char *leg_img = NULL;
+        char *bad_json = NULL;
+        const char *kept = "{\"v\":1,\"qid\":\"Q868\",\"summary\":\"from the file cache\","
+                           "\"wikipedia\":\"https://en.wikipedia.org/wiki/Aristotle\","
+                           "\"photo\":\"image/jpeg\",\"aliases\":[\"Aristoteles\"],"
+                           "\"works\":[{\"title\":\"Poetics\",\"year\":\"\","
+                           "\"url\":\"https://en.wikipedia.org/wiki/Poetics_(Aristotle)\"}]}";
+        const char *bad = "{\"v\":1,\"qid\":\"Q1;drop\",\"summary\":\"no\"}";
+        const char *newer = "{\"v\":1,\"qid\":\"Q1\",\"summary\":\"replaced\",\"photo\":\"image/jpeg\"}";
+        unsigned char jpg4[4] = {0xff, 0xd8, 0xff, 0x00};
+        if (!leg || !leg_people || mkdir(leg_people, 0700) != 0) {
+            fails++;
+        } else {
+            fetch_sha256_hex("aristotle", 9, hex);
+            CHECK(snprintf(base, sizeof base, "%s.json", hex) > 0);
+            leg_json = path_join(leg_people, base);
+            CHECK(snprintf(base, sizeof base, "%s.img", hex) > 0);
+            leg_img = path_join(leg_people, base);
+            fetch_sha256_hex("homer", 5, hex);
+            CHECK(snprintf(base, sizeof base, "%s.json", hex) > 0);
+            bad_json = path_join(leg_people, base);
+            CHECK(leg_json && leg_img && bad_json);
+            CHECK(write_file(leg_json, kept, strlen(kept)) == 0);
+            CHECK(write_file(leg_img, jpg4, sizeof jpg4) == 0);
+            CHECK(write_file(bad_json, bad, strlen(bad)) == 0);
+            persona_cache_adopt(leg);
+            CHECK(access(leg_json, F_OK) != 0);
+            CHECK(access(leg_img, F_OK) != 0);
+            CHECK(access(bad_json, F_OK) == 0);
+            CHECK(persona_profile_load(leg, "  Aristotle ", &loaded, &e) == 0);
+            CHECK(loaded.state == PERSONA_READY);
+            CHECK(loaded.qid && strcmp(loaded.qid, "Q868") == 0);
+            CHECK(loaded.summary && strcmp(loaded.summary, "from the file cache") == 0);
+            CHECK(loaded.wikipedia && strcmp(loaded.wikipedia, "https://en.wikipedia.org/wiki/Aristotle") == 0);
+            CHECK(loaded.alias_n == 1 && loaded.aliases && strcmp(loaded.aliases[0], "Aristoteles") == 0);
+            CHECK(loaded.photo_n == 4 && loaded.photo && memcmp(loaded.photo, jpg4, 4) == 0);
+            CHECK(loaded.work_n == 1 && loaded.works && loaded.works[0].url &&
+                  strcmp(loaded.works[0].url, "https://en.wikipedia.org/wiki/Poetics_(Aristotle)") == 0);
+            persona_profile_free(&loaded);
+            CHECK(persona_profile_load(leg, "Homer", &loaded, &e) == 0);
+            CHECK(loaded.state == PERSONA_NONE);
+            persona_profile_free(&loaded);
+            CHECK(write_file(leg_json, newer, strlen(newer)) == 0);
+            CHECK(write_file(leg_img, jpg4, sizeof jpg4) == 0);
+            persona_cache_adopt(leg);
+            CHECK(access(leg_json, F_OK) == 0);
+            CHECK(persona_profile_load(leg, "Aristotle", &loaded, &e) == 0);
+            CHECK(loaded.qid && strcmp(loaded.qid, "Q868") == 0);
+            CHECK(loaded.summary && strcmp(loaded.summary, "from the file cache") == 0);
+            CHECK(loaded.photo_n == 4);
+            persona_profile_free(&loaded);
+            CHECK(access(bad_json, F_OK) == 0);
+        }
+        free(leg_json);
+        free(leg_img);
+        free(bad_json);
+        free(leg_people);
+        rm_rf(leg);
     }
 done:
     persona_profile_free(&made);
@@ -4008,6 +4264,7 @@ int main(void) {
     test_mtime();
     test_saved();
     test_notes();
+    test_excerpts();
     test_library();
     test_named_creator();
     test_personas();

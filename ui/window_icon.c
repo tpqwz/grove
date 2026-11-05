@@ -69,12 +69,12 @@ static int x11_bind(void) {
 #define XChangeProperty p_XChangeProperty
 #define XFlush p_XFlush
 
-/* WebUI launches Firefox and can only set a favicon, which this window
- * never shows. The frame reads _NET_WM_ICON. This dock groups by class
- * and then shows the desktop entry's icon, so both are set on the
- * Firefox that is serving this process's port. Firefox writes its own
- * icon at startup, and may write it again, so the window values are
- * put back while the process lives. */
+/* WebUI's own window takes its icon from the PNG written below.
+ * A browser window does not. That frame reads _NET_WM_ICON. The dock
+ * groups by class and then shows the desktop entry's icon, so both are
+ * set on the browser that is serving this process's port. The browser
+ * writes its own icon at startup, and may write it again, so the window
+ * values are put back while the process lives. */
 
 enum { ICON_SCALE = 1000, ICON_SAMPLES = 4, ICON_LONGS = 24652 };
 
@@ -83,6 +83,7 @@ static int icon_started;
 static volatile int icon_stop;
 static size_t icon_window;
 static int icon_announced;
+static int icon_log;
 
 static int icon_x_error(Display *dpy, XErrorEvent *event) {
     (void)dpy;
@@ -373,8 +374,8 @@ static int class_is_ours(Display *dpy, Window w) {
     if (XGetClassHint(dpy, w, &hint) == 0) {
         return 0;
     }
-    same = hint.res_name && hint.res_class && strcmp(hint.res_name, "grove-ui") == 0 &&
-           strcmp(hint.res_class, "Grove-ui") == 0;
+    same = hint.res_name && hint.res_class && strcmp(hint.res_name, "grove") == 0 &&
+           strcmp(hint.res_class, "Grove") == 0;
     if (hint.res_name) {
         XFree(hint.res_name);
     }
@@ -385,8 +386,8 @@ static int class_is_ours(Display *dpy, Window w) {
 }
 
 static void set_class(Display *dpy, Window w) {
-    char name[] = "grove-ui";
-    char klass[] = "Grove-ui";
+    char name[] = "grove";
+    char klass[] = "Grove";
     XClassHint hint;
     hint.res_name = name;
     hint.res_class = klass;
@@ -444,7 +445,7 @@ static void apply_once(Display *dpy, const char *token, const long *data, int nl
         if (!icon_ok) {
             XChangeProperty(dpy, w, icon, XA_CARDINAL, 32, PropModeReplace, (unsigned char *)data, nlong);
         }
-        if (!icon_announced && (!class_ok || !icon_ok)) {
+        if (icon_log && !icon_announced && (!class_ok || !icon_ok)) {
             fprintf(stderr, "grove: the window is using Grove's icon\n");
             fflush(stderr);
             icon_announced = 1;
@@ -599,7 +600,7 @@ static int write_if_new(const char *path, const void *data, size_t n) {
 
 /* The dock matches StartupWMClass and shows Icon. It does not use the
  * window pixmap for the button. */
-static void publish_launcher(void) {
+int grove_window_icon_file(char *path, size_t cap) {
     const char *xdg = getenv("XDG_DATA_HOME");
     const char *home = getenv("HOME");
     char *root = NULL;
@@ -612,21 +613,27 @@ static void publish_launcher(void) {
     unsigned char *png = NULL;
     size_t png_n = 0;
     int nw;
+    int copied;
+    int ok = 0;
+    if (!path || cap < 2) {
+        return -1;
+    }
+    path[0] = 0;
     if (xdg && xdg[0]) {
         root = xstrdup(xdg);
     } else if (home && home[0]) {
         root = path_join(home, ".local/share");
     }
     if (!root) {
-        return;
+        return -1;
     }
     if (grove_self_path(exe, sizeof exe) != 0) {
         free(root);
-        return;
+        return -1;
     }
     if (strchr(exe, '\n') || strchr(exe, '\r')) {
         free(root);
-        return;
+        return -1;
     }
     icon_dir = path_join(root, "icons");
     app_dir = path_join(root, "applications");
@@ -645,7 +652,7 @@ static void publish_launcher(void) {
                   "Name=Grove\n"
                   "Exec=%s\n"
                   "Icon=%s\n"
-                  "StartupWMClass=Grove-ui\n"
+                  "StartupWMClass=Grove\n"
                   "Terminal=false\n",
                   exe, icon_path);
     if (nw < 0 || (size_t)nw >= sizeof text) {
@@ -653,6 +660,10 @@ static void publish_launcher(void) {
     }
     if (write_if_new(icon_path, png, png_n) < 0) {
         goto done;
+    }
+    copied = snprintf(path, cap, "%s", icon_path);
+    if (copied > 0 && (size_t)copied < cap) {
+        ok = 1;
     }
     write_if_new(desk_path, text, (size_t)nw);
 done:
@@ -662,14 +673,16 @@ done:
     free(app_dir);
     free(icon_dir);
     free(root);
+    return ok ? 0 : -1;
 }
 
 static void *icon_main(void *arg) {
     Display *dpy;
     long data[ICON_LONGS];
     int nlong = 0;
+    char published[PATH_MAX];
     (void)arg;
-    publish_launcher();
+    grove_window_icon_file(published, sizeof published);
     if (x11_bind() != 0) {
         return NULL;
     }
@@ -700,11 +713,12 @@ static void *icon_main(void *arg) {
     return NULL;
 }
 
-void grove_window_icon_start(size_t window) {
+void grove_window_icon_start(size_t window, int log) {
     if (icon_started) {
         return;
     }
     icon_window = window;
+    icon_log = log ? 1 : 0;
     icon_stop = 0;
     icon_announced = 0;
     if (pthread_create(&icon_thread, NULL, icon_main, NULL) == 0) {

@@ -46,12 +46,17 @@ int persona_profile_parse(const char *name, const char *search, size_t search_n,
                           size_t entity_n, const char *summary, size_t summary_n, const char *sparql,
                           size_t sparql_n, PersonaProfile *out, Err *e);
 
-/* Cache under index_dir/personas, named by the folded name, not by the name
- * as a path. Missing is PERSONA_NONE and a zero return. */
+/* The profile and its photograph live in grove.db. The row appears on the
+ * first save. Missing is PERSONA_NONE and a zero return. A file cache named
+ * by the folded name is taken into that table, then removed once the row
+ * reads back. */
 int persona_profile_store(const char *index_dir, const char *name, const PersonaProfile *in, Err *e);
 int persona_profile_load(const char *index_dir, const char *name, PersonaProfile *out, Err *e);
 
-/* Cache, or a public lookup. Does not write the library database. */
+/* Copies every file cache under index_dir into grove.db. A missing cache is fine. */
+void persona_cache_adopt(const char *index_dir);
+
+/* Cache, or a public lookup. A hit reads the index and does not fetch again. */
 int persona_profile(const char *index_dir, const char *name, PersonaProfile *out, Err *e);
 
 #endif

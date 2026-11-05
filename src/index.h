@@ -180,6 +180,52 @@ void index_notes_free(Note *notes, int n);
 int index_note_put(Index *ix, const char *path, uint32_t offset, const char *body, Err *e);
 int index_note_drop(Index *ix, const char *path, uint32_t offset, Err *e);
 
+/* A saved passage: the wording, where it sits in the book, and its tags.
+ * The table appears on the first save, in the same grove.db. List is newest
+ * first. At most EXCERPT_KEEP are kept. Text may be EXCERPT_TEXT_MAX bytes,
+ * which covers 2400 characters. A missing table is an empty list. */
+#define EXCERPT_KEEP 400
+#define EXCERPT_TEXT_MAX 7200
+#define EXCERPT_TAGS_MAX 12
+#define EXCERPT_PAGE_MAX 10000000
+
+typedef struct Excerpt {
+    char *id;
+    char *path;
+    char *title;
+    char *creator;
+    char *heading;
+    int page;
+    char *text;
+    uint32_t byte_at;
+    uint32_t end_byte;
+    char **tags;
+    int ntags;
+    int64_t created;
+} Excerpt;
+
+/* Borrowed strings. tags may be NULL when ntags is 0. created 0 asks for now. */
+typedef struct ExcerptSpec {
+    const char *id;
+    const char *path;
+    const char *title;
+    const char *creator;
+    const char *heading;
+    int page;
+    const char *text;
+    uint32_t byte_at;
+    uint32_t end_byte;
+    const char **tags;
+    int ntags;
+    int64_t created;
+} ExcerptSpec;
+
+int index_excerpts_list(Index *ix, Excerpt **excerpts, int *n, Err *e);
+void index_excerpts_free(Excerpt *excerpts, int n);
+int index_excerpt_put(Index *ix, const ExcerptSpec *spec, Err *e);
+int index_excerpt_tags(Index *ix, const char *id, const char **tags, int ntags, Err *e);
+int index_excerpt_drop(Index *ix, const char *id, Err *e);
+
 /* A watch stores the files that match a query: path, mtime, nsec, and size.
  * The list names files that are new or changed since that snapshot. Watching
  * again replaces it. The tables appear on the first watch. A watch is also a

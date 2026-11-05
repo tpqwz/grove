@@ -1,5 +1,6 @@
 #include "index.h"
 #include "os.h"
+#include "persona.h"
 
 #include "extract.h"
 #include "fts_tok.h"
@@ -3099,6 +3100,7 @@ Index *index_open(const char *dir, int writable, Err *e) {
     }
     char *real = grove_realpath(dir, NULL);
     ix->realdir = real ? real : xstrdup(dir);
+    persona_cache_adopt(ix->dir);
     return ix;
 }
 
@@ -3684,6 +3686,631 @@ int index_note_drop(Index *ix, const char *path, uint32_t offset, Err *e) {
     int rc = note_touch(ix, canon_path, offset, "", 1, e);
     free(canon_path);
     return rc;
+}
+
+#define EXCERPT_ID_MAX 64
+#define EXCERPT_FIELD_MAX 4096
+#define EXCERPT_TAG_MAX 160
+
+static const char EXCERPT_SCHEMA[] =
+    "CREATE TABLE IF NOT EXISTS excerpts("
+    " id TEXT PRIMARY KEY,"
+    " path TEXT NOT NULL,"
+    " title TEXT NOT NULL,"
+    " creator TEXT NOT NULL,"
+    " heading TEXT NOT NULL,"
+    " page INTEGER NOT NULL,"
+    " body TEXT NOT NULL,"
+    " byte INTEGER NOT NULL,"
+    " end_byte INTEGER NOT NULL,"
+    " tags TEXT NOT NULL,"
+    " created INTEGER NOT NULL)";
+
+static void excerpt_abort(sqlite3 *db) {
+    if (!db) {
+        return;
+    }
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_close(db);
+}
+
+static int excerpt_begin(Index *ix, sqlite3 **db, Err *e) {
+    *db = NULL;
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    int rc = sqlite3_open_v2(ix->db_path, db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !*db) {
+        err_set(e, "cannot open %s: %s", ix->db_path, *db ? sqlite3_errmsg(*db) : "sqlite");
+        if (*db) {
+            sqlite3_close(*db);
+            *db = NULL;
+        }
+        return -1;
+    }
+    sqlite3_busy_timeout(*db, 20000);
+    sqlite3_extended_result_codes(*db, 1);
+    if (saved_exec(*db, "BEGIN IMMEDIATE", e) != 0) {
+        sqlite3_close(*db);
+        *db = NULL;
+        return -1;
+    }
+    if (saved_exec(*db, EXCERPT_SCHEMA, e) != 0) {
+        excerpt_abort(*db);
+        *db = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int excerpt_commit(sqlite3 *db, Err *e) {
+    if (saved_exec(db, "COMMIT", e) != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_close(db);
+    return 0;
+}
+
+static char *excerpt_field(const char *s, size_t max, int required, const char *empty_msg, const char *long_msg, Err *e) {
+    if (!s) {
+        s = "";
+    }
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        n--;
+    }
+    if (n == 0) {
+        if (required) {
+            err_set(e, "%s", empty_msg);
+            return NULL;
+        }
+        char *empty = xstrdup("");
+        if (!empty) {
+            err_set(e, "out of memory");
+        }
+        return empty;
+    }
+    if (n > max) {
+        err_set(e, "%s", long_msg);
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\n' || s[i] == '\r' || s[i] == '\t') {
+            err_set(e, "an excerpt is one line");
+            return NULL;
+        }
+    }
+    char *out = xstrndup(s, n);
+    if (!out) {
+        err_set(e, "out of memory");
+    }
+    return out;
+}
+
+static char *excerpt_id(const char *s, Err *e) {
+    char *id = excerpt_field(s, EXCERPT_ID_MAX, 1, "excerpt needs an id", "that id is too long", e);
+    if (!id) {
+        return NULL;
+    }
+    for (const unsigned char *p = (const unsigned char *)id; *p; p++) {
+        int ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_' ||
+                 *p == '-';
+        if (!ok) {
+            free(id);
+            err_set(e, "that id is not valid");
+            return NULL;
+        }
+    }
+    return id;
+}
+
+static void excerpt_fields_free(char *id, char *path, char *title, char *creator, char *heading, char *text, char *tags) {
+    free(id);
+    free(path);
+    free(title);
+    free(creator);
+    free(heading);
+    free(text);
+    free(tags);
+}
+
+static int excerpt_tags_text(const char **tags, int ntags, char **out, Err *e) {
+    *out = NULL;
+    if (ntags < 0 || ntags > EXCERPT_TAGS_MAX) {
+        err_set(e, "that passage has enough tags");
+        return -1;
+    }
+    if (ntags > 0 && !tags) {
+        err_set(e, "empty tag");
+        return -1;
+    }
+    char *canon[EXCERPT_TAGS_MAX];
+    int n = 0;
+    for (int i = 0; i < ntags; i++) {
+        char *one = excerpt_field(tags[i], EXCERPT_TAG_MAX, 1, "empty tag", "that tag is too long", e);
+        if (!one) {
+            for (int j = 0; j < n; j++) {
+                free(canon[j]);
+            }
+            return -1;
+        }
+        for (int j = 0; j < n; j++) {
+            if (ascii_ieq(canon[j], one)) {
+                free(one);
+                for (int k = 0; k < n; k++) {
+                    free(canon[k]);
+                }
+                err_set(e, "already tagged");
+                return -1;
+            }
+        }
+        canon[n++] = one;
+    }
+    size_t bytes = 1;
+    for (int i = 0; i < n; i++) {
+        size_t extra = strlen(canon[i]);
+        if (i > 0 && size_add(extra, 1, &extra) != 0) {
+            for (int j = 0; j < n; j++) {
+                free(canon[j]);
+            }
+            err_set(e, "out of memory");
+            return -1;
+        }
+        if (size_add(bytes, extra, &bytes) != 0) {
+            for (int j = 0; j < n; j++) {
+                free(canon[j]);
+            }
+            err_set(e, "out of memory");
+            return -1;
+        }
+    }
+    char *joined = malloc(bytes);
+    if (!joined) {
+        for (int j = 0; j < n; j++) {
+            free(canon[j]);
+        }
+        err_set(e, "out of memory");
+        return -1;
+    }
+    size_t at = 0;
+    for (int i = 0; i < n; i++) {
+        if (i > 0) {
+            joined[at++] = '\n';
+        }
+        size_t ln = strlen(canon[i]);
+        memcpy(joined + at, canon[i], ln);
+        at += ln;
+        free(canon[i]);
+    }
+    joined[at] = 0;
+    *out = joined;
+    return 0;
+}
+
+static int excerpt_split_tags(const char *s, char ***tags, int *ntags, Err *e) {
+    *tags = NULL;
+    *ntags = 0;
+    if (!s || !*s) {
+        return 0;
+    }
+    int n = 0;
+    const char *p = s;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len == 0 || len > EXCERPT_TAG_MAX || n == EXCERPT_TAGS_MAX) {
+            err_set(e, "excerpt tags are unreadable");
+            return -1;
+        }
+        n++;
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+        if (!*p) {
+            err_set(e, "excerpt tags are unreadable");
+            return -1;
+        }
+    }
+    char **arr = NULL;
+    if (n > EXCERPT_TAGS_MAX || grow_alloc((void **)&arr, (size_t)n, sizeof *arr) != 0) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    memset(arr, 0, (size_t)n * sizeof *arr);
+    p = s;
+    for (int i = 0; i < n; i++) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        arr[i] = xstrndup(p, len);
+        if (!arr[i]) {
+            for (int j = 0; j < i; j++) {
+                free(arr[j]);
+            }
+            free(arr);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    *tags = arr;
+    *ntags = n;
+    return 0;
+}
+
+static void excerpt_clear(Excerpt *ex) {
+    if (!ex) {
+        return;
+    }
+    free(ex->id);
+    free(ex->path);
+    free(ex->title);
+    free(ex->creator);
+    free(ex->heading);
+    free(ex->text);
+    if (ex->tags) {
+        for (int i = 0; i < ex->ntags; i++) {
+            free(ex->tags[i]);
+        }
+        free(ex->tags);
+    }
+    memset(ex, 0, sizeof *ex);
+}
+
+static int excerpt_now(sqlite3 *db, int64_t *now, Err *e) {
+    time_t tick = time(NULL);
+    if (tick < 0) {
+        err_set(e, "could not keep the excerpt");
+        return -1;
+    }
+    int64_t sec = (int64_t)tick;
+    if (sec > INT64_MAX / 1000) {
+        err_set(e, "could not keep the excerpt");
+        return -1;
+    }
+    *now = sec * 1000;
+    sqlite3_stmt *mx = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(created), 0) FROM excerpts", -1, &mx, NULL) != SQLITE_OK) {
+        return saved_fail(db, e);
+    }
+    if (sqlite3_step(mx) == SQLITE_ROW) {
+        int64_t m = sqlite3_column_int64(mx, 0);
+        if (m >= *now) {
+            if (m == INT64_MAX) {
+                sqlite3_finalize(mx);
+                err_set(e, "could not keep the excerpt");
+                return -1;
+            }
+            *now = m + 1;
+        }
+    }
+    sqlite3_finalize(mx);
+    return 0;
+}
+
+static int excerpt_overlaps(uint32_t byte_at, uint32_t end_byte, int64_t other) {
+    int64_t span = (int64_t)end_byte - (int64_t)byte_at;
+    if (span < 8) {
+        span = 8;
+    }
+    int64_t diff = (int64_t)byte_at - other;
+    if (diff < 0) {
+        diff = -diff;
+    }
+    return diff <= span;
+}
+
+int index_excerpts_list(Index *ix, Excerpt **excerpts, int *n, Err *e) {
+    if (excerpts) {
+        *excerpts = NULL;
+    }
+    if (n) {
+        *n = 0;
+    }
+    if (!ix || !excerpts || !n) {
+        err_set(e, "no index");
+        return -1;
+    }
+    sqlite3_stmt *st = NULL;
+    if (prep(ix, &st,
+             "SELECT id, path, title, creator, heading, page, body, byte, end_byte, tags, created"
+             " FROM excerpts ORDER BY created DESC, id",
+             e) != 0) {
+        if (e->msg[0] && strstr(e->msg, "no such table")) {
+            err_clear(e);
+            return 0;
+        }
+        return -1;
+    }
+    Excerpt *rows = NULL;
+    int nr = 0;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *id = (const char *)sqlite3_column_text(st, 0);
+        const char *path = (const char *)sqlite3_column_text(st, 1);
+        const char *title = (const char *)sqlite3_column_text(st, 2);
+        const char *creator = (const char *)sqlite3_column_text(st, 3);
+        const char *heading = (const char *)sqlite3_column_text(st, 4);
+        int64_t page = sqlite3_column_int64(st, 5);
+        const char *text = (const char *)sqlite3_column_text(st, 6);
+        int64_t byte_at = sqlite3_column_int64(st, 7);
+        int64_t end_byte = sqlite3_column_int64(st, 8);
+        const char *tags = (const char *)sqlite3_column_text(st, 9);
+        int64_t created = sqlite3_column_int64(st, 10);
+        int bad = page < 0 || page > EXCERPT_PAGE_MAX || byte_at < 0 || byte_at > UINT32_MAX || end_byte < 0 ||
+                  end_byte > UINT32_MAX;
+        if (bad || nr == INT_MAX || grow_alloc((void **)&rows, (size_t)nr + 1, sizeof *rows) != 0) {
+            sqlite3_finalize(st);
+            index_excerpts_free(rows, nr);
+            err_set(e, bad ? "excerpt place is out of range" : "out of memory");
+            return -1;
+        }
+        memset(&rows[nr], 0, sizeof rows[nr]);
+        rows[nr].id = xstrdup(id ? id : "");
+        rows[nr].path = xstrdup(path ? path : "");
+        rows[nr].title = xstrdup(title ? title : "");
+        rows[nr].creator = xstrdup(creator ? creator : "");
+        rows[nr].heading = xstrdup(heading ? heading : "");
+        rows[nr].text = xstrdup(text ? text : "");
+        if (!rows[nr].id || !rows[nr].path || !rows[nr].title || !rows[nr].creator || !rows[nr].heading ||
+            !rows[nr].text || excerpt_split_tags(tags ? tags : "", &rows[nr].tags, &rows[nr].ntags, e) != 0) {
+            if (!e->msg[0]) {
+                err_set(e, "out of memory");
+            }
+            sqlite3_finalize(st);
+            nr++;
+            index_excerpts_free(rows, nr);
+            return -1;
+        }
+        rows[nr].page = (int)page;
+        rows[nr].byte_at = (uint32_t)byte_at;
+        rows[nr].end_byte = (uint32_t)end_byte;
+        rows[nr].created = created;
+        nr++;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        index_excerpts_free(rows, nr);
+        return db_fail(ix, e, "sqlite");
+    }
+    *excerpts = rows;
+    *n = nr;
+    return 0;
+}
+
+void index_excerpts_free(Excerpt *excerpts, int n) {
+    if (!excerpts) {
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        excerpt_clear(&excerpts[i]);
+    }
+    free(excerpts);
+}
+
+int index_excerpt_put(Index *ix, const ExcerptSpec *spec, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    if (!spec) {
+        err_set(e, "no excerpt");
+        return -1;
+    }
+    if (spec->page < 0 || spec->page > EXCERPT_PAGE_MAX) {
+        err_set(e, "bad page");
+        return -1;
+    }
+    if (spec->created < 0) {
+        err_set(e, "bad time");
+        return -1;
+    }
+    char *id = excerpt_id(spec->id, e);
+    if (!id) {
+        return -1;
+    }
+    char *path = excerpt_field(spec->path, EXCERPT_FIELD_MAX, 1, "excerpt needs a path", "that path is too long", e);
+    char *title = path ? excerpt_field(spec->title, EXCERPT_FIELD_MAX, 0, "", "that title is too long", e) : NULL;
+    char *creator = title ? excerpt_field(spec->creator, EXCERPT_FIELD_MAX, 0, "", "that creator is too long", e) : NULL;
+    char *heading = creator ? excerpt_field(spec->heading, EXCERPT_FIELD_MAX, 0, "", "that heading is too long", e) : NULL;
+    char *text = heading ? excerpt_field(spec->text, EXCERPT_TEXT_MAX, 1, "empty excerpt", "that excerpt is too long", e)
+                         : NULL;
+    char *tags = NULL;
+    if (!path || !title || !creator || !heading || !text || excerpt_tags_text(spec->tags, spec->ntags, &tags, e) != 0) {
+        excerpt_fields_free(id, path, title, creator, heading, text, tags);
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int step = 0;
+    if (excerpt_begin(ix, &db, e) != 0) {
+        excerpt_fields_free(id, path, title, creator, heading, text, tags);
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM excerpts WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+    step = sqlite3_step(st);
+    if (step == SQLITE_ROW) {
+        err_set(e, "Already saved");
+        goto fail;
+    }
+    if (step != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT byte FROM excerpts WHERE path=? AND body=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, text, -1, SQLITE_TRANSIENT);
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        int64_t other = sqlite3_column_int64(st, 0);
+        if (other < 0 || other > UINT32_MAX) {
+            err_set(e, "excerpt place is out of range");
+            goto fail;
+        }
+        if (excerpt_overlaps(spec->byte_at, spec->end_byte, other)) {
+            err_set(e, "Already saved");
+            goto fail;
+        }
+    }
+    if (step != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM excerpts", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    int64_t total = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        total = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (total < 0 || total >= EXCERPT_KEEP) {
+        err_set(e, "The collection is full");
+        goto fail;
+    }
+    int64_t created = spec->created;
+    if (created == 0 && excerpt_now(db, &created, e) != 0) {
+        goto fail;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO excerpts(id, path, title, creator, heading, page, body, byte, end_byte, tags,"
+                           " created) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, title, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 4, creator, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, heading, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 6, spec->page);
+    sqlite3_bind_text(st, 7, text, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 8, (int64_t)spec->byte_at);
+    sqlite3_bind_int64(st, 9, (int64_t)spec->end_byte);
+    sqlite3_bind_text(st, 10, tags, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 11, created);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    excerpt_fields_free(id, path, title, creator, heading, text, tags);
+    return excerpt_commit(db, e);
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    excerpt_abort(db);
+    excerpt_fields_free(id, path, title, creator, heading, text, tags);
+    return -1;
+}
+
+int index_excerpt_tags(Index *ix, const char *id_in, const char **tags_in, int ntags, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *id = excerpt_id(id_in, e);
+    if (!id) {
+        return -1;
+    }
+    char *tags = NULL;
+    if (excerpt_tags_text(tags_in, ntags, &tags, e) != 0) {
+        free(id);
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    if (excerpt_begin(ix, &db, e) != 0) {
+        free(id);
+        free(tags);
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db, "UPDATE excerpts SET tags=? WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, tags, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, id, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_changes(db) == 0) {
+        err_set(e, "no excerpt");
+        goto fail;
+    }
+    free(id);
+    free(tags);
+    return excerpt_commit(db, e);
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    excerpt_abort(db);
+    free(id);
+    free(tags);
+    return -1;
+}
+
+int index_excerpt_drop(Index *ix, const char *id_in, Err *e) {
+    if (!ix) {
+        err_set(e, "no index");
+        return -1;
+    }
+    char *id = excerpt_id(id_in, e);
+    if (!id) {
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    if (excerpt_begin(ix, &db, e) != 0) {
+        free(id);
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM excerpts WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        saved_fail(db, e);
+        goto fail;
+    }
+    sqlite3_finalize(st);
+    free(id);
+    return excerpt_commit(db, e);
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    excerpt_abort(db);
+    free(id);
+    return -1;
 }
 
 static void alert_files_free(AlertFile *files, int n) {

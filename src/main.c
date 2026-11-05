@@ -15,10 +15,11 @@ void grove_usage(FILE *out) {
     fputs(
         "grove " GROVE_VERSION " — local full-text search\n"
         "\n"
-        "usage: grove [--index DIR] [--quiet] [--help] [--version] [COMMAND ...]\n"
+        "usage: grove [--index DIR] [--console] [--quiet] [--help] [--version] [COMMAND ...]\n"
         "\n"
-        "With no command, grove opens the window on this index. That needs a\n"
-        "browser. A command does not open a window.\n"
+        "With no command, grove opens its own window on this index. The log\n"
+        "stays hidden. --console keeps the log beside the window. A command\n"
+        "does not open a window.\n"
         "\n"
         "  index [--force] [--rebind OLD NEW] [PATH...]\n"
         "      Index each PATH. With no PATH, refresh every fully indexed root.\n"
@@ -64,11 +65,13 @@ void grove_usage(FILE *out) {
         "  alerts\n"
         "      List watched queries that have new or changed files.\n"
         "  status\n"
-        "  ui [--port N]\n"
+        "  ui [--port N] [--console]\n"
         "      Open the window in this same program. With no command, grove\n"
         "      does that. A command can run while the window is open. Both\n"
-        "      use the one index. Firefox keeps the profile Grove, in\n"
-        "      ~/.local/share/grove/firefox.\n"
+        "      use the one index. The window is Grove's own, with Grove's\n"
+        "      icon. A browser opens only when that window cannot. Firefox\n"
+        "      then keeps the profile Grove, in ~/.local/share/grove/firefox.\n"
+        "      --console shows the log at the same time as the window.\n"
         "  help\n"
         "\n"
         "The index is grove.db in $GROVE_INDEX, or $XDG_DATA_HOME/grove,\n"
@@ -572,6 +575,9 @@ int grove_is_command(const char *s) {
 /* Words after "ui" that still belong to the window, not to a command. */
 static int window_args(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--console") == 0) {
+            continue;
+        }
         if (strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "--smoke") == 0 || strcmp(argv[i], "--index") == 0) {
             if (i + 1 >= argc) {
                 return 1;
@@ -646,6 +652,9 @@ int grove_cli(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--quiet") == 0) {
             quiet = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--console") == 0) {
             continue;
         }
         if (strcmp(argv[i], "--index") == 0) {

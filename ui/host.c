@@ -22,6 +22,14 @@
 #include <unistd.h>
 
 #if defined(_WIN32)
+#include <windows.h>
+#endif
+#if defined(__APPLE__)
+#include "icon_png.h"
+void grove_macos_icon(const void *bytes, size_t n);
+#endif
+
+#if defined(_WIN32)
 #define RTLD_NOW 0
 #define RTLD_LOCAL 0
 static void *dlopen(const char *path, int flags) {
@@ -46,10 +54,152 @@ extern char **environ;
 #endif
 
 #if !defined(__linux__)
-void grove_window_icon_start(size_t window) {
+int grove_window_icon_file(char *path, size_t cap) {
+    (void)path;
+    (void)cap;
+    return -1;
+}
+void grove_window_icon_start(size_t window, int log) {
     (void)window;
+    (void)log;
 }
 void grove_window_icon_stop(void) {}
+#endif
+
+/* The window's log. A command always prints. --console keeps this log
+ * beside the window. Otherwise a console that belongs only to this
+ * process is hidden, and the status lines stay quiet. */
+static int show_console;
+#if defined(_WIN32)
+static int console_hidden;
+#endif
+
+static void set_console_env(int on) {
+#if defined(_WIN32)
+    SetEnvironmentVariableA("GROVE_CONSOLE", on ? "1" : NULL);
+#else
+    if (on) {
+        setenv("GROVE_CONSOLE", "1", 1);
+    } else {
+        unsetenv("GROVE_CONSOLE");
+    }
+#endif
+}
+
+static void console_show(void) {
+#if defined(_WIN32)
+    HWND hwnd;
+    if (!console_hidden) {
+        return;
+    }
+    hwnd = GetConsoleWindow();
+    if (hwnd) {
+        ShowWindow(hwnd, SW_SHOW);
+    }
+    console_hidden = 0;
+#else
+    return;
+#endif
+}
+
+static void console_hide_private(void) {
+#if defined(_WIN32)
+    HWND hwnd;
+    DWORD ids[2];
+    DWORD n;
+    if (show_console || console_hidden) {
+        return;
+    }
+    if (!isatty(fileno(stdout)) || !isatty(fileno(stderr))) {
+        return;
+    }
+    hwnd = GetConsoleWindow();
+    if (!hwnd) {
+        return;
+    }
+    n = GetConsoleProcessList(ids, 2);
+    if (n != 1) {
+        return;
+    }
+    ShowWindow(hwnd, SW_HIDE);
+    console_hidden = 1;
+#endif
+}
+
+#if defined(_WIN32)
+/* WebUI's own window loads WebView2Loader.dll by name. The bytes are
+ * stored in the program and written where that load can find them. */
+static int prepare_webview_loader(void) {
+    HRSRC res;
+    HGLOBAL mem;
+    const unsigned char *bytes;
+    DWORD n;
+    DWORD tn;
+    DWORD wrote;
+    char temp[MAX_PATH];
+    char dir[MAX_PATH];
+    char file[MAX_PATH];
+    size_t tlen;
+    int nw;
+    HANDLE h;
+    res = FindResourceA(NULL, MAKEINTRESOURCEA(201), RT_RCDATA);
+    if (!res) {
+        return -1;
+    }
+    n = SizeofResource(NULL, res);
+    if (n < 64 || n > 4u * 1024u * 1024u) {
+        return -1;
+    }
+    mem = LoadResource(NULL, res);
+    if (!mem) {
+        return -1;
+    }
+    bytes = (const unsigned char *)LockResource(mem);
+    if (!bytes) {
+        return -1;
+    }
+    tn = GetTempPathA((DWORD)sizeof temp, temp);
+    if (tn == 0 || tn >= sizeof temp) {
+        return -1;
+    }
+    tlen = strlen(temp);
+    if (tlen == 0 || tlen >= sizeof temp) {
+        return -1;
+    }
+    if (temp[tlen - 1] != '\\' && temp[tlen - 1] != '/') {
+        if (tlen + 1 >= sizeof temp) {
+            return -1;
+        }
+        temp[tlen] = '\\';
+        temp[tlen + 1] = 0;
+    }
+    nw = snprintf(dir, sizeof dir, "%sgrove-wv2-%lu", temp, (unsigned long)GetCurrentProcessId());
+    if (nw < 0 || (size_t)nw >= sizeof dir) {
+        return -1;
+    }
+    if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return -1;
+    }
+    nw = snprintf(file, sizeof file, "%s\\WebView2Loader.dll", dir);
+    if (nw < 0 || (size_t)nw >= sizeof file) {
+        return -1;
+    }
+    h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    if (!WriteFile(h, bytes, n, &wrote, NULL) || wrote != n) {
+        CloseHandle(h);
+        return -1;
+    }
+    if (!CloseHandle(h)) {
+        return -1;
+    }
+    if (!SetDllDirectoryA(dir)) {
+        return -1;
+    }
+    return 0;
+}
 #endif
 
 static char *default_index_dir(void) {
@@ -319,22 +469,27 @@ static void *c_watch(void *arg) {
             char out[PATH_MAX];
             int nw = snprintf(out, sizeof out, "%s/live/module-%d.so", ui_dir, ++mod_seq);
             if (nw < 0 || (size_t)nw >= sizeof out) {
+                console_show();
                 fprintf(stderr, "grove: module path is too long\n");
                 fflush(stderr);
                 pthread_mutex_unlock(&swap_mu);
                 continue;
             }
-            fprintf(stderr, "grove: building %s\n", main_c);
-            fflush(stderr);
+            if (show_console) {
+                fprintf(stderr, "grove: building %s\n", main_c);
+                fflush(stderr);
+            }
             if (compile_mod(ui_dir, out, err_path) != 0) {
+                console_show();
                 fprintf(stderr, "grove: build failed, keeping the running program\n");
                 print_file(err_path);
                 fflush(stderr);
                 unlink(out);
             } else if (swap_in(out, 1) != 0) {
+                console_show();
                 fprintf(stderr, "grove: could not load the new program, keeping the previous one\n");
                 fflush(stderr);
-            } else {
+            } else if (show_console) {
                 fprintf(stderr, "grove: updated %s\n", main_c);
                 fflush(stderr);
             }
@@ -355,7 +510,7 @@ static int wants_cli(int argc, char **argv) {
             i++;
             continue;
         }
-        if (strcmp(argv[i], "--quiet") == 0) {
+        if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "--console") == 0) {
             continue;
         }
         if (strcmp(argv[i], "--version") == 0) {
@@ -509,6 +664,10 @@ int grove_open_window(int argc, char **argv) {
             grove_usage(stdout);
             return 0;
         }
+        if (strcmp(argv[i], "--console") == 0) {
+            show_console = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--index") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "grove: --index needs a directory\n");
@@ -630,6 +789,9 @@ int grove_open_window(int argc, char **argv) {
         builtin = 1;
     }
 
+#if defined(_WIN32)
+    prepare_webview_loader();
+#endif
     size_t win = webui_new_window();
     webui_set_size(win, 1040, 840);
     webui_set_center(win);
@@ -672,6 +834,13 @@ int grove_open_window(int argc, char **argv) {
     host_ui.page_root = page_root;
     host_ui.page_name = page_name;
     host_ui.smoke = smoke;
+    {
+        char icon_path[PATH_MAX];
+        if (grove_window_icon_file(icon_path, sizeof icon_path) == 0) {
+            webui_set_icon_file(win, icon_path);
+        }
+    }
+    set_console_env(show_console);
 
     if (builtin) {
         if (grove_ui_attach(&host_ui) != 0) {
@@ -706,11 +875,17 @@ int grove_open_window(int argc, char **argv) {
     int cwatching = 0;
     char *main_c = !builtin && ui_dir && !smoke ? path_join(ui_dir, "main.c") : NULL;
     if (main_c) {
-        fprintf(stderr, "grove: watching %s\n", main_c);
-        fflush(stderr);
+        if (show_console) {
+            fprintf(stderr, "grove: watching %s\n", main_c);
+            fflush(stderr);
+        }
         cwatching = pthread_create(&cthread, NULL, c_watch, main_c) == 0;
     }
-    grove_window_icon_start(win);
+#if defined(__APPLE__)
+    grove_macos_icon(grove_icon_png, grove_icon_png_len);
+#endif
+    console_hide_private();
+    grove_window_icon_start(win, show_console);
 
     webui_wait();
     c_stop = 1;

@@ -2746,13 +2746,19 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_pick", on_pick_guard);
     webui_bind(win, "grove_shelf", on_shelf_guard);
     const char *page = live_name ? live_name : page_html;
-    /* WebUI's own window (WebView2, WebKit, or WKWebView). A browser
-     * is only the fallback, and it is what opens a tab when one is
-     * already running. */
+    /* WebUI's own window (WebView2, WebKit, or WKWebView). On Windows
+     * that is the only window. A browser is what opens a tab. */
+#if defined(_WIN32)
+    if (!webui_show_wv(win, page)) {
+        fprintf(stderr, "grove: could not open the window\n");
+        return 1;
+    }
+#else
     if (!webui_show_wv(win, page) && !webui_show(win, page)) {
         fprintf(stderr, "grove: could not open a window\n");
         return 1;
     }
+#endif
     const char *log = getenv("GROVE_CONSOLE");
     if (log && log[0] == '1' && log[1] == 0) {
         const char *url = webui_get_url(win);

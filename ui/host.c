@@ -712,10 +712,22 @@ int grove_open_window(int argc, char **argv) {
     err_clear(&e);
     char open_err[768];
     open_err[0] = 0;
-    Index *ix = index_open(index_dir, 0, &e);
+    /* The window writes the shelf. A first run creates the index instead of
+     * stopping on "no index". A later read-only open covers a directory the
+     * program cannot write. */
+    Index *ix = index_open(index_dir, 1, &e);
     if (!ix) {
         snprintf(open_err, sizeof open_err, "%s", e.msg[0] ? e.msg : "could not open the index");
-        fprintf(stderr, "grove: %s\n", open_err);
+        err_clear(&e);
+        ix = index_open(index_dir, 0, &e);
+        if (ix) {
+            open_err[0] = 0;
+        } else {
+            fprintf(stderr, "grove: %s\n", open_err[0] ? open_err : (e.msg[0] ? e.msg : "could not open the index"));
+            if (!open_err[0]) {
+                snprintf(open_err, sizeof open_err, "%s", e.msg[0] ? e.msg : "could not open the index");
+            }
+        }
     }
 
     int page_missing = 0;
@@ -795,9 +807,28 @@ int grove_open_window(int argc, char **argv) {
     size_t win = webui_new_window();
     webui_set_size(win, 1040, 840);
     webui_set_center(win);
-    /* Own Firefox profile. The WebUI default name is already taken when another
-     * program is open, and Firefox will not start a second copy of it. */
+    /* WebUI creates this folder itself, and it does not create parents.
+     * On Windows that retry loop is the console spam, and a Unix path
+     * under Wine never appears. The folder is made here first. */
     char *ff_profile = NULL;
+#if defined(_WIN32)
+    char *base = grove_index_dir();
+    if (base) {
+        ff_profile = path_join(base, "webui");
+        free(base);
+    }
+    if (ff_profile) {
+        for (char *p = ff_profile; *p; p++) {
+            if (*p == '/') {
+                *p = '\\';
+            }
+        }
+        if (mkdir_p(ff_profile) != 0) {
+            free(ff_profile);
+            ff_profile = NULL;
+        }
+    }
+#else
     const char *home = getenv("HOME");
     if (!home || !*home) {
         home = getenv("USERPROFILE");
@@ -807,6 +838,7 @@ int grove_open_window(int argc, char **argv) {
         ff_profile = share ? path_join(share, "firefox") : NULL;
         free(share);
     }
+#endif
     if (ff_profile) {
         webui_set_profile(win, "Grove", ff_profile);
         free(ff_profile);

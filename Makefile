@@ -63,16 +63,17 @@ else
 SAN = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 endif
 
-INCLUDES = -Ithird_party/sqlite -Isrc -Iui -Iui/third_party/webui/include
+INCLUDES = -Ithird_party/sqlite -Ithird_party/lzma -Isrc -Iui -Iui/third_party/webui/include
 
 SQLITE_CFLAGS = -std=c11 -O2 -DNDEBUG \
 	-DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS3_PARENTHESIS \
 	-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=1 \
 	-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
 SQLITE_OBJ = third_party/sqlite/sqlite3.o
+LZMA_OBJ = third_party/lzma/LzmaDec.o third_party/lzma/Lzma2Dec.o
 WEBUI_LIB = ui/third_party/webui/dist/libwebui-2-static.a
 
-CORE = src/util.c src/text.c src/expand.c src/zip.c src/pdf.c src/extract.c src/fetch.c src/persona.c src/index.c src/fts_tok.c src/os.c
+CORE = src/util.c src/text.c src/expand.c src/zip.c src/seven.c src/pdf.c src/extract.c src/fetch.c src/persona.c src/index.c src/fts_tok.c src/os.c
 SRCS = $(CORE) src/main.c
 
 .PHONY: all test clean ui libwebui
@@ -92,6 +93,10 @@ ui/page.h: ui/page.html ui/pack.py
 $(SQLITE_OBJ): third_party/sqlite/sqlite3.c
 	$(CC) $(SQLITE_CFLAGS) -c -o $@ third_party/sqlite/sqlite3.c
 
+$(LZMA_OBJ): third_party/lzma/LzmaDec.h third_party/lzma/Lzma2Dec.h third_party/lzma/7zTypes.h third_party/lzma/Precomp.h
+third_party/lzma/%.o: third_party/lzma/%.c
+	$(CC) -std=c11 -O2 -DNDEBUG -D_7ZIP_ST -c -o $@ $<
+
 ui/grove.ico: ui/icon_pack.py
 	python3 ui/icon_pack.py --ico $@
 
@@ -104,17 +109,17 @@ ui/WebView2Loader.dll: ui/fetch_webview2.py
 ui/grove.res.o: ui/grove.rc ui/grove.ico ui/WebView2Loader.dll
 	cd ui && windres -O coff grove.rc grove.res.o
 
-$(GROVE): $(SRCS) ui/host.c ui/main.c $(ICON_SRC) $(MAC_SRC) $(WIN_RES) ui/page.h $(SQLITE_OBJ) $(WEBUI_LIB) ui/window_icon.h ui/mod.h src/cli.h
+$(GROVE): $(SRCS) ui/host.c ui/main.c $(ICON_SRC) $(MAC_SRC) $(WIN_RES) ui/page.h $(SQLITE_OBJ) $(LZMA_OBJ) $(WEBUI_LIB) ui/window_icon.h ui/mod.h src/cli.h
 	$(LINK) $(CFLAGS) -DGROVE_EMBED $(INCLUDES) -x c -o $@ \
-		ui/host.c ui/main.c $(ICON_SRC) $(SRCS) -x none $(MAC_SRC) $(WIN_RES) $(SQLITE_OBJ) \
+		ui/host.c ui/main.c $(ICON_SRC) $(SRCS) -x none $(MAC_SRC) $(WIN_RES) $(SQLITE_OBJ) $(LZMA_OBJ) \
 		$(WEBUI_LINK) $(LIBS) $(WEBUI_EXTRA) $(EXPORT) $(LDFLAGS)
 
 ifeq ($(PLATFORM),macos)
 $(GROVE): ui/icon_png.h
 endif
 
-grove-test: $(CORE) src/test.c $(SQLITE_OBJ)
-	$(CC) $(CFLAGS) $(SAN) $(INCLUDES) -o $@ $(CORE) src/test.c $(SQLITE_OBJ) $(LIBS) $(LDFLAGS)
+grove-test: $(CORE) src/test.c $(SQLITE_OBJ) $(LZMA_OBJ)
+	$(CC) $(CFLAGS) $(SAN) $(INCLUDES) -o $@ $(CORE) src/test.c $(SQLITE_OBJ) $(LZMA_OBJ) $(LIBS) $(LDFLAGS)
 
 ifeq ($(PLATFORM),windows)
 test: $(GROVE)
@@ -126,5 +131,5 @@ test: grove-test $(GROVE)
 endif
 
 clean:
-	rm -f grove grove.exe grove-test src/*.o third_party/sqlite/sqlite3.o \
+	rm -f grove grove.exe grove-test src/*.o third_party/sqlite/sqlite3.o $(LZMA_OBJ) \
 		ui/grove.res.o ui/grove.ico ui/WebView2Loader.dll ui/icon_png.h

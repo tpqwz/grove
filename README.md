@@ -41,7 +41,7 @@ grove --index /media/usb/grove search portable
 
 `grove index` with no path refreshes every root that was indexed as a directory. A single file is stored under its parent and does not cause siblings to be removed. Index the top directory once; a later path uses the longest root that already contains it.
 
-Files and directories whose names start with `.` are skipped, and so are symlinks. Text, Markdown, HTML, and common source extensions are indexed as text. `.docx`, `.odt`, `.xlsx`, `.pptx`, `.doc`, `.xls`, `.ppt`, `.epub`, and digital `.pdf` text are extracted in process. A `.zip`, `.tar`, `.tgz`, or `.tar.gz` is the text of the files inside it, including an archive inside an archive, four levels deep. A `.gz` file is the one file it holds. Other types are skipped. There is no OCR. A file larger than 32MB is skipped. Extracted text is kept up to that same size.
+Files and directories whose names start with `.` are skipped, and so are symlinks. Text, Markdown, HTML, and common source extensions are indexed as text. `.docx`, `.odt`, `.xlsx`, `.pptx`, `.doc`, `.xls`, `.ppt`, `.epub`, and digital `.pdf` text are extracted in process. A `.zip`, `.7z`, `.tar`, `.tgz`, or `.tar.gz` is the text of the files inside it, including an archive inside an archive, four levels deep. A `.gz` file is the one file it holds. Other types are skipped. There is no OCR. A file larger than 32MB is skipped. Extracted text is kept up to that same size.
 
 Size and modification time decide whether a file is read again. `--force` reads it anyway. `grove purge` drops entries whose files are gone. A root that is not present (the drive is unplugged, or the tree was moved) is left alone.
 

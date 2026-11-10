@@ -406,6 +406,43 @@ static void ole_chain(uint32_t *fat, uint32_t start, uint32_t count) {
     }
 }
 
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static unsigned char *unhex(const char *s, size_t *outn) {
+    size_t n = strlen(s);
+    size_t i;
+    unsigned char *p;
+    if (n % 2) {
+        return NULL;
+    }
+    p = malloc(n / 2 ? n / 2 : 1);
+    if (!p) {
+        return NULL;
+    }
+    for (i = 0; i < n; i += 2) {
+        int hi = hex_nibble(s[i]);
+        int lo = hex_nibble(s[i + 1]);
+        if (hi < 0 || lo < 0) {
+            free(p);
+            return NULL;
+        }
+        p[i / 2] = (unsigned char)((hi << 4) | lo);
+    }
+    *outn = n / 2;
+    return p;
+}
+
 static unsigned char *make_ole(const OItem *items, int n, size_t *outn) {
     enum { FREE = 0xFFFFFFFFu, END = 0xFFFFFFFEu, FATSECT = 0xFFFFFFFDu };
     struct {
@@ -1414,6 +1451,69 @@ static int test_corpus(const char *root) {
         free(xlsp);
         free(pptp);
         free(zipdoc);
+    }
+    {
+        const char *pack_hex =
+            "377abcaf271c00041d4b399925000000000000005a000000000000001e97a3b1010020736576656e6e6565646c65206c6976657320696e2074686520617263686976650a000104060001092500070b010001212101000c2100080a01b24e71f500000501190c0000000000000000000000001113006b006500650070002e0074007800740000001900140a0100ac7dfbb56171dd01150601002080b4810000";
+        const char *squash_hex =
+            "377abcaf271c00049a8cbb2627000000000000005a000000000000002495c660e00577001f5d00309b0a67249741cb529dd10540d479b98bf0e3beb686a3a5676f66c449ba92000104060001092700070b010001212101000c857800080a015965fb4900000501190b0000000000000000000000111500740077006f002f0061002e007400780074000000140a01009c52723d6271dd01150601002080b4810000";
+        const char *solid_hex =
+            "377abcaf271c00048381408f9c000000000000002000000000000000c59e9b8ce0058f002f5d00309b0a67249741cb529dd10540d479b98bf0e3beb686a3a5676f66c491d478a44ef43c39647f483f1ee6199aae47e0000000813307ae0fd16ac5a0a090a0775ec540189fe329ec7e156758567689e8cca9b45310970c43f5cec2a8a45770194775fc3ef0af870c4ec6786bf55b15142c7435de4e441bad82e5f07aaeff3d483318cc82dec01a7d4b0326f00d3d9946b192d900000017063701096500070b01000123030101055d001000000c7e0a01568068650000";
+        const char *outer_hex =
+            "377abcaf271c0004a2d636808f000000000000005a00000000000000036fb273e0009e00875d001b9e938af138254485ad023677e76ea55471cd7af97f2c8e99f66daeb7d733e6826243bf1afffb2306637fbf08f106a8b601fc7edbe093ccdd776ee0451b3552094830590d748628bdad80db66e3b1ed9b79c5616fed6a5fefabb44ee7e43f38d3502a12841401aec230604061afe007206e33894e9950dcd47de984f41233a2c5c76c8b8e000000010406000109808f00070b010001212101000c809f00080a01ff847f5900000501190a000000000000000000001111007000610063006b002e0037007a00000019020000140a0100d51dfcb56171dd01150601002080b4810000";
+        size_t pack_n = 0;
+        size_t squash_n = 0;
+        size_t solid_n = 0;
+        size_t outer_n = 0;
+        unsigned char *pack7 = unhex(pack_hex, &pack_n);
+        unsigned char *squash7 = unhex(squash_hex, &squash_n);
+        unsigned char *solid7 = unhex(solid_hex, &solid_n);
+        unsigned char *outer7 = unhex(outer_hex, &outer_n);
+        char *pack_path = path_join(root, "pack.7z");
+        char *squash_path = path_join(root, "squash.7z");
+        char *solid_path = path_join(root, "solid.7z");
+        char *outer_path = path_join(root, "outer.7z");
+        CHECK(pack7 && squash7 && solid7 && outer7 && pack_path && squash_path && solid_path && outer_path);
+        CHECK(pack7 && write_file(pack_path, pack7, pack_n) == 0);
+        CHECK(squash7 && write_file(squash_path, squash7, squash_n) == 0);
+        CHECK(solid7 && write_file(solid_path, solid7, solid_n) == 0);
+        CHECK(outer7 && write_file(outer_path, outer7, outer_n) == 0);
+        err_clear(&e);
+        xs = extract_path(pack_path, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "7z extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "sevenneedle") && strstr(ex.text, "keep.txt"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(squash_path, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "7z lzma2 extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "needle-a") && strstr(ex.text, "two/a.txt"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(solid_path, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "7z solid extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "needle-a") && strstr(ex.text, "needle-b"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(outer_path, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "7z nested extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "sevenneedle") && strstr(ex.text, "pack.7z"));
+        extract_free(&ex);
+        free(pack7);
+        free(squash7);
+        free(solid7);
+        free(outer7);
+        free(pack_path);
+        free(squash_path);
+        free(solid_path);
+        free(outer_path);
     }
 
     err_clear(&e);

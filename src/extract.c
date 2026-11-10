@@ -1,6 +1,7 @@
 #include "extract.h"
 
 #include "pdf.h"
+#include "seven.h"
 #include "text.h"
 #include "zip.h"
 
@@ -2482,12 +2483,22 @@ static ExStatus extract_office(const char *ext, const unsigned char *bytes, size
 
 static ExStatus piece_from_zip(Zip *z, const char *ext, Extract *ex, Err *e);
 
+static int seven_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
+
 static int piece_from_bytes(const char *ext, const unsigned char *data, size_t len, char **text, Err *e) {
     Extract ex;
     ExStatus st = EX_SKIP;
     *text = NULL;
     memset(&ex, 0, sizeof ex);
-    if (ext_is(ext, "doc") || ext_is(ext, "xls") || ext_is(ext, "ppt")) {
+    if (ext_is(ext, "7z")) {
+        Buf seven_text;
+        buf_init(&seven_text);
+        if (seven_into(data, len, &seven_text, 0, e) != 0) {
+            buf_free(&seven_text);
+            return -1;
+        }
+        st = finish(&seven_text, NULL, "7z had no text", &ex, NULL, 0);
+    } else if (ext_is(ext, "doc") || ext_is(ext, "xls") || ext_is(ext, "ppt")) {
         st = extract_office(ext, data, len, &ex, e);
     } else if (ext_is(ext, "docx") || ext_is(ext, "odt") || ext_is(ext, "epub") || ext_is(ext, "xlsx") ||
                ext_is(ext, "pptx")) {
@@ -2701,6 +2712,7 @@ static int gunzip_all(const unsigned char *src, size_t n, unsigned char **out, s
 
 static int absorb_member(Buf *text, const char *name, const unsigned char *data, size_t len, int depth, Err *e);
 static int archive_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
+static int seven_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
 static int tar_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
 
 static int tar_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e) {
@@ -2844,6 +2856,17 @@ static int absorb_member(Buf *text, const char *name, const unsigned char *data,
         buf_free(&inner);
         return rc;
     }
+    if (ends_ieq(name, ".7z")) {
+        Buf inner;
+        buf_init(&inner);
+        if (seven_into(data, len, &inner, depth + 1, e) != 0) {
+            buf_free(&inner);
+            return -1;
+        }
+        rc = append_named(text, name, inner.data);
+        buf_free(&inner);
+        return rc;
+    }
     if (piece_from_bytes(ext, data, len, &body, e) != 0) {
         return -1;
     }
@@ -2868,6 +2891,26 @@ static int archive_into(const unsigned char *bytes, size_t n, Buf *text, int dep
         }
     }
     zip_free(&z);
+    return rc;
+}
+
+static int seven_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e) {
+    Seven s;
+    int rc = 0;
+    size_t i;
+    if (depth >= ZIP_NEST) {
+        return 0;
+    }
+    if (seven_read(bytes, n, &s, e) != 0) {
+        return -1;
+    }
+    for (i = 0; i < s.n; i++) {
+        if (absorb_member(text, s.files[i].name, s.files[i].data, s.files[i].len, depth, e) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    seven_free(&s);
     return rc;
 }
 
@@ -2958,11 +3001,12 @@ ExStatus extract_path(const char *path, Extract *out, Err *e) {
     int zippy = ext_is(ext, "docx") || ext_is(ext, "odt") || ext_is(ext, "epub") || ext_is(ext, "xlsx") ||
                 ext_is(ext, "pptx") || ext_is(ext, "zip");
     int packed = is_tar_name(path) || ends_ieq(path, ".gz");
+    int sevenz = ends_ieq(path, ".7z");
     int office = ext_is(ext, "doc") || ext_is(ext, "xls") || ext_is(ext, "ppt");
     int pdf = ext_is(ext, "pdf");
     int md = ext_is(ext, "md") || ext_is(ext, "markdown");
     int adoc = ext_is(ext, "adoc") || ext_is(ext, "asciidoc");
-    if (!text && !zippy && !packed && !pdf && !office) {
+    if (!text && !zippy && !packed && !pdf && !office && !sevenz) {
         out->detail = xstrdup("unsupported type");
         return EX_SKIP;
     }
@@ -3035,6 +3079,15 @@ ExStatus extract_path(const char *path, Extract *out, Err *e) {
             return EX_ERR;
         }
         rc = finish(&packed_text, NULL, "archive had no text", out, NULL, 0);
+    } else if (sevenz) {
+        Buf seven_text;
+        buf_init(&seven_text);
+        if (seven_into(bytes, n, &seven_text, 0, e) != 0) {
+            buf_free(&seven_text);
+            free(bytes);
+            return EX_ERR;
+        }
+        rc = finish(&seven_text, NULL, "7z had no text", out, NULL, 0);
     } else if (office) {
         rc = extract_office(ext, bytes, n, out, e);
     } else if (zippy) {

@@ -265,6 +265,288 @@ static unsigned char *make_zip(const ZItem *items, int n, size_t *outn) {
     return p;
 }
 
+typedef struct TItem {
+    const char *name;
+    const char *long_name;
+    const void *data;
+    size_t len;
+} TItem;
+
+static void tar_put_octal(unsigned char *dst, int digits, unsigned long v) {
+    for (int i = digits; i-- > 0;) {
+        dst[i] = (unsigned char)('0' + (v & 7ul));
+        v >>= 3;
+    }
+}
+
+static unsigned tar_sum(const unsigned char *h) {
+    unsigned sum = 0;
+    for (int i = 0; i < 512; i++) {
+        sum += (i >= 148 && i < 156) ? (unsigned)' ' : h[i];
+    }
+    return sum;
+}
+
+static int tar_header(unsigned char *h, const char *name, size_t len, char type) {
+    size_t nn = strlen(name);
+    if (nn > 100) {
+        return -1;
+    }
+    memset(h, 0, 512);
+    memcpy(h, name, nn);
+    tar_put_octal(h + 100, 7, 0644ul);
+    tar_put_octal(h + 124, 11, (unsigned long)len);
+    memset(h + 148, ' ', 8);
+    h[156] = (unsigned char)type;
+    memcpy(h + 257, "ustar", 5);
+    memcpy(h + 263, "00", 2);
+    tar_put_octal(h + 148, 6, tar_sum(h));
+    h[154] = 0;
+    h[155] = ' ';
+    return 0;
+}
+
+static int tar_pad(Buf *b, size_t len) {
+    size_t pad = (512 - (len % 512)) % 512;
+    unsigned char z[512];
+    if (pad == 0) {
+        return 0;
+    }
+    memset(z, 0, pad);
+    return buf_append(b, z, pad);
+}
+
+static unsigned char *make_tar(const TItem *items, int n, size_t *outn) {
+    Buf b;
+    buf_init(&b);
+    for (int i = 0; i < n; i++) {
+        unsigned char h[512];
+        if (items[i].long_name && items[i].long_name[0]) {
+            size_t ln = strlen(items[i].long_name);
+            if (tar_header(h, "././@LongLink", ln, 'L') != 0 || buf_append(&b, h, 512) != 0 ||
+                buf_append(&b, items[i].long_name, ln) != 0 || tar_pad(&b, ln) != 0) {
+                buf_free(&b);
+                return NULL;
+            }
+        }
+        if (!items[i].name || tar_header(h, items[i].name, items[i].len, '0') != 0 || buf_append(&b, h, 512) != 0 ||
+            (items[i].len && buf_append(&b, items[i].data, items[i].len) != 0) || tar_pad(&b, items[i].len) != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+    }
+    {
+        unsigned char z[1024];
+        memset(z, 0, sizeof z);
+        if (buf_append(&b, z, sizeof z) != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+    }
+    *outn = b.len;
+    return (unsigned char *)b.data;
+}
+
+static int gzip_wrap(const void *in, size_t n, unsigned char **out, size_t *outn) {
+    uLong bound = compressBound((uLong)n);
+    size_t cap = (size_t)bound + 64;
+    unsigned char *buf = malloc(cap ? cap : 1);
+    z_stream zs;
+    int z;
+    if (!buf) {
+        return -1;
+    }
+    memset(&zs, 0, sizeof zs);
+    if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + 15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        free(buf);
+        return -1;
+    }
+    zs.next_in = (Bytef *)in;
+    zs.avail_in = (uInt)n;
+    zs.next_out = buf;
+    zs.avail_out = (uInt)cap;
+    z = deflate(&zs, Z_FINISH);
+    *outn = (size_t)zs.total_out;
+    deflateEnd(&zs);
+    if (z != Z_STREAM_END) {
+        free(buf);
+        return -1;
+    }
+    *out = buf;
+    return 0;
+}
+
+typedef struct OItem {
+    const char *name;
+    const void *data;
+    size_t len;
+} OItem;
+
+static void ole_dent(unsigned char *ent, const char *name, int type, uint32_t start, uint32_t size) {
+    size_t n = strlen(name);
+    size_t i;
+    memset(ent, 0, 128);
+    for (i = 0; i < n && i < 31; i++) {
+        ent[i * 2] = (unsigned char)name[i];
+    }
+    wr_u16(ent + 0x40, (uint16_t)((n + 1) * 2));
+    ent[0x42] = (unsigned char)type;
+    ent[0x43] = 1;
+    wr_u32(ent + 0x44, 0xFFFFFFFFu);
+    wr_u32(ent + 0x48, 0xFFFFFFFFu);
+    wr_u32(ent + 0x4C, 0xFFFFFFFFu);
+    wr_u32(ent + 0x74, start);
+    wr_u32(ent + 0x78, size);
+}
+
+static void ole_chain(uint32_t *fat, uint32_t start, uint32_t count) {
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        fat[start + i] = (i + 1 < count) ? start + i + 1 : 0xFFFFFFFEu;
+    }
+}
+
+static unsigned char *make_ole(const OItem *items, int n, size_t *outn) {
+    enum { FREE = 0xFFFFFFFFu, END = 0xFFFFFFFEu, FATSECT = 0xFFFFFFFDu };
+    struct {
+        int mini;
+        uint32_t start;
+        uint32_t sectors;
+    } lay[4];
+    uint32_t mini_secs = 0;
+    uint32_t reg_secs = 0;
+    uint32_t mini_bytes;
+    uint32_t ms_sectors;
+    uint32_t mf_sectors;
+    uint32_t dir_sectors;
+    uint32_t total;
+    uint32_t cursor;
+    uint32_t fat_at;
+    uint32_t dir_at;
+    uint32_t mf_at;
+    uint32_t ms_at;
+    uint32_t fat[128];
+    unsigned char *file;
+    unsigned char *dir;
+    unsigned char *mini_buf = NULL;
+    int i;
+    if (n < 1 || n > 3) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (items[i].len > 0x00FFFFFFu) {
+            return NULL;
+        }
+        if (items[i].len < 4096) {
+            lay[i].mini = 1;
+            lay[i].sectors = items[i].len ? (uint32_t)((items[i].len + 63) / 64) : 0;
+            lay[i].start = mini_secs;
+            mini_secs += lay[i].sectors;
+        } else {
+            lay[i].mini = 0;
+            lay[i].sectors = (uint32_t)((items[i].len + 511) / 512);
+            reg_secs += lay[i].sectors;
+        }
+    }
+    mini_bytes = mini_secs * 64;
+    ms_sectors = mini_bytes ? (mini_bytes + 511) / 512 : 0;
+    mf_sectors = mini_secs ? (mini_secs * 4 + 511) / 512 : 0;
+    dir_sectors = (uint32_t)(((1 + n) * 128 + 511) / 512);
+    total = 1 + dir_sectors + mf_sectors + ms_sectors + reg_secs;
+    if (total > 128 || mf_sectors > 1) {
+        return NULL;
+    }
+    cursor = 0;
+    fat_at = cursor++;
+    dir_at = cursor;
+    cursor += dir_sectors;
+    mf_at = mf_sectors ? cursor : END;
+    cursor += mf_sectors;
+    ms_at = ms_sectors ? cursor : END;
+    cursor += ms_sectors;
+    for (i = 0; i < n; i++) {
+        if (!lay[i].mini) {
+            lay[i].start = cursor;
+            cursor += lay[i].sectors;
+        }
+    }
+    file = calloc(1, (size_t)(total + 1) * 512);
+    dir = calloc(1, (size_t)dir_sectors * 512);
+    if (mini_bytes) {
+        mini_buf = calloc(1, mini_bytes);
+    }
+    if (!file || !dir || (mini_bytes && !mini_buf)) {
+        free(file);
+        free(dir);
+        free(mini_buf);
+        return NULL;
+    }
+    memcpy(file, "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1", 8);
+    wr_u16(file + 0x18, 0x003E);
+    wr_u16(file + 0x1A, 3);
+    wr_u16(file + 0x1C, 0xFFFE);
+    wr_u16(file + 0x1E, 9);
+    wr_u16(file + 0x20, 6);
+    wr_u32(file + 0x2C, 1);
+    wr_u32(file + 0x30, dir_at);
+    wr_u32(file + 0x38, 4096);
+    wr_u32(file + 0x3C, mf_at);
+    wr_u32(file + 0x40, mf_sectors);
+    wr_u32(file + 0x44, END);
+    wr_u32(file + 0x4C, fat_at);
+    for (i = 1; i < 109; i++) {
+        wr_u32(file + 0x4C + (size_t)i * 4, FREE);
+    }
+    ole_dent(dir, "Root Entry", 5, ms_sectors ? ms_at : END, mini_bytes);
+    for (i = 0; i < n; i++) {
+        ole_dent(dir + (size_t)(i + 1) * 128, items[i].name, 2, lay[i].start, (uint32_t)items[i].len);
+        if (lay[i].mini && items[i].len) {
+            memcpy(mini_buf + (size_t)lay[i].start * 64, items[i].data, items[i].len);
+        } else if (!lay[i].mini && items[i].len) {
+            memcpy(file + ((size_t)lay[i].start + 1) * 512, items[i].data, items[i].len);
+        }
+    }
+    memcpy(file + ((size_t)dir_at + 1) * 512, dir, (size_t)dir_sectors * 512);
+    if (mini_buf) {
+        memcpy(file + ((size_t)ms_at + 1) * 512, mini_buf, mini_bytes);
+    }
+    for (i = 0; i < 128; i++) {
+        fat[i] = FREE;
+    }
+    fat[fat_at] = FATSECT;
+    ole_chain(fat, dir_at, dir_sectors);
+    if (mf_sectors) {
+        ole_chain(fat, mf_at, mf_sectors);
+        for (i = 0; i < 128; i++) {
+            wr_u32(file + ((size_t)mf_at + 1) * 512 + (size_t)i * 4, FREE);
+        }
+        for (i = 0; i < n; i++) {
+            if (lay[i].mini && lay[i].sectors) {
+                uint32_t s;
+                for (s = 0; s < lay[i].sectors; s++) {
+                    uint32_t next = (s + 1 < lay[i].sectors) ? lay[i].start + s + 1 : END;
+                    wr_u32(file + ((size_t)mf_at + 1) * 512 + (size_t)(lay[i].start + s) * 4, next);
+                }
+            }
+        }
+    }
+    if (ms_sectors) {
+        ole_chain(fat, ms_at, ms_sectors);
+    }
+    for (i = 0; i < n; i++) {
+        if (!lay[i].mini && lay[i].sectors) {
+            ole_chain(fat, lay[i].start, lay[i].sectors);
+        }
+    }
+    for (i = 0; i < 128; i++) {
+        wr_u32(file + ((size_t)fat_at + 1) * 512 + (size_t)i * 4, fat[i]);
+    }
+    free(dir);
+    free(mini_buf);
+    *outn = (size_t)(total + 1) * 512;
+    return file;
+}
+
 static void test_zip(void) {
     const char *stored = "stored-bytes";
     const char *deflated = "deflate-bytes";
@@ -807,6 +1089,332 @@ static int test_corpus(const char *root) {
     xs = extract_path(html, &ex, &e);
     CHECK(xs == EX_OK && ex.text && strstr(ex.text, "citrus") && !strstr(ex.text, "secretnoise"));
     extract_free(&ex);
+    {
+        const char *note = "zipneedle lives in the archive\n";
+        ZItem member;
+        ZItem nest;
+        unsigned char *inner = NULL;
+        unsigned char *outer = NULL;
+        size_t in = 0;
+        size_t on = 0;
+        char *pack = path_join(root, "pack.zip");
+        char *nested = path_join(root, "nested.zip");
+        char *sheet = path_join(root, "grid.xlsx");
+        char *deck = path_join(root, "deck.pptx");
+        const char *shared = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+                             "<si><t>sheetneedle</t></si></sst>";
+        const char *slide = "<p:sld><a:t>slideneedle</a:t></p:sld>";
+        ZItem cells;
+        ZItem slides;
+        member.name = "notes/keep.txt";
+        member.data = note;
+        member.len = strlen(note);
+        member.method = 0;
+        inner = make_zip(&member, 1, &in);
+        nest.name = "inner.zip";
+        nest.data = inner;
+        nest.len = in;
+        nest.method = 0;
+        outer = inner ? make_zip(&nest, 1, &on) : NULL;
+        CHECK(pack && nested && inner && outer);
+        CHECK(write_file(pack, inner, in) == 0);
+        CHECK(write_file(nested, outer, on) == 0);
+        err_clear(&e);
+        xs = extract_path(pack, &ex, &e);
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "zipneedle") && strstr(ex.text, "notes/keep.txt"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(nested, &ex, &e);
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "zipneedle"));
+        extract_free(&ex);
+        cells.name = "xl/sharedStrings.xml";
+        cells.data = shared;
+        cells.len = strlen(shared);
+        cells.method = 0;
+        slides.name = "ppt/slides/slide1.xml";
+        slides.data = slide;
+        slides.len = strlen(slide);
+        slides.method = 0;
+        free(inner);
+        inner = make_zip(&cells, 1, &in);
+        free(outer);
+        outer = make_zip(&slides, 1, &on);
+        CHECK(sheet && deck && inner && outer);
+        CHECK(write_file(sheet, inner, in) == 0);
+        CHECK(write_file(deck, outer, on) == 0);
+        err_clear(&e);
+        xs = extract_path(sheet, &ex, &e);
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "sheetneedle"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(deck, &ex, &e);
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "slideneedle"));
+        extract_free(&ex);
+        {
+            const char *tbody = "tarneedle lives in the archive\n";
+            const char *gbody = "gzneedle\n";
+            const char *nbody = "nestneedle\n";
+            const char *lbody = "longneedle\n";
+            const char *hbody = "hiddentar\n";
+            TItem deep;
+            TItem items[5];
+            unsigned char *tiny = NULL;
+            unsigned char *tar = NULL;
+            unsigned char *gz = NULL;
+            size_t tiny_n = 0;
+            size_t tar_n = 0;
+            size_t gz_n = 0;
+            char *ball = path_join(root, "pack.tar");
+            char *ballz = path_join(root, "pack.tar.gz");
+            char *tgzp = path_join(root, "pack.tgz");
+            char *lone = path_join(root, "note.txt.gz");
+            deep.name = "deep/keep.txt";
+            deep.long_name = NULL;
+            deep.data = nbody;
+            deep.len = strlen(nbody);
+            tiny = make_tar(&deep, 1, &tiny_n);
+            CHECK(gzip_wrap(gbody, strlen(gbody), &gz, &gz_n) == 0);
+            items[0].name = "notes/keep.txt";
+            items[0].long_name = NULL;
+            items[0].data = tbody;
+            items[0].len = strlen(tbody);
+            items[1].name = ".secret.txt";
+            items[1].long_name = NULL;
+            items[1].data = hbody;
+            items[1].len = strlen(hbody);
+            items[2].name = "short.txt";
+            items[2].long_name = "notes/long-keep.txt";
+            items[2].data = lbody;
+            items[2].len = strlen(lbody);
+            items[3].name = "notes/note.txt.gz";
+            items[3].long_name = NULL;
+            items[3].data = gz;
+            items[3].len = gz_n;
+            items[4].name = "inner.tar";
+            items[4].long_name = NULL;
+            items[4].data = tiny;
+            items[4].len = tiny_n;
+            tar = (tiny && gz) ? make_tar(items, 5, &tar_n) : NULL;
+            CHECK(ball && ballz && tgzp && lone && tar && gz);
+            CHECK(tar && write_file(ball, tar, tar_n) == 0);
+            free(gz);
+            gz = NULL;
+            CHECK(tar && gzip_wrap(tar, tar_n, &gz, &gz_n) == 0);
+            CHECK(gz && write_file(ballz, gz, gz_n) == 0);
+            CHECK(gz && write_file(tgzp, gz, gz_n) == 0);
+            err_clear(&e);
+            xs = extract_path(ball, &ex, &e);
+            if (xs != EX_OK) {
+                fprintf(stderr, "tar extract: %s\n", e.msg);
+            }
+            CHECK(xs == EX_OK && ex.text && strstr(ex.text, "tarneedle") && strstr(ex.text, "notes/keep.txt"));
+            CHECK(ex.text && strstr(ex.text, "longneedle") && strstr(ex.text, "notes/long-keep.txt"));
+            CHECK(ex.text && !strstr(ex.text, "short.txt") && !strstr(ex.text, "hiddentar"));
+            CHECK(ex.text && strstr(ex.text, "gzneedle") && strstr(ex.text, "notes/note.txt") &&
+                  !strstr(ex.text, "notes/note.txt.gz"));
+            CHECK(ex.text && strstr(ex.text, "nestneedle") && strstr(ex.text, "inner.tar") &&
+                  strstr(ex.text, "deep/keep.txt"));
+            extract_free(&ex);
+            err_clear(&e);
+            xs = extract_path(ballz, &ex, &e);
+            if (xs != EX_OK) {
+                fprintf(stderr, "tar.gz extract: %s\n", e.msg);
+            }
+            CHECK(xs == EX_OK && ex.text && strstr(ex.text, "tarneedle") && strstr(ex.text, "nestneedle"));
+            extract_free(&ex);
+            err_clear(&e);
+            xs = extract_path(tgzp, &ex, &e);
+            if (xs != EX_OK) {
+                fprintf(stderr, "tgz extract: %s\n", e.msg);
+            }
+            CHECK(xs == EX_OK && ex.text && strstr(ex.text, "tarneedle"));
+            extract_free(&ex);
+            free(gz);
+            gz = NULL;
+            CHECK(gzip_wrap(gbody, strlen(gbody), &gz, &gz_n) == 0);
+            CHECK(lone && gz && write_file(lone, gz, gz_n) == 0);
+            err_clear(&e);
+            xs = extract_path(lone, &ex, &e);
+            if (xs != EX_OK) {
+                fprintf(stderr, "gz extract: %s\n", e.msg);
+            }
+            CHECK(xs == EX_OK && ex.text && strncmp(ex.text, "note.txt\n", 9) == 0 && strstr(ex.text, "gzneedle"));
+            extract_free(&ex);
+            free(tiny);
+            free(tar);
+            free(gz);
+            free(ball);
+            free(ballz);
+            free(tgzp);
+            free(lone);
+        }
+        free(inner);
+        free(outer);
+        free(pack);
+        free(nested);
+        free(sheet);
+        free(deck);
+    }
+    {
+        unsigned char word[0x510];
+        unsigned char table[64];
+        unsigned char xbook[4096];
+        unsigned char slide[128];
+        const char *uword = "docneedle";
+        const char *aword = "ansineedle";
+        const char *xword = "xlsneedle";
+        const char *pword = "pptneedle";
+        const char *bword = "byteslide";
+        OItem doc_items[2];
+        OItem xitem;
+        OItem pitem;
+        unsigned char *docb = NULL;
+        unsigned char *xlsb = NULL;
+        unsigned char *pptb = NULL;
+        unsigned char *zb = NULL;
+        size_t docn = 0;
+        size_t xln = 0;
+        size_t pn = 0;
+        size_t zipn = 0;
+        size_t i;
+        char *docp = path_join(root, "old.doc");
+        char *xlsp = path_join(root, "grid.xls");
+        char *pptp = path_join(root, "deck.ppt");
+        char *zipdoc = path_join(root, "old-doc.zip");
+        uint32_t cps[3];
+        size_t clx_at = 3;
+        ZItem zitem;
+        memset(word, 0, sizeof word);
+        memset(table, 0, sizeof table);
+        memset(xbook, 0, sizeof xbook);
+        memset(slide, 0, sizeof slide);
+        wr_u16(word + 0x00, 0xA5EC);
+        wr_u16(word + 0x02, 0x00C1);
+        wr_u16(word + 0x0A, 0x0204);
+        wr_u16(word + 0x0C, 0x00BF);
+        wr_u16(word + 0x20, 14);
+        wr_u16(word + 0x3E, 22);
+        wr_u16(word + 0x98, 34);
+        for (i = 0; uword[i]; i++) {
+            word[0x400 + i * 2] = (unsigned char)uword[i];
+        }
+        word[0x400 + i * 2] = 0x0D;
+        memcpy(word + 0x500, aword, strlen(aword));
+        word[0x500 + strlen(aword)] = 0x93;
+        word[0x500 + strlen(aword) + 1] = 0x0D;
+        cps[0] = 0;
+        cps[1] = (uint32_t)(strlen(uword) + 1);
+        cps[2] = cps[1] + (uint32_t)(strlen(aword) + 2);
+        table[0] = 0x01;
+        table[3] = 0x02;
+        wr_u32(table + 4, 28);
+        for (i = 0; i < 3; i++) {
+            wr_u32(table + clx_at + 1 + 4 + i * 4, cps[i]);
+        }
+        wr_u32(table + clx_at + 1 + 4 + 12 + 2, 0x400);
+        wr_u32(table + clx_at + 1 + 4 + 12 + 8 + 2, (0x500u * 2u) | 0x40000000u);
+        wr_u32(word + 0x1A2, 0);
+        wr_u32(word + 0x1A6, (uint32_t)(clx_at + 1 + 4 + 28));
+        doc_items[0].name = "WordDocument";
+        doc_items[0].data = word;
+        doc_items[0].len = sizeof word;
+        doc_items[1].name = "1Table";
+        doc_items[1].data = table;
+        doc_items[1].len = clx_at + 1 + 4 + 28;
+        docb = make_ole(doc_items, 2, &docn);
+        wr_u16(xbook, 0x00FC);
+        wr_u16(xbook + 2, 29);
+        wr_u32(xbook + 4, 1);
+        wr_u32(xbook + 8, 1);
+        wr_u16(xbook + 12, (uint16_t)strlen(xword));
+        xbook[14] = 1;
+        for (i = 0; xword[i]; i++) {
+            xbook[15 + i * 2] = (unsigned char)xword[i];
+        }
+        wr_u16(xbook + 33, 0x0203);
+        wr_u16(xbook + 35, 14);
+        {
+            double forty_two = 42.0;
+            uint64_t bits;
+            memcpy(&bits, &forty_two, sizeof bits);
+            wr_u64(xbook + 37 + 6, bits);
+        }
+        wr_u16(xbook + 51, 0x027E);
+        wr_u16(xbook + 53, 10);
+        wr_u32(xbook + 61, 30);
+        wr_u16(xbook + 65, 0x000A);
+        xitem.name = "Workbook";
+        xitem.data = xbook;
+        xitem.len = sizeof xbook;
+        xlsb = make_ole(&xitem, 1, &xln);
+        wr_u16(slide, 0x000F);
+        wr_u16(slide + 2, 0x03E8);
+        wr_u32(slide + 4, 8 + (uint32_t)strlen(pword) * 2 + 8 + (uint32_t)strlen(bword));
+        wr_u16(slide + 8, 0);
+        wr_u16(slide + 10, 0x0FA0);
+        wr_u32(slide + 12, (uint32_t)strlen(pword) * 2);
+        for (i = 0; pword[i]; i++) {
+            slide[16 + i * 2] = (unsigned char)pword[i];
+        }
+        {
+            size_t at = 16 + strlen(pword) * 2;
+            wr_u16(slide + at, 0);
+            wr_u16(slide + at + 2, 0x0FA8);
+            wr_u32(slide + at + 4, (uint32_t)strlen(bword));
+            memcpy(slide + at + 8, bword, strlen(bword));
+        }
+        pitem.name = "PowerPoint Document";
+        pitem.data = slide;
+        pitem.len = 8 + rd_u32(slide + 4);
+        pptb = make_ole(&pitem, 1, &pn);
+        CHECK(docp && xlsp && pptp && zipdoc && docb && xlsb && pptb);
+        CHECK(docb && write_file(docp, docb, docn) == 0);
+        CHECK(xlsb && write_file(xlsp, xlsb, xln) == 0);
+        CHECK(pptb && write_file(pptp, pptb, pn) == 0);
+        zitem.name = "notes/old.doc";
+        zitem.data = docb;
+        zitem.len = docn;
+        zitem.method = 0;
+        zb = docb ? make_zip(&zitem, 1, &zipn) : NULL;
+        CHECK(zb && write_file(zipdoc, zb, zipn) == 0);
+        err_clear(&e);
+        xs = extract_path(docp, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "doc extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "docneedle") && strstr(ex.text, "ansineedle") &&
+              strstr(ex.text, "\xe2\x80\x9c"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(xlsp, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "xls extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "xlsneedle") && strstr(ex.text, "42") && strstr(ex.text, "\n7"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(pptp, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "ppt extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "pptneedle") && strstr(ex.text, "byteslide"));
+        extract_free(&ex);
+        err_clear(&e);
+        xs = extract_path(zipdoc, &ex, &e);
+        if (xs != EX_OK) {
+            fprintf(stderr, "doc zip extract: %s\n", e.msg);
+        }
+        CHECK(xs == EX_OK && ex.text && strstr(ex.text, "docneedle") && strstr(ex.text, "notes/old.doc"));
+        extract_free(&ex);
+        free(docb);
+        free(xlsb);
+        free(pptb);
+        free(zb);
+        free(docp);
+        free(xlsp);
+        free(pptp);
+        free(zipdoc);
+    }
 
     err_clear(&e);
     ix = index_open(idx, 1, &e);

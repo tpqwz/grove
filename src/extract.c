@@ -5,6 +5,9 @@
 #include "zip.h"
 
 #include <ctype.h>
+#include <zlib.h>
+/* linux/limits.h, pulled in by zlib, defines MAX_INPUT as 255. */
+#undef MAX_INPUT
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1371,6 +1374,1567 @@ static ExStatus extract_plain(const unsigned char *bytes, size_t n, int heads, E
     return rc;
 }
 
+static int member_hidden(const char *name) {
+    const char *p = name;
+    while (p && *p) {
+        if (*p == '.') {
+            return 1;
+        }
+        const char *slash = strchr(p, '/');
+        if (!slash) {
+            break;
+        }
+        p = slash + 1;
+    }
+    return 0;
+}
+
+static const char *member_ext(const char *name) {
+    const char *base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    const char *dot = strrchr(base, '.');
+    if (!dot || dot == base || dot[1] == 0) {
+        return "";
+    }
+    return dot + 1;
+}
+
+static int append_named(Buf *text, const char *name, const char *body) {
+    if (!body || !body[0]) {
+        return 0;
+    }
+    if (text->len > 0 && buf_putc(text, '\n') != 0) {
+        return -1;
+    }
+    if (name && name[0]) {
+        if (buf_puts(text, name) != 0 || buf_putc(text, '\n') != 0) {
+            return -1;
+        }
+    }
+    return buf_puts(text, body);
+}
+
+/* Text inside one XML tag, matched on the local name (the part after ':'). */
+static int xml_local_texts(const char *s, size_t n, const char *tag, Buf *out) {
+    int in = 0;
+    for (size_t i = 0; i < n;) {
+        if (s[i] != '<') {
+            if (in) {
+                take_xml_char(s, n, &i, out, NULL);
+            } else {
+                i++;
+            }
+            continue;
+        }
+        int closing = (i + 1 < n && s[i + 1] == '/');
+        size_t j = i + 1 + closing;
+        size_t nb = j;
+        while (j < n && (isalnum((unsigned char)s[j]) || s[j] == ':' || s[j] == '-' || s[j] == '_')) {
+            j++;
+        }
+        size_t ne = j;
+        while (j < n && s[j] != '>') {
+            j++;
+        }
+        j = j < n ? j + 1 : n;
+        const char *nm = s + nb;
+        size_t nn = ne > nb ? ne - nb : 0;
+        if (!closing && tag_is(nm, nn, tag)) {
+            in = 1;
+        } else if (closing && tag_is(nm, nn, tag)) {
+            in = 0;
+            if (buf_putc(out, '\n') != 0) {
+                return -1;
+            }
+        }
+        i = j;
+    }
+    return 0;
+}
+
+static const uint32_t OLE_FREE = 0xFFFFFFFFu;
+static const uint32_t OLE_END = 0xFFFFFFFEu;
+static const uint32_t OLE_FATSECT = 0xFFFFFFFDu;
+static const uint32_t OLE_DIFSECT = 0xFFFFFFFCu;
+
+typedef struct Ole {
+    const unsigned char *bytes;
+    size_t n;
+    size_t sec;
+    size_t mini_sec;
+    size_t nsec;
+    uint16_t major;
+    uint32_t cutoff;
+    uint32_t *fat;
+    size_t fat_n;
+    unsigned char *dir;
+    size_t dir_n;
+    uint32_t *minifat;
+    size_t minifat_n;
+    unsigned char *mini;
+    size_t mini_n;
+} Ole;
+
+static void ole_close(Ole *o) {
+    if (!o) {
+        return;
+    }
+    free(o->fat);
+    free(o->dir);
+    free(o->minifat);
+    free(o->mini);
+    memset(o, 0, sizeof *o);
+}
+
+static const unsigned char *ole_sector(const Ole *o, uint32_t sid) {
+    size_t off;
+    if ((size_t)sid >= o->nsec) {
+        return NULL;
+    }
+    if (size_mul((size_t)sid + 1, o->sec, &off) != 0 || off > o->n || o->sec > o->n - off) {
+        return NULL;
+    }
+    return o->bytes + off;
+}
+
+static int ole_walk(const uint32_t *fat, size_t fat_n, uint32_t sid, size_t max_steps, size_t *count) {
+    size_t n = 0;
+    while (sid != OLE_END) {
+        if (n >= max_steps || (size_t)sid >= fat_n || fat[sid] == OLE_FREE || fat[sid] == OLE_FATSECT ||
+            fat[sid] == OLE_DIFSECT) {
+            return -1;
+        }
+        sid = fat[sid];
+        n++;
+    }
+    *count = n;
+    return 0;
+}
+
+static int ole_copy_reg(const Ole *o, uint32_t sid, size_t want, unsigned char **out, Err *e) {
+    unsigned char *dst;
+    size_t filled = 0;
+    size_t steps = 0;
+    if (want == 0) {
+        *out = NULL;
+        return 0;
+    }
+    if (want > o->n) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    dst = malloc(want);
+    if (!dst) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    while (filled < want) {
+        const unsigned char *sec;
+        size_t take;
+        if (sid == OLE_END || steps++ > o->nsec || (size_t)sid >= o->fat_n) {
+            free(dst);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        sec = ole_sector(o, sid);
+        if (!sec) {
+            free(dst);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        take = o->sec;
+        if (take > want - filled) {
+            take = want - filled;
+        }
+        memcpy(dst + filled, sec, take);
+        filled += take;
+        sid = o->fat[sid];
+    }
+    *out = dst;
+    return 0;
+}
+
+static int ole_copy_chain(const Ole *o, uint32_t sid, unsigned char **out, size_t *outn, Err *e) {
+    size_t count = 0;
+    size_t bytes;
+    unsigned char *dst;
+    size_t filled = 0;
+    if (ole_walk(o->fat, o->fat_n, sid, o->nsec, &count) != 0 || count == 0) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    if (size_mul(count, o->sec, &bytes) != 0) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    dst = malloc(bytes);
+    if (!dst) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    while (sid != OLE_END) {
+        const unsigned char *sec = ole_sector(o, sid);
+        if (!sec || filled > bytes || o->sec > bytes - filled) {
+            free(dst);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        memcpy(dst + filled, sec, o->sec);
+        filled += o->sec;
+        sid = o->fat[sid];
+    }
+    *out = dst;
+    *outn = filled;
+    return 0;
+}
+
+static int ole_open(Ole *o, const unsigned char *bytes, size_t n, Err *e) {
+    static const unsigned char sig[8] = {0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1};
+    const unsigned char *h;
+    uint16_t ssh;
+    uint16_t msh;
+    uint32_t nfat;
+    uint32_t dir_sid;
+    uint32_t mini_sid;
+    uint32_t nmini;
+    uint32_t difat_next;
+    uint32_t *locs = NULL;
+    size_t got = 0;
+    size_t per;
+    size_t fat_n;
+    size_t i;
+    memset(o, 0, sizeof *o);
+    if (n < 512 || memcmp(bytes, sig, 8) != 0) {
+        err_set(e, "not a compound document");
+        return -1;
+    }
+    h = bytes;
+    if (rd_u16(h + 0x1C) != 0xFFFE) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    o->major = rd_u16(h + 0x1A);
+    if (o->major != 3 && o->major != 4) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    ssh = rd_u16(h + 0x1E);
+    msh = rd_u16(h + 0x20);
+    if (ssh < 9 || ssh > 12 || msh < 4 || msh > 12) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    o->bytes = bytes;
+    o->n = n;
+    o->sec = (size_t)1 << ssh;
+    o->mini_sec = (size_t)1 << msh;
+    if (n / o->sec < 2) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    o->nsec = n / o->sec - 1;
+    o->cutoff = rd_u32(h + 0x38);
+    nfat = rd_u32(h + 0x2C);
+    dir_sid = rd_u32(h + 0x30);
+    mini_sid = rd_u32(h + 0x3C);
+    nmini = rd_u32(h + 0x40);
+    difat_next = rd_u32(h + 0x44);
+    if (nfat == 0 || (size_t)nfat > n / 4) {
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    locs = calloc(nfat, sizeof *locs);
+    if (!locs) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    for (i = 0; i < 109 && got < nfat; i++) {
+        locs[got++] = rd_u32(h + 0x4C + i * 4);
+    }
+    while (got < nfat && difat_next != OLE_END) {
+        const unsigned char *sec;
+        size_t slots;
+        size_t guard = got;
+        if ((size_t)difat_next >= o->nsec) {
+            free(locs);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        sec = ole_sector(o, difat_next);
+        if (!sec) {
+            free(locs);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        slots = o->sec / 4;
+        for (i = 0; i + 1 < slots && got < nfat; i++) {
+            locs[got++] = rd_u32(sec + i * 4);
+        }
+        difat_next = rd_u32(sec + (slots - 1) * 4);
+        if (got == guard) {
+            free(locs);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+    }
+    if (got != nfat) {
+        free(locs);
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    per = o->sec / 4;
+    if (size_mul(nfat, per, &fat_n) != 0) {
+        free(locs);
+        err_set(e, "compound document is corrupt");
+        return -1;
+    }
+    o->fat = calloc(fat_n ? fat_n : 1, sizeof *o->fat);
+    if (!o->fat) {
+        free(locs);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    o->fat_n = fat_n;
+    for (i = 0; i < nfat; i++) {
+        const unsigned char *sec = ole_sector(o, locs[i]);
+        size_t j;
+        if (!sec) {
+            free(locs);
+            ole_close(o);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        for (j = 0; j < per; j++) {
+            o->fat[i * per + j] = rd_u32(sec + j * 4);
+        }
+    }
+    free(locs);
+    if (ole_copy_chain(o, dir_sid, &o->dir, &o->dir_n, e) != 0) {
+        ole_close(o);
+        return -1;
+    }
+    if (nmini > 0 && mini_sid != OLE_END) {
+        size_t count = 0;
+        unsigned char *raw = NULL;
+        size_t raw_n = 0;
+        if ((size_t)nmini > o->nsec || ole_walk(o->fat, o->fat_n, mini_sid, nmini, &count) != 0 || count != nmini) {
+            ole_close(o);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        if (ole_copy_chain(o, mini_sid, &raw, &raw_n, e) != 0) {
+            ole_close(o);
+            return -1;
+        }
+        if (raw_n < 4) {
+            free(raw);
+            ole_close(o);
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        o->minifat_n = raw_n / 4;
+        o->minifat = malloc(o->minifat_n * sizeof *o->minifat);
+        if (!o->minifat) {
+            free(raw);
+            ole_close(o);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        for (i = 0; i < o->minifat_n; i++) {
+            o->minifat[i] = rd_u32(raw + i * 4);
+        }
+        free(raw);
+    }
+    for (i = 0; i + 128 <= o->dir_n; i += 128) {
+        const unsigned char *ent = o->dir + i;
+        uint64_t sz;
+        if (ent[0x42] != 5) {
+            continue;
+        }
+        sz = rd_u64(ent + 0x78);
+        if (o->major < 4) {
+            sz &= 0xffffffffu;
+        }
+        if (sz > 0) {
+            if (sz > o->n || ole_copy_reg(o, rd_u32(ent + 0x74), (size_t)sz, &o->mini, e) != 0) {
+                ole_close(o);
+                if (e->msg[0] == 0) {
+                    err_set(e, "compound document is corrupt");
+                }
+                return -1;
+            }
+            o->mini_n = (size_t)sz;
+        }
+        break;
+    }
+    return 0;
+}
+
+static int ole_name_is(const unsigned char *ent, const char *want) {
+    uint16_t nlen = rd_u16(ent + 0x40);
+    size_t chars;
+    size_t i;
+    if (nlen < 2 || nlen > 64 || (nlen & 1)) {
+        return 0;
+    }
+    chars = (size_t)(nlen / 2) - 1;
+    if (chars != strlen(want)) {
+        return 0;
+    }
+    for (i = 0; i < chars; i++) {
+        if (ent[i * 2 + 1] != 0 || tolower(ent[i * 2]) != tolower((unsigned char)want[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 1 found, 0 absent, -1 corrupt. */
+static int ole_find(const Ole *o, const char *name, unsigned char **out, size_t *outn, Err *e) {
+    size_t i;
+    *out = NULL;
+    *outn = 0;
+    for (i = 0; i + 128 <= o->dir_n; i += 128) {
+        const unsigned char *ent = o->dir + i;
+        uint64_t sz64;
+        size_t sz;
+        uint32_t sid;
+        int mini;
+        if (ent[0x42] != 2 || !ole_name_is(ent, name)) {
+            continue;
+        }
+        sz64 = rd_u64(ent + 0x78);
+        if (o->major < 4) {
+            sz64 &= 0xffffffffu;
+        }
+        if (sz64 > o->n) {
+            err_set(e, "compound document is corrupt");
+            return -1;
+        }
+        sz = (size_t)sz64;
+        sid = rd_u32(ent + 0x74);
+        mini = sz < o->cutoff;
+        if (!mini) {
+            if (ole_copy_reg(o, sid, sz, out, e) != 0) {
+                return -1;
+            }
+            *outn = sz;
+            return 1;
+        }
+        if (sz == 0) {
+            return 1;
+        }
+        {
+            unsigned char *dst = malloc(sz);
+            size_t filled = 0;
+            size_t steps = 0;
+            if (!dst) {
+                err_set(e, "out of memory");
+                return -1;
+            }
+            while (filled < sz) {
+                size_t off;
+                size_t take;
+                if (sid == OLE_END || steps++ > o->minifat_n || (size_t)sid >= o->minifat_n ||
+                    size_mul((size_t)sid, o->mini_sec, &off) != 0 || off > o->mini_n || o->mini_sec > o->mini_n - off) {
+                    free(dst);
+                    err_set(e, "compound document is corrupt");
+                    return -1;
+                }
+                take = o->mini_sec;
+                if (take > sz - filled) {
+                    take = sz - filled;
+                }
+                memcpy(dst + filled, o->mini + off, take);
+                filled += take;
+                sid = o->minifat[sid];
+            }
+            *out = dst;
+            *outn = sz;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const uint16_t CP1252_80[32] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+    0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+    0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178};
+
+static int append_utf8(Buf *b, uint32_t cp) {
+    unsigned char u[4];
+    size_t n = 0;
+    if (cp > 0x10FFFF) {
+        return 0;
+    }
+    if (cp < 0x80) {
+        u[0] = (unsigned char)cp;
+        n = 1;
+    } else if (cp < 0x800) {
+        u[0] = (unsigned char)(0xC0 | (cp >> 6));
+        u[1] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 2;
+    } else if (cp < 0x10000) {
+        u[0] = (unsigned char)(0xE0 | (cp >> 12));
+        u[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        u[2] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 3;
+    } else {
+        u[0] = (unsigned char)(0xF0 | (cp >> 18));
+        u[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+        u[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        u[3] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 4;
+    }
+    return buf_append(b, u, n);
+}
+
+static int append_office_char(Buf *b, uint32_t cp) {
+    if (cp == 0x0A || cp == 0x0D || cp == 0x0B || cp == 0x0C || cp == 0x07) {
+        return buf_putc(b, '\n');
+    }
+    if (cp == 0x09) {
+        return buf_putc(b, '\t');
+    }
+    if (cp < 0x20 || (cp >= 0xD800 && cp <= 0xDFFF) || cp == 0xFEFF) {
+        return 0;
+    }
+    return append_utf8(b, cp);
+}
+
+static int append_office_bytes(Buf *b, const unsigned char *p, size_t n, int utf16, int cp1252) {
+    size_t i = 0;
+    if (utf16) {
+        while (i + 1 < n) {
+            uint32_t cp = rd_u16(p + i);
+            i += 2;
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n) {
+                uint32_t lo = rd_u16(p + i);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                    i += 2;
+                }
+            }
+            if (append_office_char(b, cp) != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t cp = p[i];
+        if (cp1252 && cp >= 0x80 && cp <= 0x9F) {
+            cp = CP1252_80[cp - 0x80];
+        }
+        if (append_office_char(b, cp) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int buf_break(Buf *b) {
+    if (b->len == 0 || (b->data && b->data[b->len - 1] == '\n')) {
+        return 0;
+    }
+    return buf_putc(b, '\n');
+}
+
+/* shortcut: Word 6/95 and encrypted documents are skipped. */
+static int doc_fib(const unsigned char *w, size_t n, uint32_t *fc, uint32_t *lcb, int *which, Err *e) {
+    uint16_t flags;
+    uint16_t csw;
+    uint16_t cslw;
+    uint16_t pairs;
+    size_t at;
+    size_t skip;
+    if (n < 0x20 || rd_u16(w) != 0xA5EC) {
+        err_set(e, "doc is not Word 97 or later");
+        return -1;
+    }
+    flags = rd_u16(w + 0x0A);
+    if ((flags & 0x0100) || (flags & 0x8000)) {
+        err_set(e, "doc is encrypted");
+        return -2;
+    }
+    *which = (flags & 0x0200) ? 1 : 0;
+    if (n < 0x22) {
+        err_set(e, "doc header is truncated");
+        return -1;
+    }
+    csw = rd_u16(w + 0x20);
+    at = 0x22;
+    if (size_mul(csw, 2, &skip) != 0 || size_add(at, skip, &at) != 0 || at + 2 > n) {
+        err_set(e, "doc header is truncated");
+        return -1;
+    }
+    cslw = rd_u16(w + at);
+    at += 2;
+    if (size_mul(cslw, 4, &skip) != 0 || size_add(at, skip, &at) != 0 || at + 2 > n) {
+        err_set(e, "doc header is truncated");
+        return -1;
+    }
+    pairs = rd_u16(w + at);
+    at += 2;
+    if (pairs < 34 || size_mul(33, 8, &skip) != 0 || size_add(at, skip, &at) != 0 || at + 8 > n) {
+        err_set(e, "doc has no piece table");
+        return -1;
+    }
+    *fc = rd_u32(w + at);
+    *lcb = rd_u32(w + at + 4);
+    return 0;
+}
+
+static int doc_pieces(const unsigned char *word, size_t wn, const unsigned char *clx, size_t cn, Buf *text, Err *e) {
+    size_t i = 0;
+    while (i < cn && text->len < MAX_TEXT) {
+        unsigned char clxt = clx[i++];
+        if (clxt == 0x01) {
+            uint16_t cb;
+            if (i + 2 > cn) {
+                err_set(e, "doc piece table is corrupt");
+                return -1;
+            }
+            cb = rd_u16(clx + i);
+            i += 2;
+            if ((size_t)cb > cn - i) {
+                err_set(e, "doc piece table is corrupt");
+                return -1;
+            }
+            i += cb;
+            continue;
+        }
+        if (clxt == 0x02) {
+            uint32_t lcb;
+            uint32_t np;
+            uint32_t p;
+            const unsigned char *plc;
+            if (i + 4 > cn) {
+                err_set(e, "doc piece table is corrupt");
+                return -1;
+            }
+            lcb = rd_u32(clx + i);
+            i += 4;
+            if (lcb < 4 || lcb > cn - i || (lcb - 4) % 12 != 0) {
+                err_set(e, "doc piece table is corrupt");
+                return -1;
+            }
+            plc = clx + i;
+            np = (lcb - 4) / 12;
+            for (p = 0; p < np && text->len < MAX_TEXT; p++) {
+                uint32_t cp0 = rd_u32(plc + (size_t)p * 4);
+                uint32_t cp1 = rd_u32(plc + ((size_t)p + 1) * 4);
+                const unsigned char *pcd = plc + ((size_t)np + 1) * 4 + (size_t)p * 8;
+                uint32_t raw = rd_u32(pcd + 2);
+                uint32_t fc = raw & 0x3FFFFFFFu;
+                int compressed = (raw >> 30) & 1;
+                size_t off;
+                size_t bytes;
+                uint32_t nch;
+                if (cp1 < cp0) {
+                    err_set(e, "doc piece table is corrupt");
+                    return -1;
+                }
+                nch = cp1 - cp0;
+                if (compressed) {
+                    off = (size_t)(fc / 2);
+                    bytes = nch;
+                } else {
+                    off = fc;
+                    if (size_mul(nch, 2, &bytes) != 0) {
+                        err_set(e, "doc piece table is corrupt");
+                        return -1;
+                    }
+                }
+                if (off > wn || bytes > wn - off) {
+                    err_set(e, "doc piece table is corrupt");
+                    return -1;
+                }
+                if (append_office_bytes(text, word + off, bytes, !compressed, 1) != 0) {
+                    err_set(e, "out of memory");
+                    return -1;
+                }
+            }
+            return 0;
+        }
+        err_set(e, "doc piece table is corrupt");
+        return -1;
+    }
+    return 0;
+}
+
+static ExStatus extract_doc(const unsigned char *bytes, size_t n, Extract *out, Err *e) {
+    Ole ole;
+    unsigned char *word = NULL;
+    unsigned char *table = NULL;
+    unsigned char *enc = NULL;
+    size_t wn = 0;
+    size_t tn = 0;
+    size_t en = 0;
+    int which = 0;
+    uint32_t fc = 0;
+    uint32_t lcb = 0;
+    int fr;
+    int found;
+    Buf text;
+    buf_init(&text);
+    if (ole_open(&ole, bytes, n, e) != 0) {
+        buf_free(&text);
+        return EX_ERR;
+    }
+    found = ole_find(&ole, "WordDocument", &word, &wn, e);
+    if (found < 0) {
+        ole_close(&ole);
+        buf_free(&text);
+        return EX_ERR;
+    }
+    if (!found) {
+        int enc_found = ole_find(&ole, "EncryptedPackage", &enc, &en, e);
+        ole_close(&ole);
+        free(enc);
+        buf_free(&text);
+        if (enc_found < 0) {
+            return EX_ERR;
+        }
+        if (enc_found > 0) {
+            out->detail = xstrdup("doc is encrypted");
+            err_clear(e);
+            return EX_SKIP;
+        }
+        err_set(e, "doc is missing WordDocument");
+        return EX_ERR;
+    }
+    fr = doc_fib(word, wn, &fc, &lcb, &which, e);
+    if (fr != 0) {
+        free(word);
+        ole_close(&ole);
+        buf_free(&text);
+        if (fr == -2) {
+            out->detail = xstrdup("doc is encrypted");
+            err_clear(e);
+            return EX_SKIP;
+        }
+        return EX_ERR;
+    }
+    found = ole_find(&ole, which ? "1Table" : "0Table", &table, &tn, e);
+    ole_close(&ole);
+    if (found < 0) {
+        free(word);
+        buf_free(&text);
+        return EX_ERR;
+    }
+    if (!found || fc > tn || lcb > tn - fc) {
+        free(word);
+        free(table);
+        buf_free(&text);
+        err_set(e, found ? "doc piece table is corrupt" : "doc is missing the table stream");
+        return EX_ERR;
+    }
+    if (doc_pieces(word, wn, table + fc, lcb, &text, e) != 0) {
+        free(word);
+        free(table);
+        buf_free(&text);
+        return EX_ERR;
+    }
+    free(word);
+    free(table);
+    return finish(&text, NULL, "doc had no text", out, NULL, 0);
+}
+
+typedef struct Biff {
+    const unsigned char *p;
+    size_t n;
+    size_t next;
+    size_t pos;
+    size_t end;
+    int type;
+    int high;
+} Biff;
+
+static int biff_rec(Biff *b) {
+    size_t body;
+    uint16_t len;
+    if (b->next + 4 > b->n) {
+        return 0;
+    }
+    b->type = rd_u16(b->p + b->next);
+    len = rd_u16(b->p + b->next + 2);
+    if (size_add(b->next, 4, &body) != 0 || (size_t)len > b->n - body) {
+        return -1;
+    }
+    b->pos = body;
+    b->end = body + len;
+    b->next = b->end;
+    return 1;
+}
+
+static int biff_more(Biff *b, int chars) {
+    int rc;
+    if (b->pos < b->end) {
+        return 0;
+    }
+    rc = biff_rec(b);
+    if (rc != 1 || b->type != 0x003C) {
+        return -1;
+    }
+    if (chars) {
+        if (b->pos >= b->end) {
+            return -1;
+        }
+        b->high = b->p[b->pos++] & 1;
+    }
+    return 0;
+}
+
+static int biff_take(Biff *b, unsigned char *dst, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        size_t chunk;
+        if (biff_more(b, 0) != 0) {
+            return -1;
+        }
+        chunk = b->end - b->pos;
+        if (chunk > n - got) {
+            chunk = n - got;
+        }
+        if (dst) {
+            memcpy(dst + got, b->p + b->pos, chunk);
+        }
+        b->pos += chunk;
+        got += chunk;
+    }
+    return 0;
+}
+
+static int biff_string(Biff *b, Buf *text) {
+    unsigned char hdr[3];
+    unsigned char tmp[4];
+    uint16_t cch;
+    uint16_t c_run = 0;
+    uint32_t cb_ext = 0;
+    uint32_t left;
+    uint8_t flags;
+    if (biff_take(b, hdr, 3) != 0) {
+        return -1;
+    }
+    cch = rd_u16(hdr);
+    flags = hdr[2];
+    if (flags & 0x8) {
+        if (biff_take(b, tmp, 2) != 0) {
+            return -1;
+        }
+        c_run = rd_u16(tmp);
+    }
+    if (flags & 0x4) {
+        if (biff_take(b, tmp, 4) != 0) {
+            return -1;
+        }
+        cb_ext = rd_u32(tmp);
+    }
+    b->high = flags & 1;
+    left = cch;
+    if (cch && buf_break(text) != 0) {
+        return -1;
+    }
+    while (left > 0 && text->len < MAX_TEXT) {
+        size_t avail;
+        size_t width;
+        size_t nchar;
+        if (biff_more(b, 1) != 0) {
+            return -1;
+        }
+        avail = b->end - b->pos;
+        width = b->high ? 2 : 1;
+        if (avail < width) {
+            return -1;
+        }
+        nchar = avail / width;
+        if (nchar > left) {
+            nchar = left;
+        }
+        if (append_office_bytes(text, b->p + b->pos, nchar * width, b->high, 0) != 0) {
+            return -1;
+        }
+        b->pos += nchar * width;
+        left -= (uint32_t)nchar;
+    }
+    if (left > 0) {
+        return 0;
+    }
+    {
+        size_t skip = 0;
+        size_t runs;
+        if (size_mul(c_run, 4, &runs) != 0 || size_add(runs, cb_ext, &skip) != 0) {
+            return -1;
+        }
+        if (skip && biff_take(b, NULL, skip) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int append_num(Buf *b, double v) {
+    char tmp[64];
+    int wrote;
+    if (v != v) {
+        return 0;
+    }
+    if (v > -1e15 && v < 1e15 && v == (double)(long long)v) {
+        wrote = snprintf(tmp, sizeof tmp, "%lld", (long long)v);
+    } else {
+        wrote = snprintf(tmp, sizeof tmp, "%.15g", v);
+    }
+    if (wrote < 0 || (size_t)wrote >= sizeof tmp || buf_break(b) != 0) {
+        return -1;
+    }
+    return buf_puts(b, tmp);
+}
+
+static double rk_number(uint32_t rk) {
+    double v;
+    if (rk & 2) {
+        v = (double)((int32_t)rk >> 2);
+    } else {
+        uint64_t bits = (uint64_t)(rk & 0xFFFFFFFCu) << 32;
+        memcpy(&v, &bits, sizeof v);
+    }
+    if (rk & 1) {
+        v /= 100.0;
+    }
+    return v;
+}
+
+/* shortcut: formula results and formatted dates are not read. */
+static ExStatus extract_xls(const unsigned char *bytes, size_t n, Extract *out, Err *e) {
+    Ole ole;
+    unsigned char *book = NULL;
+    size_t bn = 0;
+    int found;
+    Biff b;
+    Buf text;
+    int rc;
+    buf_init(&text);
+    if (ole_open(&ole, bytes, n, e) != 0) {
+        buf_free(&text);
+        return EX_ERR;
+    }
+    found = ole_find(&ole, "Workbook", &book, &bn, e);
+    if (found == 0) {
+        found = ole_find(&ole, "Book", &book, &bn, e);
+    }
+    ole_close(&ole);
+    if (found < 0) {
+        buf_free(&text);
+        return EX_ERR;
+    }
+    if (!found) {
+        buf_free(&text);
+        err_set(e, "xls is missing Workbook");
+        return EX_ERR;
+    }
+    memset(&b, 0, sizeof b);
+    b.p = book;
+    b.n = bn;
+    while ((rc = biff_rec(&b)) == 1 && text.len < MAX_TEXT) {
+        if (b.type == 0x00FC) {
+            unsigned char counts[8];
+            uint32_t uniq;
+            uint32_t s;
+            if (biff_take(&b, counts, 8) != 0) {
+                free(book);
+                buf_free(&text);
+                err_set(e, "xls shared strings are corrupt");
+                return EX_ERR;
+            }
+            uniq = rd_u32(counts + 4);
+            if ((size_t)uniq > bn) {
+                free(book);
+                buf_free(&text);
+                err_set(e, "xls shared strings are corrupt");
+                return EX_ERR;
+            }
+            for (s = 0; s < uniq && text.len < MAX_TEXT; s++) {
+                if (biff_string(&b, &text) != 0) {
+                    free(book);
+                    buf_free(&text);
+                    err_set(e, "xls shared strings are corrupt");
+                    return EX_ERR;
+                }
+            }
+        } else if (b.type == 0x0204 && b.end - b.pos >= 6) {
+            Biff one = b;
+            one.pos += 6;
+            if (biff_string(&one, &text) != 0) {
+                free(book);
+                buf_free(&text);
+                err_set(e, "xls label is corrupt");
+                return EX_ERR;
+            }
+        } else if (b.type == 0x0203 && b.end >= b.pos + 14) {
+            double v;
+            uint64_t bits = rd_u64(b.p + b.pos + 6);
+            memcpy(&v, &bits, sizeof v);
+            if (append_num(&text, v) != 0) {
+                free(book);
+                buf_free(&text);
+                err_set(e, "out of memory");
+                return EX_ERR;
+            }
+        } else if (b.type == 0x027E && b.end >= b.pos + 10) {
+            if (append_num(&text, rk_number(rd_u32(b.p + b.pos + 6))) != 0) {
+                free(book);
+                buf_free(&text);
+                err_set(e, "out of memory");
+                return EX_ERR;
+            }
+        } else if (b.type == 0x00BD && b.end >= b.pos + 6) {
+            size_t at = b.pos + 4;
+            while (at + 8 <= b.end) {
+                if (append_num(&text, rk_number(rd_u32(b.p + at + 2))) != 0) {
+                    free(book);
+                    buf_free(&text);
+                    err_set(e, "out of memory");
+                    return EX_ERR;
+                }
+                at += 6;
+            }
+        }
+    }
+    free(book);
+    if (rc < 0 && text.len == 0) {
+        buf_free(&text);
+        err_set(e, "xls records are corrupt");
+        return EX_ERR;
+    }
+    return finish(&text, NULL, "xls had no text", out, NULL, 0);
+}
+
+static int ppt_walk(const unsigned char *p, size_t n, Buf *text) {
+    size_t off = 0;
+    while (off + 8 <= n && text->len < MAX_TEXT) {
+        uint16_t ver = rd_u16(p + off);
+        uint16_t type = rd_u16(p + off + 2);
+        uint32_t len = rd_u32(p + off + 4);
+        size_t body;
+        if (size_add(off, 8, &body) != 0 || (size_t)len > n - body) {
+            return -1;
+        }
+        if ((ver & 0xF) == 0xF) {
+            if (ppt_walk(p + body, len, text) != 0) {
+                return -1;
+            }
+        } else if (type == 0x0FA0 || type == 0x0FBA || type == 0x0FA8) {
+            if (len && buf_break(text) != 0) {
+                return -1;
+            }
+            if (append_office_bytes(text, p + body, len, type != 0x0FA8, 1) != 0) {
+                return -1;
+            }
+        }
+        off = body + len;
+    }
+    return 0;
+}
+
+static ExStatus extract_ppt(const unsigned char *bytes, size_t n, Extract *out, Err *e) {
+    Ole ole;
+    unsigned char *doc = NULL;
+    size_t dn = 0;
+    int found;
+    Buf text;
+    buf_init(&text);
+    if (ole_open(&ole, bytes, n, e) != 0) {
+        buf_free(&text);
+        return EX_ERR;
+    }
+    found = ole_find(&ole, "PowerPoint Document", &doc, &dn, e);
+    ole_close(&ole);
+    if (found < 0) {
+        buf_free(&text);
+        return EX_ERR;
+    }
+    if (!found) {
+        buf_free(&text);
+        err_set(e, "ppt is missing PowerPoint Document");
+        return EX_ERR;
+    }
+    if (dn && ppt_walk(doc, dn, &text) != 0) {
+        free(doc);
+        buf_free(&text);
+        err_set(e, "ppt records are corrupt");
+        return EX_ERR;
+    }
+    free(doc);
+    return finish(&text, NULL, "ppt had no text", out, NULL, 0);
+}
+
+static ExStatus extract_office(const char *ext, const unsigned char *bytes, size_t n, Extract *out, Err *e) {
+    if (ext_is(ext, "doc")) {
+        return extract_doc(bytes, n, out, e);
+    }
+    if (ext_is(ext, "xls")) {
+        return extract_xls(bytes, n, out, e);
+    }
+    return extract_ppt(bytes, n, out, e);
+}
+
+static ExStatus piece_from_zip(Zip *z, const char *ext, Extract *ex, Err *e);
+
+static int piece_from_bytes(const char *ext, const unsigned char *data, size_t len, char **text, Err *e) {
+    Extract ex;
+    ExStatus st = EX_SKIP;
+    *text = NULL;
+    memset(&ex, 0, sizeof ex);
+    if (ext_is(ext, "doc") || ext_is(ext, "xls") || ext_is(ext, "ppt")) {
+        st = extract_office(ext, data, len, &ex, e);
+    } else if (ext_is(ext, "docx") || ext_is(ext, "odt") || ext_is(ext, "epub") || ext_is(ext, "xlsx") ||
+               ext_is(ext, "pptx")) {
+        Zip z;
+        if (zip_read(data, len, &z, e) != 0) {
+            return -1;
+        }
+        st = piece_from_zip(&z, ext, &ex, e);
+        zip_free(&z);
+    } else if (ext_is(ext, "html") || ext_is(ext, "htm")) {
+        st = extract_html_bytes((const char *)data, len, &ex);
+    } else if (ext_is(ext, "xml")) {
+        Buf t;
+        buf_init(&t);
+        const char *blocks[] = {"p", "div", "title", "h1", "h2"};
+        xml_texts((char *)data, len, &t, blocks, 5);
+        st = finish(&t, NULL, "xml had no text", &ex, NULL, 0);
+    } else if (is_text_ext(ext)) {
+        int heads = ext_is(ext, "md") || ext_is(ext, "markdown") ? 1 : (ext_is(ext, "adoc") || ext_is(ext, "asciidoc") ? 2 : 0);
+        st = extract_plain(data, len, heads, &ex, e);
+    }
+    if (st == EX_ERR) {
+        extract_free(&ex);
+        return -1;
+    }
+    if (st == EX_OK && ex.text) {
+        *text = ex.text;
+        ex.text = NULL;
+    }
+    extract_free(&ex);
+    return 0;
+}
+
+enum { ZIP_NEST = 4 };
+
+static int ends_ieq(const char *name, const char *suf) {
+    size_t n;
+    size_t s;
+    if (!name || !suf) {
+        return 0;
+    }
+    n = strlen(name);
+    s = strlen(suf);
+    if (n < s) {
+        return 0;
+    }
+    return ascii_ieq(name + (n - s), suf);
+}
+
+static int is_tar_name(const char *name) {
+    return ends_ieq(name, ".tar") || ends_ieq(name, ".tar.gz") || ends_ieq(name, ".tgz");
+}
+
+static int is_gzip_tar(const char *name) {
+    return ends_ieq(name, ".tar.gz") || ends_ieq(name, ".tgz");
+}
+
+static const char *path_leaf(const char *path) {
+    const char *leaf = path ? path : "";
+    for (const char *p = leaf; *p; p++) {
+        if ((*p == '/' || *p == '\\') && p[1]) {
+            leaf = p + 1;
+        }
+    }
+    return leaf;
+}
+
+static int octal_field(const unsigned char *s, size_t n, size_t *out) {
+    size_t v = 0;
+    int any = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = s[i];
+        if (c == 0 || c == ' ') {
+            if (any) {
+                break;
+            }
+            continue;
+        }
+        if (c < '0' || c > '7') {
+            return -1;
+        }
+        if (v > (SIZE_MAX >> 3)) {
+            return -1;
+        }
+        v = (v << 3) + (size_t)(c - '0');
+        any = 1;
+    }
+    *out = v;
+    return 0;
+}
+
+static int tar_checksum_ok(const unsigned char *h) {
+    unsigned sum = 0;
+    size_t stored = 0;
+    for (int i = 0; i < 512; i++) {
+        unsigned char c = (i >= 148 && i < 156) ? (unsigned char)' ' : h[i];
+        sum += c;
+    }
+    if (octal_field(h + 148, 8, &stored) != 0) {
+        return 0;
+    }
+    return sum == stored;
+}
+
+static char *tar_header_name(const unsigned char *h) {
+    char shortn[101];
+    char prefix[156];
+    size_t nn = 0;
+    size_t pn = 0;
+    while (nn < 100 && h[nn]) {
+        shortn[nn] = (char)h[nn];
+        nn++;
+    }
+    shortn[nn] = 0;
+    if (memcmp(h + 257, "ustar", 5) == 0) {
+        while (pn < 155 && h[345 + pn]) {
+            prefix[pn] = (char)h[345 + pn];
+            pn++;
+        }
+    }
+    prefix[pn] = 0;
+    if (pn == 0) {
+        return xstrdup(shortn);
+    }
+    if (nn == 0) {
+        return xstrdup(prefix);
+    }
+    {
+        char *joined = NULL;
+        size_t need = pn + 1 + nn + 1;
+        joined = malloc(need);
+        if (!joined) {
+            return NULL;
+        }
+        memcpy(joined, prefix, pn);
+        joined[pn] = '/';
+        memcpy(joined + pn + 1, shortn, nn + 1);
+        return joined;
+    }
+}
+
+static int gunzip_all(const unsigned char *src, size_t n, unsigned char **out, size_t *outn, Err *e) {
+    z_stream strm;
+    size_t cap = 64;
+    unsigned char *dst;
+    int rc;
+    if (n > MAX_INPUT) {
+        err_set(e, "gzip member is too large");
+        return -1;
+    }
+    if (n > 16 && (size_mul(n, 4, &cap) != 0 || cap > MAX_INPUT)) {
+        cap = MAX_INPUT;
+    }
+    dst = malloc(cap ? cap : 1);
+    if (!dst) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    memset(&strm, 0, sizeof strm);
+    strm.next_in = (Bytef *)src;
+    strm.avail_in = (uInt)n;
+    if (inflateInit2(&strm, 16 + 15) != Z_OK) {
+        free(dst);
+        err_set(e, "gzip init failed");
+        return -1;
+    }
+    for (;;) {
+        if (strm.total_out >= cap) {
+            size_t ncap;
+            unsigned char *nd;
+            if (cap >= MAX_INPUT) {
+                inflateEnd(&strm);
+                free(dst);
+                err_set(e, "gzip member is too large");
+                return -1;
+            }
+            if (size_mul(cap, 2, &ncap) != 0 || ncap > MAX_INPUT) {
+                ncap = MAX_INPUT;
+            }
+            nd = realloc(dst, ncap);
+            if (!nd) {
+                inflateEnd(&strm);
+                free(dst);
+                err_set(e, "out of memory");
+                return -1;
+            }
+            dst = nd;
+            cap = ncap;
+        }
+        strm.next_out = dst + strm.total_out;
+        strm.avail_out = (uInt)(cap - strm.total_out);
+        rc = inflate(&strm, Z_NO_FLUSH);
+        if (rc == Z_STREAM_END) {
+            break;
+        }
+        if (rc == Z_BUF_ERROR && strm.avail_out == 0) {
+            continue;
+        }
+        if (rc != Z_OK) {
+            inflateEnd(&strm);
+            free(dst);
+            err_set(e, "gzip data is corrupt");
+            return -1;
+        }
+    }
+    inflateEnd(&strm);
+    *out = dst;
+    *outn = strm.total_out;
+    return 0;
+}
+
+static int absorb_member(Buf *text, const char *name, const unsigned char *data, size_t len, int depth, Err *e);
+static int archive_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
+static int tar_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e);
+
+static int tar_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e) {
+    size_t off = 0;
+    char *long_name = NULL;
+    if (depth >= ZIP_NEST) {
+        return 0;
+    }
+    while (off + 512 <= n) {
+        const unsigned char *h = bytes + off;
+        int zero = 1;
+        char type;
+        size_t fsz = 0;
+        size_t pad;
+        size_t data_at;
+        char *owned = NULL;
+        const char *fname;
+        off += 512;
+        for (int i = 0; i < 512; i++) {
+            if (h[i]) {
+                zero = 0;
+                break;
+            }
+        }
+        if (zero) {
+            free(long_name);
+            return 0;
+        }
+        if (!tar_checksum_ok(h)) {
+            free(long_name);
+            err_set(e, "tar header is corrupt");
+            return -1;
+        }
+        if (octal_field(h + 124, 12, &fsz) != 0 || fsz > MAX_INPUT) {
+            free(long_name);
+            err_set(e, "tar member is too large");
+            return -1;
+        }
+        pad = (fsz + 511) & ~(size_t)511;
+        if (off > n || pad > n - off) {
+            free(long_name);
+            err_set(e, "tar member is truncated");
+            return -1;
+        }
+        data_at = off;
+        off += pad;
+        type = (char)h[156];
+        if (type == 'L') {
+            free(long_name);
+            long_name = xstrndup((const char *)(bytes + data_at), fsz);
+            if (!long_name) {
+                err_set(e, "out of memory");
+                return -1;
+            }
+            continue;
+        }
+        if (type == '5' || type == 'x' || type == 'g') {
+            free(long_name);
+            long_name = NULL;
+            continue;
+        }
+        if (type != '0' && type != '\0') {
+            free(long_name);
+            long_name = NULL;
+            continue;
+        }
+        fname = long_name;
+        if (!fname || !fname[0]) {
+            owned = tar_header_name(h);
+            fname = owned;
+        }
+        if (!fname) {
+            free(long_name);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        if (absorb_member(text, fname, bytes + data_at, fsz, depth, e) != 0) {
+            free(owned);
+            free(long_name);
+            return -1;
+        }
+        free(owned);
+        free(long_name);
+        long_name = NULL;
+    }
+    free(long_name);
+    return 0;
+}
+
+static int absorb_member(Buf *text, const char *name, const unsigned char *data, size_t len, int depth, Err *e) {
+    const char *ext;
+    char *body = NULL;
+    int rc;
+    if (!name || member_hidden(name) || depth >= ZIP_NEST) {
+        return 0;
+    }
+    if (ends_ieq(name, ".gz") && !is_tar_name(name)) {
+        unsigned char *raw = NULL;
+        size_t rn = 0;
+        size_t ln = strlen(name);
+        char *inner;
+        if (gunzip_all(data, len, &raw, &rn, e) != 0) {
+            return -1;
+        }
+        inner = xstrndup(name, ln >= 3 ? ln - 3 : ln);
+        if (!inner) {
+            free(raw);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        rc = absorb_member(text, inner, raw, rn, depth, e);
+        free(inner);
+        free(raw);
+        return rc;
+    }
+    ext = member_ext(name);
+    if (ext_is(ext, "zip") || is_tar_name(name)) {
+        Buf inner;
+        unsigned char *raw = NULL;
+        size_t rn = 0;
+        const unsigned char *src = data;
+        size_t sn = len;
+        buf_init(&inner);
+        if (is_gzip_tar(name)) {
+            if (gunzip_all(data, len, &raw, &rn, e) != 0) {
+                buf_free(&inner);
+                return -1;
+            }
+            src = raw;
+            sn = rn;
+        }
+        if (ext_is(ext, "zip")) {
+            rc = archive_into(src, sn, &inner, depth + 1, e);
+        } else {
+            rc = tar_into(src, sn, &inner, depth + 1, e);
+        }
+        free(raw);
+        if (rc == 0) {
+            rc = append_named(text, name, inner.data);
+        }
+        buf_free(&inner);
+        return rc;
+    }
+    if (piece_from_bytes(ext, data, len, &body, e) != 0) {
+        return -1;
+    }
+    rc = append_named(text, name, body);
+    free(body);
+    return rc;
+}
+
+static int archive_into(const unsigned char *bytes, size_t n, Buf *text, int depth, Err *e) {
+    Zip z;
+    int rc = 0;
+    if (depth >= ZIP_NEST) {
+        return 0;
+    }
+    if (zip_read(bytes, n, &z, e) != 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < z.n; i++) {
+        if (absorb_member(text, z.files[i].name, z.files[i].data, z.files[i].len, depth, e) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    zip_free(&z);
+    return rc;
+}
+
+static int want_sheet_xml(const char *name) {
+    if (!name) {
+        return 0;
+    }
+    if (strstr(name, "xl/sharedStrings.xml")) {
+        return 1;
+    }
+    return strstr(name, "xl/worksheets/") && ext_is(member_ext(name), "xml");
+}
+
+static int want_slide_xml(const char *name) {
+    return name && strstr(name, "ppt/slides/") && ext_is(member_ext(name), "xml");
+}
+
+static int ooxml_texts(Zip *z, int (*want)(const char *name), const char *tag, Buf *text) {
+    for (size_t i = 0; i < z->n; i++) {
+        if (!want(z->files[i].name)) {
+            continue;
+        }
+        if (xml_local_texts((const char *)z->files[i].data, z->files[i].len, tag, text) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static ExStatus extract_xlsx(Zip *z, Extract *out, Err *e) {
+    Buf text;
+    buf_init(&text);
+    if (ooxml_texts(z, want_sheet_xml, "t", &text) != 0 || ooxml_texts(z, want_sheet_xml, "v", &text) != 0) {
+        buf_free(&text);
+        err_set(e, "out of memory");
+        return EX_ERR;
+    }
+    return finish(&text, NULL, "xlsx had no text", out, NULL, 0);
+}
+
+static ExStatus extract_pptx(Zip *z, Extract *out, Err *e) {
+    Buf text;
+    buf_init(&text);
+    if (ooxml_texts(z, want_slide_xml, "t", &text) != 0) {
+        buf_free(&text);
+        err_set(e, "out of memory");
+        return EX_ERR;
+    }
+    return finish(&text, NULL, "pptx had no text", out, NULL, 0);
+}
+
+static ExStatus piece_from_zip(Zip *z, const char *ext, Extract *ex, Err *e) {
+    if (ext_is(ext, "docx")) {
+        return extract_docx(z, ex, e);
+    }
+    if (ext_is(ext, "odt")) {
+        return extract_odt(z, ex, e);
+    }
+    if (ext_is(ext, "xlsx")) {
+        return extract_xlsx(z, ex, e);
+    }
+    if (ext_is(ext, "pptx")) {
+        return extract_pptx(z, ex, e);
+    }
+    return extract_epub(z, ex);
+}
+
 ExStatus extract_path(const char *path, Extract *out, Err *e) {
     memset(out, 0, sizeof *out);
     err_clear(e);
@@ -1391,11 +2955,14 @@ ExStatus extract_path(const char *path, Extract *out, Err *e) {
     int text = is_text_ext(ext);
     int html = ext_is(ext, "html") || ext_is(ext, "htm");
     int xml = ext_is(ext, "xml");
-    int zippy = ext_is(ext, "docx") || ext_is(ext, "odt") || ext_is(ext, "epub");
+    int zippy = ext_is(ext, "docx") || ext_is(ext, "odt") || ext_is(ext, "epub") || ext_is(ext, "xlsx") ||
+                ext_is(ext, "pptx") || ext_is(ext, "zip");
+    int packed = is_tar_name(path) || ends_ieq(path, ".gz");
+    int office = ext_is(ext, "doc") || ext_is(ext, "xls") || ext_is(ext, "ppt");
     int pdf = ext_is(ext, "pdf");
     int md = ext_is(ext, "md") || ext_is(ext, "markdown");
     int adoc = ext_is(ext, "adoc") || ext_is(ext, "asciidoc");
-    if (!text && !zippy && !pdf) {
+    if (!text && !zippy && !packed && !pdf && !office) {
         out->detail = xstrdup("unsupported type");
         return EX_SKIP;
     }
@@ -1421,6 +2988,55 @@ ExStatus extract_path(const char *path, Extract *out, Err *e) {
             err_set(e, "out of memory");
             rc = EX_ERR;
         }
+    } else if (ext_is(ext, "zip")) {
+        Buf zip_text;
+        buf_init(&zip_text);
+        if (archive_into(bytes, n, &zip_text, 0, e) != 0) {
+            buf_free(&zip_text);
+            free(bytes);
+            return EX_ERR;
+        }
+        rc = finish(&zip_text, NULL, "zip had no text", out, NULL, 0);
+    } else if (packed) {
+        Buf packed_text;
+        unsigned char *raw = NULL;
+        size_t rn = 0;
+        int trc = 0;
+        buf_init(&packed_text);
+        if (is_gzip_tar(path) || (ends_ieq(path, ".gz") && !is_tar_name(path))) {
+            if (gunzip_all(bytes, n, &raw, &rn, e) != 0) {
+                buf_free(&packed_text);
+                free(bytes);
+                return EX_ERR;
+            }
+            if (is_tar_name(path)) {
+                trc = tar_into(raw, rn, &packed_text, 0, e);
+            } else {
+                const char *leaf = path_leaf(path);
+                size_t ln = strlen(leaf);
+                char *inner = xstrndup(leaf, ln >= 3 ? ln - 3 : ln);
+                if (!inner) {
+                    free(raw);
+                    buf_free(&packed_text);
+                    free(bytes);
+                    err_set(e, "out of memory");
+                    return EX_ERR;
+                }
+                trc = absorb_member(&packed_text, inner, raw, rn, 0, e);
+                free(inner);
+            }
+            free(raw);
+        } else {
+            trc = tar_into(bytes, n, &packed_text, 0, e);
+        }
+        if (trc != 0) {
+            buf_free(&packed_text);
+            free(bytes);
+            return EX_ERR;
+        }
+        rc = finish(&packed_text, NULL, "archive had no text", out, NULL, 0);
+    } else if (office) {
+        rc = extract_office(ext, bytes, n, out, e);
     } else if (zippy) {
         Zip z;
         if (zip_read(bytes, n, &z, e) != 0) {
@@ -1429,12 +3045,20 @@ ExStatus extract_path(const char *path, Extract *out, Err *e) {
         }
         if (ext_is(ext, "docx")) {
             rc = extract_docx(&z, out, e);
+            zip_free(&z);
         } else if (ext_is(ext, "odt")) {
             rc = extract_odt(&z, out, e);
+            zip_free(&z);
+        } else if (ext_is(ext, "xlsx")) {
+            rc = extract_xlsx(&z, out, e);
+            zip_free(&z);
+        } else if (ext_is(ext, "pptx")) {
+            rc = extract_pptx(&z, out, e);
+            zip_free(&z);
         } else {
             rc = extract_epub(&z, out);
+            zip_free(&z);
         }
-        zip_free(&z);
     } else if (html) {
         rc = extract_html_bytes((char *)bytes, n, out);
     } else if (xml) {

@@ -4040,7 +4040,7 @@ function watchJob() {
       if (job.running) {
         if (groveView === "library") {
           libStatus.textContent = job.kind === 3 ? "Fetching the page…" :
-            job.kind === 2 ? "Adding files…" : "Preparing the shelf… Search waits until this finishes.";
+            job.kind === 2 ? "Adding files…" : "Checking the library…";
         }
         setTimeout(step, 400);
         return;
@@ -4054,6 +4054,7 @@ function watchJob() {
         personaPeople = null;
         loadLibrary();
         if (groveView === "personas") loadPersonas();
+        if (job.kind === 1 && groveView === "search" && q && (q.value || "").trim()) runSearch();
       }
     } catch (e) {
       if (id === jobWatch && groveView === "library") showLibError("Could not update the library");
@@ -4074,7 +4075,7 @@ async function ensureShelf() {
       return;
     }
     if (data.preparing) {
-      libStatus.textContent = "Preparing the shelf… Search waits until this finishes.";
+      libStatus.textContent = "Checking the library… Search waits until this finishes.";
       libCount.textContent = "";
       libRows.replaceChildren();
       watchJob();
@@ -5009,6 +5010,15 @@ if (searchNarrowOpen) {
   });
 }
 if (narrowDone) narrowDone.addEventListener("click", closeNarrowSheet);
+async function catchUp() {
+  if (typeof grove_catchup !== "function") return;
+  try {
+    const raw = await grove_catchup();
+    const data = JSON.parse(raw);
+    if (data.started || data.running) watchJob();
+  } catch (e) {}
+}
+
 whenReady(function () {
   initSearchOpts();
   loadInfo();
@@ -5018,6 +5028,7 @@ whenReady(function () {
   loadExcerpts();
   restoreQuery();
   restoreView();
+  catchUp();
 });
 </script>
 </body>

@@ -110,7 +110,27 @@ static void test_query_shape(void) {
     CHECK(pq.q && pq.q->kind == Q_TERM && pq.q->prefix);
     parsed_free(&pq);
     CHECK(query_parse("mtime:2026-10", &pq, &e) == 0);
-    CHECK(pq.q == NULL && pq.mtime_year == 2026 && pq.mtime_mon == 10);
+    CHECK(pq.q == NULL && pq.mtime_year == 2026 && pq.mtime_mon == 10 && pq.mtime_end_year == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("mtime:2020", &pq, &e) == 0);
+    CHECK(pq.mtime_year == 2020 && pq.mtime_mon == 0 && pq.mtime_end_year == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("mtime:2020-01..2020-06", &pq, &e) == 0);
+    CHECK(pq.mtime_year == 2020 && pq.mtime_mon == 1 && pq.mtime_end_year == 2020 && pq.mtime_end_mon == 6);
+    parsed_free(&pq);
+    CHECK(query_parse("mtime:2020-06..2020-01", &pq, &e) != 0);
+    CHECK(query_parse("*able", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->kind == Q_TERM && pq.q->wild && pq.q->text && strcmp(pq.q->text, "*able") == 0);
+    parsed_free(&pq);
+    CHECK(query_parse("p*t", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->wild && !pq.q->prefix);
+    parsed_free(&pq);
+    CHECK(query_parse("*", &pq, &e) != 0);
+    CHECK(query_parse("full NEAR/2 text", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->kind == Q_NEAR && pq.q->span == 2);
+    parsed_free(&pq);
+    CHECK(query_parse("full NEAR text", &pq, &e) == 0);
+    CHECK(pq.q && pq.q->kind == Q_NEAR && pq.q->span == 10);
     parsed_free(&pq);
     CHECK(query_parse("hello mtime:2026-10", &pq, &e) == 0);
     CHECK(pq.q && pq.q->kind == Q_TERM && pq.mtime_year == 2026 && pq.mtime_mon == 10);
@@ -1516,6 +1536,13 @@ static int test_corpus(const char *root) {
         free(outer_path);
     }
 
+    {
+        struct timespec when[2];
+        when[0].tv_sec = 1592222400;
+        when[0].tv_nsec = 0;
+        when[1] = when[0];
+        CHECK(utimensat(AT_FDCWD, a, when, 0) == 0);
+    }
     err_clear(&e);
     ix = index_open(idx, 1, &e);
     if (!ix) {
@@ -1975,6 +2002,32 @@ static int test_corpus(const char *root) {
     if (n > 0) {
         CHECK(h[0].score == 100);
     }
+    hits_free(h, n);
+
+    h = do_search(ix, "*able", NULL, &n);
+    expect_hit(h, n, "/a.txt", "suffix");
+    hits_free(h, n);
+    h = do_search(ix, "p*able", NULL, &n);
+    expect_hit(h, n, "/a.txt", "inner star");
+    hits_free(h, n);
+    h = do_search(ix, "full NEAR/1 text", NULL, &n);
+    expect_hit(h, n, "/a.txt", "near");
+    hits_free(h, n);
+    h = do_search(ix, "hello NEAR/1 stop", NULL, &n);
+    expect_miss(h, n, "/a.txt", "near far");
+    hits_free(h, n);
+    h = do_search(ix, "mtime:2020-06", NULL, &n);
+    expect_hit(h, n, "/a.txt", "month");
+    expect_miss(h, n, "/b.txt", "month");
+    hits_free(h, n);
+    h = do_search(ix, "mtime:2020", NULL, &n);
+    expect_hit(h, n, "/a.txt", "year");
+    hits_free(h, n);
+    h = do_search(ix, "mtime:2020-01..2020-12 portable", NULL, &n);
+    expect_hit(h, n, "/a.txt", "range");
+    hits_free(h, n);
+    h = do_search(ix, "mtime:2021 portable", NULL, &n);
+    expect_miss(h, n, "/a.txt", "other year");
     hits_free(h, n);
 
     h = do_search(ix, "ext:pdf groonga", NULL, &n);
@@ -4961,6 +5014,92 @@ done:
 #endif
 }
 
+static void test_catchup(void) {
+    char tmpl[] = "/tmp/grove-catch-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    char *docs = NULL;
+    char *idx = NULL;
+    char *a = NULL;
+    char *b = NULL;
+    char *c = NULL;
+    char *side = NULL;
+    char *chosen = NULL;
+    char *sib = NULL;
+    Index *ix = NULL;
+    Err e;
+    err_clear(&e);
+    if (!root) {
+        perror("mkdtemp");
+        fails++;
+        return;
+    }
+    docs = path_join(root, "docs");
+    idx = path_join(root, "idx");
+    a = path_join(docs, "a.txt");
+    b = path_join(docs, "b.txt");
+    c = path_join(docs, "c.txt");
+    side = path_join(root, "side");
+    chosen = path_join(side, "chosen.txt");
+    sib = path_join(side, "sibling.txt");
+    if (!docs || !idx || !a || !b || !c || !side || !chosen || !sib || mkdir(docs, 0755) != 0 || mkdir(side, 0755) != 0 ||
+        write_file(a, "alpha needle\n", 12) != 0 || write_file(b, "beta needle\n", 11) != 0 ||
+        write_file(chosen, "chosen needle\n", 14) != 0 || write_file(sib, "sibling needle\n", 15) != 0) {
+        fprintf(stderr, "catchup setup failed\n");
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    IndexStats st;
+    memset(&st, 0, sizeof st);
+    if (!ix || index_add(ix, docs, &st, &e) != 0 || index_add(ix, chosen, &st, &e) != 0) {
+        fprintf(stderr, "catchup index: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    index_close(ix);
+    ix = NULL;
+    if (write_file(a, "alpha changedneedle\n", 19) != 0 || unlink(b) != 0 || write_file(c, "gamma newfile\n", 14) != 0 ||
+        write_file(chosen, "chosen changedneedle\n", 21) != 0) {
+        fprintf(stderr, "catchup rewrite failed\n");
+        fails++;
+        goto done;
+    }
+    ix = index_open(idx, 1, &e);
+    memset(&st, 0, sizeof st);
+    if (!ix || index_catchup(ix, &st, &e) != 0) {
+        fprintf(stderr, "catchup: %s\n", e.msg);
+        fails++;
+        goto done;
+    }
+    int n = 0;
+    Hit *h = do_search(ix, "changedneedle", NULL, &n);
+    expect_hit(h, n, "/a.txt", "catchup edit");
+    expect_hit(h, n, "/chosen.txt", "catchup chosen");
+    hits_free(h, n);
+    h = do_search(ix, "newfile", NULL, &n);
+    expect_hit(h, n, "/c.txt", "catchup new");
+    hits_free(h, n);
+    h = do_search(ix, "beta", NULL, &n);
+    expect_miss(h, n, "/b.txt", "catchup gone");
+    hits_free(h, n);
+    h = do_search(ix, "sibling", NULL, &n);
+    expect_miss(h, n, "/sibling.txt", "catchup sibling");
+    hits_free(h, n);
+done:
+    index_close(ix);
+    free(docs);
+    free(idx);
+    free(a);
+    free(b);
+    free(c);
+    free(side);
+    free(chosen);
+    free(sib);
+    if (root) {
+        rm_rf(root);
+    }
+}
+
 int main(void) {
     test_bounds();
     test_cert();
@@ -4981,6 +5120,7 @@ int main(void) {
     test_alias_root();
     test_narrow();
     test_alerts();
+    test_catchup();
     test_reader();
     test_pages();
     char tmpl[] = "/tmp/grove-test-XXXXXX";

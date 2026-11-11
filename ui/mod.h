@@ -22,8 +22,9 @@ int grove_ui_attach(const GroveUi *ui);
 void grove_ui_detach(void);
 
 /* Background work stays in the host, so a rebuilt module can unload while
- * an import is still reading files. kind 0 is idle, 1 prepares the shelf
- * list, 2 adds a folder or a file, 3 fetches one web page. */
+ * an import is still reading files. kind 0 is idle, 1 catches the library
+ * up with the disk and prepares the shelf, 2 adds a folder or a file,
+ * 3 fetches one web page. */
 typedef struct GroveJob {
     int running;
     int kind;

@@ -26,7 +26,7 @@ void tokens_free(Tokens *t);
 void tokens_clear(Tokens *t);
 int tokenize(Tokens *t, const char *s, size_t n);
 
-typedef enum QKind { Q_TERM, Q_PHRASE, Q_NOT, Q_AND, Q_OR } QKind;
+typedef enum QKind { Q_TERM, Q_PHRASE, Q_NOT, Q_AND, Q_OR, Q_NEAR } QKind;
 
 typedef struct SearchModes {
     int stem;
@@ -39,6 +39,8 @@ typedef struct Query {
     char *text;
     size_t len;
     int prefix;
+    int wild;  /* 1 when * is not only a trailing prefix */
+    int span;  /* NEAR distance. 0 means the default, ten tokens. */
     int kin;   /* 1 when this word was added only as a related concept */
     int fuzzy; /* 1 when the query wrote word~ */
     struct Query *a;
@@ -52,9 +54,12 @@ typedef struct ParsedQuery {
     char *ext;
     char *path_sub;
     char *title_sub;
-    /* mtime_year is 0 when the query has no month. Otherwise both are set. */
+    /* mtime_year is 0 when the query has no date. mtime_mon is 0 for a whole
+     * year. mtime_end_year is 0 for a single month or year, and set for a range. */
     int mtime_year;
     int mtime_mon;
+    int mtime_end_year;
+    int mtime_end_mon;
     /* Record filters. Several values of one kind are OR. The kinds combine.
      * Author is the creator, form the type, period the coverage, genre the subject. */
     char **language;
@@ -74,6 +79,10 @@ void parsed_free(ParsedQuery *p);
 /* Rewrites terms in place. NULL modes leaves the tree unchanged, except word~.
  * Phrases and prefix terms stay as written. Returns -1 on allocation failure. */
 int query_expand(Query **q, const SearchModes *modes);
+/* Replaces each wildcard term. fn lists the indexed words for one pattern.
+ * An empty list matches nothing. Returns -1 on failure. */
+typedef int (*QueryWildFn)(const char *pat, size_t n, char ***terms, int *nt, void *ctx, Err *e);
+int query_expand_wild(Query **q, QueryWildFn fn, void *ctx, Err *e);
 
 typedef struct QTerm {
     char *s;

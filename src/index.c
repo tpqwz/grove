@@ -1004,6 +1004,163 @@ int index_reindex(Index *ix, IndexStats *st, Err *e) {
     return rc;
 }
 
+static int delete_rel(Index *ix, int64_t root, const char *rel, IndexStats *st, Err *e) {
+    sqlite3_stmt *stq = NULL;
+    int64_t id = 0;
+    int step;
+    if (prep(ix, &stq, "SELECT docid FROM docs WHERE root_id=? AND rel=?", e) != 0) {
+        return -1;
+    }
+    sqlite3_bind_int64(stq, 1, root);
+    sqlite3_bind_text(stq, 2, rel ? rel : "", -1, SQLITE_TRANSIENT);
+    step = sqlite3_step(stq);
+    if (step == SQLITE_ROW) {
+        id = sqlite3_column_int64(stq, 0);
+    }
+    sqlite3_finalize(stq);
+    if (step == SQLITE_DONE) {
+        return 0;
+    }
+    if (step != SQLITE_ROW) {
+        return db_fail(ix, e, "index");
+    }
+    if (delete_doc(ix, id, e) != 0) {
+        return -1;
+    }
+    if (st) {
+        st->removed++;
+    }
+    return 0;
+}
+
+/* Chosen files share a parent that was not indexed as a directory. Re-stat
+ * those files only, so a sibling that was never added stays out. */
+static int refresh_known(Index *ix, int64_t root_id, const char *root, IndexStats *st, Err *e) {
+    sqlite3_stmt *stq = NULL;
+    char **rels = NULL;
+    int n = 0;
+    int cap = 0;
+    int step;
+    int rc = 0;
+    if (tx_begin(ix, e) != 0) {
+        return -1;
+    }
+    if (prep(ix, &stq, "SELECT rel FROM docs WHERE root_id=?", e) != 0) {
+        tx_rollback(ix);
+        return -1;
+    }
+    sqlite3_bind_int64(stq, 1, root_id);
+    while ((step = sqlite3_step(stq)) == SQLITE_ROW) {
+        const char *rel = (const char *)sqlite3_column_text(stq, 0);
+        char *copy = xstrdup(rel ? rel : "");
+        int grew = n < cap;
+        if (copy && !grew) {
+            grew = cap_grow(cap, 16, &cap) == 0 && grow_alloc((void **)&rels, (size_t)cap, sizeof *rels) == 0;
+        }
+        if (!copy || !grew) {
+            free(copy);
+            sqlite3_finalize(stq);
+            for (int i = 0; i < n; i++) {
+                free(rels[i]);
+            }
+            free(rels);
+            tx_rollback(ix);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        rels[n++] = copy;
+    }
+    sqlite3_finalize(stq);
+    if (step != SQLITE_DONE) {
+        for (int i = 0; i < n; i++) {
+            free(rels[i]);
+        }
+        free(rels);
+        tx_rollback(ix);
+        return db_fail(ix, e, "index");
+    }
+    for (int i = 0; rc == 0 && i < n; i++) {
+        char *abs = path_join(root, rels[i]);
+        struct stat stt;
+        if (!abs || stat(abs, &stt) != 0 || !S_ISREG(stt.st_mode)) {
+            free(abs);
+            rc = delete_rel(ix, root_id, rels[i], st, e);
+        } else {
+            rc = consider_file(ix, root_id, rels[i], abs, NULL, st, e);
+            free(abs);
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        free(rels[i]);
+    }
+    free(rels);
+    if (rc == 0) {
+        rc = tx_commit(ix, e);
+    }
+    if (rc != 0) {
+        tx_rollback(ix);
+    }
+    return rc;
+}
+
+int index_catchup(Index *ix, IndexStats *st, Err *e) {
+    char **copy;
+    uint8_t *full;
+    uint32_t n;
+    int rc = 0;
+    if (!ix->writable) {
+        err_set(e, "index is open read-only");
+        return -1;
+    }
+    if (ix->nroots == 0) {
+        return 0;
+    }
+    n = ix->nroots;
+    copy = calloc(n, sizeof(char *));
+    full = malloc(n);
+    if (!copy || !full) {
+        free(copy);
+        free(full);
+        err_set(e, "out of memory");
+        return -1;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        copy[i] = xstrdup(ix->roots[i]);
+        full[i] = ix->root_full[i];
+        if (!copy[i]) {
+            rc = -1;
+            err_set(e, "out of memory");
+        }
+    }
+    for (uint32_t i = 0; rc == 0 && i < n; i++) {
+        int64_t id;
+        if (access(copy[i], F_OK) != 0) {
+            continue;
+        }
+        if (full[i]) {
+            rc = index_add(ix, copy[i], st, e);
+            continue;
+        }
+        id = 0;
+        for (uint32_t r = 0; r < ix->nroots; r++) {
+            if (ix->roots[r] && strcmp(ix->roots[r], copy[i]) == 0) {
+                id = ix->root_ids[r];
+                break;
+            }
+        }
+        if (id == 0) {
+            continue;
+        }
+        rc = refresh_known(ix, id, copy[i], st, e);
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        free(copy[i]);
+    }
+    free(copy);
+    free(full);
+    return rc;
+}
+
 int index_rebind(Index *ix, const char *from, const char *to, Err *e) {
     if (!ix->writable) {
         err_set(e, "index is open read-only");
@@ -1251,6 +1408,26 @@ static MExpr emit_query(const Query *q) {
             inner.kind = MX_POS;
         }
         return inner;
+    }
+    if (q->kind == Q_NEAR) {
+        MExpr L = emit_query(q->a);
+        MExpr R = emit_query(q->b);
+        if (L.kind != MX_POS || R.kind != MX_POS || !L.sql || !R.sql) {
+            mx_free(&L);
+            mx_free(&R);
+            return (MExpr){MX_ERR, NULL};
+        }
+        char op[16];
+        int wrote = snprintf(op, sizeof op, "NEAR/%d", q->span);
+        if (wrote < 0 || (size_t)wrote >= sizeof op) {
+            mx_free(&L);
+            mx_free(&R);
+            return (MExpr){MX_ERR, NULL};
+        }
+        char *sql = mx_wrap(L.sql, op, R.sql);
+        mx_free(&L);
+        mx_free(&R);
+        return mx_make(MX_POS, sql);
     }
     MExpr L = emit_query(q->a);
     MExpr R = emit_query(q->b);
@@ -1585,13 +1762,34 @@ void facets_free(Facets *f) {
     memset(f, 0, sizeof *f);
 }
 
-static int same_month(int64_t sec, int year, int mon) {
-    time_t t = (time_t)sec;
+static int month_ord(int year, int mon) {
+    return year * 12 + mon;
+}
+
+static int in_mtime(int64_t sec, const ParsedQuery *pq) {
+    time_t t;
     struct tm tm;
+    int cur;
+    int start;
+    int end;
+    if (!pq->mtime_year) {
+        return 1;
+    }
+    t = (time_t)sec;
     if (!grove_localtime(&t, &tm)) {
         return 0;
     }
-    return tm.tm_year + 1900 == year && tm.tm_mon + 1 == mon;
+    cur = month_ord(tm.tm_year + 1900, tm.tm_mon + 1);
+    if (pq->mtime_end_year) {
+        start = month_ord(pq->mtime_year, pq->mtime_mon ? pq->mtime_mon : 1);
+        end = month_ord(pq->mtime_end_year, pq->mtime_end_mon ? pq->mtime_end_mon : 12);
+    } else if (pq->mtime_mon) {
+        start = end = month_ord(pq->mtime_year, pq->mtime_mon);
+    } else {
+        start = month_ord(pq->mtime_year, 1);
+        end = month_ord(pq->mtime_year, 12);
+    }
+    return cur >= start && cur <= end;
 }
 
 static char *month_key(int64_t sec) {
@@ -1619,7 +1817,7 @@ static int doc_passes(const char *rel, const char *title, const char *ext, int64
         !fold_contains(title ? title : "", title ? strlen(title) : 0, pq->title_sub, strlen(pq->title_sub))) {
         return 0;
     }
-    if (pq->mtime_year && !same_month(mtime, pq->mtime_year, pq->mtime_mon)) {
+    if (!in_mtime(mtime, pq)) {
         return 0;
     }
     return 1;
@@ -2233,7 +2431,7 @@ static int collect_query(Index *ix, const Query *q, Scored **out, int *nout, Err
     if (!q) {
         return 0;
     }
-    if (q->kind == Q_TERM || q->kind == Q_PHRASE) {
+    if (q->kind == Q_TERM || q->kind == Q_PHRASE || q->kind == Q_NEAR) {
         MExpr mx = emit_query(q);
         if (mx.kind != MX_POS) {
             mx_free(&mx);
@@ -2333,14 +2531,110 @@ static int run_finish(Index *ix, Cand *cands, int nc, const ParsedQuery *pq, int
 /* Every candidate for a parsed query, before the limit trim and before bodies
  * are read. *match is the positive MATCH text when ranking used one, and it
  * points into *mx. */
-static int gather_cands(Index *ix, const ParsedQuery *pq, Cand **cands, int *nc, const char **match, MExpr *mx,
-                        Err *e) {
+static int like_pat(const char *pat, size_t n, char **out) {
+    Buf b;
+    buf_init(&b);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)pat[i];
+        if (c == '*') {
+            if (buf_putc(&b, '%') != 0) {
+                buf_free(&b);
+                return -1;
+            }
+            continue;
+        }
+        if (c == '%' || c == '_' || c == '\\') {
+            if (buf_putc(&b, '\\') != 0) {
+                buf_free(&b);
+                return -1;
+            }
+        }
+        if (buf_putc(&b, c) != 0) {
+            buf_free(&b);
+            return -1;
+        }
+    }
+    if (!b.data && buf_putc(&b, 0) != 0) {
+        buf_free(&b);
+        return -1;
+    }
+    *out = b.data ? b.data : xstrdup("");
+    return *out ? 0 : -1;
+}
+
+static int wild_lookup(const char *pat, size_t n, char ***terms, int *nt, void *ctx, Err *e) {
+    Index *ix = ctx;
+    char *like = NULL;
+    sqlite3_stmt *st = NULL;
+    char **arr = NULL;
+    int count = 0;
+    int cap = 0;
+    int rc;
+    *terms = NULL;
+    *nt = 0;
+    if (like_pat(pat, n, &like) != 0) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    if (sqlite3_prepare_v2(ix->db,
+                           "SELECT DISTINCT term FROM grove_fts_terms WHERE term LIKE ? ESCAPE '\\' LIMIT 49", -1, &st,
+                           NULL) != SQLITE_OK) {
+        free(like);
+        return db_fail(ix, e, "search");
+    }
+    sqlite3_bind_text(st, 1, like, -1, SQLITE_TRANSIENT);
+    free(like);
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *term = (const char *)sqlite3_column_text(st, 0);
+        char *copy;
+        if (!term || !term[0]) {
+            continue;
+        }
+        if (count == 48) {
+            sqlite3_finalize(st);
+            for (int i = 0; i < count; i++) {
+                free(arr[i]);
+            }
+            free(arr);
+            err_set(e, "wildcard matches too many words");
+            return -1;
+        }
+        copy = xstrdup(term);
+        if (!copy || (count == cap && (cap_grow(cap, 8, &cap) != 0 || grow_alloc((void **)&arr, (size_t)cap, sizeof *arr) != 0))) {
+            free(copy);
+            sqlite3_finalize(st);
+            for (int i = 0; i < count; i++) {
+                free(arr[i]);
+            }
+            free(arr);
+            err_set(e, "out of memory");
+            return -1;
+        }
+        arr[count++] = copy;
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        for (int i = 0; i < count; i++) {
+            free(arr[i]);
+        }
+        free(arr);
+        return db_fail(ix, e, "search");
+    }
+    *terms = arr;
+    *nt = count;
+    return 0;
+}
+
+static int gather_cands(Index *ix, ParsedQuery *pq, Cand **cands, int *nc, const char **match, MExpr *mx, Err *e) {
     *cands = NULL;
     *nc = 0;
     *match = NULL;
     mx->kind = MX_ERR;
     mx->sql = NULL;
     int rc = 0;
+    if (query_expand_wild(&pq->q, wild_lookup, ix, e) != 0) {
+        return -1;
+    }
     if (!pq->q) {
         rc = query_rows(ix, pq->ext ? ALL_EXT_SQL : ALL_SQL, NULL, pq->ext, 0, 1, cands, nc, e);
     } else {
@@ -3031,14 +3325,17 @@ static int ensure_schema(Index *ix, Err *e) {
         if (sql_exec(ix, SCHEMA, e) != 0) {
             return -1;
         }
-        return 0;
-    }
+    } else {
     int rc = sqlite3_step(st);
     const char *fmt = rc == SQLITE_ROW ? (const char *)sqlite3_column_text(st, 0) : NULL;
     int ok = fmt && strcmp(fmt, "fts4") == 0;
     sqlite3_finalize(st);
     if (rc != SQLITE_ROW || !ok) {
         err_set(e, "unrecognized index in %s", ix->dir);
+        return -1;
+    }
+    }
+    if (ix->writable && sql_exec(ix, "CREATE VIRTUAL TABLE IF NOT EXISTS grove_fts_terms USING fts4aux(fts)", e) != 0) {
         return -1;
     }
     return 0;

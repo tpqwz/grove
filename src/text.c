@@ -611,13 +611,13 @@ static int expand_node(Query **qp, const SearchModes *modes) {
     if (!q) {
         return 0;
     }
-    if (q->kind == Q_AND || q->kind == Q_OR || q->kind == Q_NOT) {
+    if (q->kind == Q_AND || q->kind == Q_OR || q->kind == Q_NOT || q->kind == Q_NEAR) {
         if (expand_node(&q->a, modes) != 0) {
             return -1;
         }
         return expand_node(&q->b, modes);
     }
-    if (q->kind != Q_TERM || q->prefix) {
+    if (q->kind != Q_TERM || q->prefix || q->wild) {
         return 0;
     }
     SearchModes off;
@@ -650,6 +650,88 @@ int query_expand(Query **q, const SearchModes *modes) {
         return 0;
     }
     return expand_node(q, modes);
+}
+
+static Query *q_near(Query *a, Query *b, int span) {
+    Query *q = q_new(Q_NEAR);
+    if (!q) {
+        query_free(a);
+        query_free(b);
+        return NULL;
+    }
+    q->a = a;
+    q->b = b;
+    q->span = span;
+    return q;
+}
+
+static Query *or_terms(char **terms, int n) {
+    Query *acc = NULL;
+    if (n <= 0) {
+        char *s = xstrdup("zzznomatch");
+        return s ? q_term_owned(s, strlen(s), 0) : NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        char *s = xstrdup(terms[i] ? terms[i] : "");
+        Query *t = s ? q_term_owned(s, strlen(s), 0) : NULL;
+        if (!t) {
+            query_free(acc);
+            return NULL;
+        }
+        acc = q_or(acc, t);
+        if (!acc) {
+            return NULL;
+        }
+    }
+    return acc;
+}
+
+static int wild_walk(Query **qp, QueryWildFn fn, void *ctx, Err *e) {
+    Query *q = qp ? *qp : NULL;
+    if (!q) {
+        return 0;
+    }
+    if (q->kind == Q_AND || q->kind == Q_OR || q->kind == Q_NOT || q->kind == Q_NEAR) {
+        if (wild_walk(&q->a, fn, ctx, e) != 0) {
+            return -1;
+        }
+        return wild_walk(&q->b, fn, ctx, e);
+    }
+    if (q->kind == Q_PHRASE) {
+        for (int i = 0; i < q->nkids; i++) {
+            if (wild_walk(&q->kids[i], fn, ctx, e) != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (q->kind != Q_TERM || !q->wild) {
+        return 0;
+    }
+    char **terms = NULL;
+    int nt = 0;
+    if (fn(q->text ? q->text : "", q->len, &terms, &nt, ctx, e) != 0) {
+        return -1;
+    }
+    Query *rep = or_terms(terms, nt);
+    for (int i = 0; i < nt; i++) {
+        free(terms[i]);
+    }
+    free(terms);
+    if (!rep) {
+        err_set(e, "out of memory");
+        return -1;
+    }
+    query_free(q);
+    *qp = rep;
+    return 0;
+}
+
+int query_expand_wild(Query **q, QueryWildFn fn, void *ctx, Err *e) {
+    if (!q || !fn) {
+        return 0;
+    }
+    return wild_walk(q, fn, ctx, e);
 }
 
 typedef struct Cur {
@@ -750,6 +832,83 @@ static int sel_push(char ***arr, int *n, char *owned) {
     }
     *arr = grown;
     (*arr)[(*n)++] = owned;
+    return 0;
+}
+
+static int digits_span(const char *s, size_t n, int *out) {
+    int v = 0;
+    if (n == 0 || n > 6) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') {
+            return 0;
+        }
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
+    return 1;
+}
+
+/* YYYY, YYYY-MM, YYYY..YYYY, or YYYY-MM..YYYY-MM. mon is 0 for a whole year. */
+static int parse_mtime(const char *s, size_t n, int *year, int *mon, int *year2, int *mon2) {
+    const char *sep = NULL;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (s[i] == '.' && s[i + 1] == '.') {
+            sep = s + i;
+            break;
+        }
+    }
+    const char *left = s;
+    size_t ln = sep ? (size_t)(sep - s) : n;
+    const char *right = sep ? sep + 2 : NULL;
+    size_t rn = sep ? n - ln - 2 : 0;
+    int y1 = 0;
+    int m1 = 0;
+    int y2 = 0;
+    int m2 = 0;
+    if (ln == 4) {
+        if (!digits_span(left, 4, &y1) || y1 < 1) {
+            return 0;
+        }
+        m1 = 0;
+    } else if (ln == 7 && left[4] == '-') {
+        if (!digits_span(left, 4, &y1) || !digits_span(left + 5, 2, &m1) || y1 < 1 || m1 < 1 || m1 > 12) {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    if (!sep) {
+        *year = y1;
+        *mon = m1;
+        *year2 = 0;
+        *mon2 = 0;
+        return 1;
+    }
+    if (rn == 4 && m1 == 0) {
+        if (!digits_span(right, 4, &y2) || y2 < 1 || y2 < y1) {
+            return 0;
+        }
+        *year = y1;
+        *mon = 1;
+        *year2 = y2;
+        *mon2 = 12;
+        return 1;
+    }
+    if (rn == 7 && right[4] == '-' && m1 != 0) {
+        if (!digits_span(right, 4, &y2) || !digits_span(right + 5, 2, &m2) || y2 < 1 || m2 < 1 || m2 > 12) {
+            return 0;
+        }
+        if (y2 * 12 + m2 < y1 * 12 + m1) {
+            return 0;
+        }
+        *year = y1;
+        *mon = m1;
+        *year2 = y2;
+        *mon2 = m2;
+        return 1;
+    }
     return 0;
 }
 
@@ -880,34 +1039,80 @@ static int take_filter(Cur *c, ParsedQuery *out) {
     } else {
         int year = 0;
         int mon = 0;
-        int ok = 0;
-        if (vn == 7 && val[4] == '-') {
-            ok = 1;
-            for (int i = 0; i < 7; i++) {
-                if (i == 4) {
-                    continue;
-                }
-                if (val[i] < '0' || val[i] > '9') {
-                    ok = 0;
-                    break;
-                }
-                if (i < 4) {
-                    year = year * 10 + (val[i] - '0');
-                } else {
-                    mon = mon * 10 + (val[i] - '0');
-                }
-            }
-        }
+        int year2 = 0;
+        int mon2 = 0;
+        int ok = parse_mtime(val, vn, &year, &mon, &year2, &mon2);
         free(val);
-        if (!ok || year < 1 || mon < 1 || mon > 12) {
-            err_set(c->e, "mtime: wants a month, like 2026-10");
+        if (!ok) {
+            err_set(c->e, "mtime: wants a month or a range, like 2026-10 or 2026-01..2026-06");
             return -1;
         }
         out->mtime_year = year;
         out->mtime_mon = mon;
+        out->mtime_end_year = year2;
+        out->mtime_end_mon = mon2;
     }
     (void)vn;
     return 1;
+}
+
+static int buf_cp(Buf *b, uint32_t cp) {
+    unsigned char u[4];
+    size_t n = 0;
+    if (cp < 0x80) {
+        u[0] = (unsigned char)cp;
+        n = 1;
+    } else if (cp < 0x800) {
+        u[0] = (unsigned char)(0xC0 | (cp >> 6));
+        u[1] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 2;
+    } else if (cp < 0x10000) {
+        u[0] = (unsigned char)(0xE0 | (cp >> 12));
+        u[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        u[2] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 3;
+    } else if (cp <= 0x10FFFF) {
+        u[0] = (unsigned char)(0xF0 | (cp >> 18));
+        u[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+        u[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        u[3] = (unsigned char)(0x80 | (cp & 0x3F));
+        n = 4;
+    } else {
+        return -1;
+    }
+    return buf_append(b, u, n);
+}
+
+static char *fold_wild(const char *s, size_t n, size_t *outn) {
+    Buf b;
+    buf_init(&b);
+    size_t i = 0;
+    int any = 0;
+    while (i < n) {
+        if (s[i] == '*') {
+            if (buf_putc(&b, '*') != 0) {
+                buf_free(&b);
+                return NULL;
+            }
+            i++;
+            continue;
+        }
+        uint32_t cp = 0;
+        if (!utf8_next(s, n, &i, &cp)) {
+            break;
+        }
+        any = 1;
+        if (buf_cp(&b, casefold_cp(cp)) != 0) {
+            buf_free(&b);
+            return NULL;
+        }
+    }
+    if (!any || !b.data) {
+        buf_free(&b);
+        return NULL;
+    }
+    *outn = b.len;
+    return b.data;
 }
 
 static Query *parse_primary(Cur *c, ParsedQuery *pq) {
@@ -959,16 +1164,47 @@ static Query *parse_primary(Cur *c, ParsedQuery *pq) {
     size_t e = c->i;
     int prefix = 0;
     int fuzzy = 0;
-    if (e > b && c->s[e - 1] == '*') {
-        prefix = 1;
-        e--;
-    } else if (e > b && c->s[e - 1] == '~') {
+    int wild = 0;
+    int stars = 0;
+    int nons = 0;
+    for (size_t k = b; k < e; k++) {
+        if (c->s[k] == '*') {
+            stars++;
+        } else {
+            nons++;
+        }
+    }
+    if (stars == 0 && e > b && c->s[e - 1] == '~') {
         fuzzy = 1;
         e--;
+    } else if (stars == 1 && e > b && c->s[e - 1] == '*' && nons > 0) {
+        prefix = 1;
+        e--;
+    } else if (stars > 0) {
+        if (nons == 0) {
+            err_set(c->e, "wildcard needs a letter");
+            return NULL;
+        }
+        wild = 1;
     }
     if (e == b) {
         err_set(c->e, "empty search term");
         return NULL;
+    }
+    if (wild) {
+        size_t fn = 0;
+        char *folded = fold_wild(c->s + b, e - b, &fn);
+        if (!folded) {
+            err_set(c->e, "wildcard needs a letter");
+            return NULL;
+        }
+        Query *term = q_term_owned(folded, fn, 0);
+        if (!term) {
+            err_set(c->e, "out of memory");
+            return NULL;
+        }
+        term->wild = 1;
+        return term;
     }
     Query *term = atom_from_raw(c->s + b, e - b, prefix);
     if (term && term->kind == Q_TERM) {
@@ -1020,6 +1256,38 @@ static Query *parse_unary(Cur *c, ParsedQuery *pq) {
     return n;
 }
 
+static int take_near(Cur *c, int *dist) {
+    size_t save = c->i;
+    skip_ws(c);
+    if (!keyword(c, "NEAR")) {
+        c->i = save;
+        return 0;
+    }
+    int d = 10;
+    if (c->i < c->n && c->s[c->i] == '/') {
+        c->i++;
+        if (c->i >= c->n || c->s[c->i] < '0' || c->s[c->i] > '9') {
+            err_set(c->e, "NEAR wants a distance");
+            return -1;
+        }
+        d = 0;
+        while (c->i < c->n && c->s[c->i] >= '0' && c->s[c->i] <= '9') {
+            if (d > 100) {
+                err_set(c->e, "NEAR wants a distance");
+                return -1;
+            }
+            d = d * 10 + (c->s[c->i] - '0');
+            c->i++;
+        }
+        if (d > 100) {
+            err_set(c->e, "NEAR wants a distance");
+            return -1;
+        }
+    }
+    *dist = d;
+    return 1;
+}
+
 static int at_or(Cur *c) {
     size_t save = c->i;
     skip_ws(c);
@@ -1049,6 +1317,33 @@ static Query *parse_and(Cur *c, ParsedQuery *pq) {
                 break;
             }
             continue;
+        }
+        for (;;) {
+            int dist = 10;
+            int nr = take_near(c, &dist);
+            if (nr < 0) {
+                query_free(acc);
+                query_free(u);
+                return NULL;
+            }
+            if (!nr) {
+                break;
+            }
+            Query *rhs = parse_unary(c, pq);
+            if (!rhs) {
+                query_free(acc);
+                query_free(u);
+                if (!c->e->msg[0]) {
+                    err_set(c->e, "NEAR is missing a term");
+                }
+                return NULL;
+            }
+            u = q_near(u, rhs, dist);
+            if (!u) {
+                query_free(acc);
+                err_set(c->e, "out of memory");
+                return NULL;
+            }
         }
         acc = q_and(acc, u);
         if (!acc) {

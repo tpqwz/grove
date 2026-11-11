@@ -106,6 +106,9 @@ void index_set_force(Index *ix, int force);
 
 int index_add(Index *ix, const char *path, IndexStats *st, Err *e);
 int index_reindex(Index *ix, IndexStats *st, Err *e);
+/* Stat every full root, and every file that was added on its own.
+ * A root that is not present is left alone. No roots is success. */
+int index_catchup(Index *ix, IndexStats *st, Err *e);
 int index_rebind(Index *ix, const char *from, const char *to, Err *e);
 int index_purge(Index *ix, IndexStats *st, Err *e);
 int index_compact(Index *ix, Err *e);

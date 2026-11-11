@@ -564,7 +564,10 @@ static void *job_main(void *arg) {
         } else if (a->path) {
             rc = index_add(w, a->path, &st, &e);
         } else {
-            rc = index_shelf_build(w, &e);
+            rc = index_catchup(w, &st, &e);
+            if (rc == 0) {
+                rc = index_shelf_build(w, &e);
+            }
         }
         index_close(w);
     }

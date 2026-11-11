@@ -2618,6 +2618,20 @@ static void on_pick(webui_event_t *e) {
     reply_owned(e, pick_json(e->window, kind));
 }
 
+static void on_catchup(webui_event_t *e) {
+    if (grove_host_prepare(index_dir) != 0) {
+        GroveJob job;
+        grove_host_job(&job);
+        if (job.running) {
+            reply(e, "{\"started\":false,\"running\":true}");
+            return;
+        }
+        reply_owned(e, json_error(job.error[0] ? job.error : "could not check the library"));
+        return;
+    }
+    reply(e, "{\"started\":true}");
+}
+
 static void on_shelf(webui_event_t *e) {
     int ready = 0;
     pthread_mutex_lock(&mu);
@@ -2681,6 +2695,7 @@ GUARD(on_add)
 GUARD(on_fetch)
 GUARD(on_job)
 GUARD(on_pick)
+GUARD(on_catchup)
 GUARD(on_shelf)
 
 void grove_ui_detach(void) {
@@ -2744,6 +2759,7 @@ int grove_ui_attach(const GroveUi *ui) {
     webui_bind(win, "grove_fetch", on_fetch_guard);
     webui_bind(win, "grove_job", on_job_guard);
     webui_bind(win, "grove_pick", on_pick_guard);
+    webui_bind(win, "grove_catchup", on_catchup_guard);
     webui_bind(win, "grove_shelf", on_shelf_guard);
     const char *page = live_name ? live_name : page_html;
     /* WebUI's own window (WebView2, WebKit, or WKWebView). On Windows
